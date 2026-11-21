@@ -1,0 +1,40 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk Venezia.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Venezia-apk
+          path: Venezia.apk
+
+      - name: Publish "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest Venezia.apk --title "Venezia – build ${{ github.run_number }}" --notes "Automatic build of ${{ github.sha }}. Download Venezia.apk and install it on your phone." --latest
