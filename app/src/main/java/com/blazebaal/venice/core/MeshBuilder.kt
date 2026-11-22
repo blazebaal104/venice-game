@@ -102,3 +102,25 @@ class MeshBuilder(initial: Int = 4096) {
 data class Vec3(val x: Float, val y: Float, val z: Float) {
     fun norm(): Vec3 { val l = sqrt(x * x + y * y + z * z).coerceAtLeast(1e-9f); return Vec3(x / l, y / l, z / l) }
 }
+
+/** Facade vertices (16 floats): position, normal, uv (u along the wall, z), attr (bay centre u, seed, kind, bay width),
+ *  style (ground floor height, floor height, packed opening code, packed size code). */
+const val FSTRIDE = 16
+
+class FacadeBuilder(initial: Int = 4096) {
+    var data = FloatArray(initial * FSTRIDE)
+    var count = 0
+        private set
+    fun clear() { count = 0 }
+    fun floats() = data.copyOf(count * FSTRIDE)
+    var s0 = 0f; var s1 = 0f; var s2 = 0f; var s3 = 0f
+    fun style(a: Float, b: Float, c: Float, d: Float) { s0 = a; s1 = b; s2 = c; s3 = d }
+    fun v(px: Float, py: Float, pz: Float, nx: Float, ny: Float, nz: Float, u: Float, w: Float, a: Float, b: Float, c: Float, d: Float) {
+        if ((count + 1) * FSTRIDE > data.size) data = data.copyOf(data.size * 2)
+        var o = count * FSTRIDE
+        data[o++] = px; data[o++] = py; data[o++] = pz; data[o++] = nx; data[o++] = ny; data[o++] = nz
+        data[o++] = u; data[o++] = w; data[o++] = a; data[o++] = b; data[o++] = c; data[o++] = d
+        data[o++] = s0; data[o++] = s1; data[o++] = s2; data[o] = s3
+        count++
+    }
+}

@@ -4,6 +4,7 @@ package com.blazebaal.venice.core
 import kotlin.math.*
 
 class WorldMap(val map: MapData) {
+    init { Places.init(map.lat0, map.lon0) }
     private val tiles = HashMap<Int, TileData?>()
     private val lock = Any()
 

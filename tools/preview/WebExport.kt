@@ -21,12 +21,24 @@ fun main(args: Array<String>) {
     val assets = File(args[7])
     val world = WorldMap(map)
     // drive the boat with the real physics
-    val boat = Boat(sx, sy, heading); val fx = Effects(); val wsim = WakeSim()
-    boat.wakeHeight = { x, y -> wsim.height(x, y) }
+    val boat = Boat(sx, sy, heading); val fx = Effects(); val drv = WakeDriver()
     val dt = 1f / 60f
     var t = 0f
-    while (t < simSeconds) { for (k in 0 until 3) boat.update(dt / 3, 1f, steer, world); fx.update(dt, boat, 1f); wsim.update(dt, boat, 1f, world); t += dt }
+    val steps = ArrayList<Float>()
+    while (t < simSeconds) {
+        for (k in 0 until 3) boat.update(dt / 3, 1f, steer, world); fx.update(dt, boat, 1f)
+        drv.prepare(boat, 1f, dt)
+        steps.addAll(drv.b0.toList()); steps.addAll(drv.b0b.toList()); steps.add(drv.nSplat.toFloat()); steps.addAll(drv.splats.toList())
+        t += dt
+    }
+    writeF(File(out, "steps.bin"), steps.toFloatArray())
     val cx = boat.x; val cy = boat.y
+    // wake window for the preview's GPU simulation: 256 m, most of it behind the boat (like the game)
+    val wn = 512; val wcell = 0.5f
+    val wox = floor((boat.x - drv.dirX * 70f - wn * wcell / 2) / wcell) * wcell; val woy = floor((boat.y - drv.dirY * 70f - wn * wcell / 2) / wcell) * wcell
+    val solid = ByteArray(wn * wn) { k -> if (world.solid(wox + (k % wn + 0.5f) * wcell, woy + (k / wn + 0.5f) * wcell) > 0.5f) -1 else 0 }
+    File(out, "solid.bin").writeBytes(solid)
+    File(out, "water_n.bin").writeBytes(WaterNormalData.make(256))
     val mesher = CityMesher()
     val sb = StringBuilder("{\"tiles\":[")
     var first = true
@@ -37,7 +49,7 @@ fun main(args: Array<String>) {
         val tile = map.load(tx, ty) ?: continue
         val m = mesher.build(tile)
         val id = "${tx}_$ty"
-        writeF(File(out, "f_$id.bin"), m.facade); writeF(File(out, "g_$id.bin"), m.generic)
+        writeF(File(out, "f_$id.bin"), m.facade); writeF(File(out, "g_$id.bin"), m.generic); writeF(File(out, "d_$id.bin"), m.detail)
         if (tile.hard != null) {
             val rg = ByteArray(MASK_N * MASK_N * 2); for (i in 0 until MASK_N * MASK_N) { rg[i * 2] = tile.hard[i]; rg[i * 2 + 1] = tile.marsh!![i] }
             File(out, "m_$id.bin").writeBytes(rg); File(out, "c_$id.bin").writeBytes(tile.cls!!)
@@ -46,15 +58,16 @@ fun main(args: Array<String>) {
         sb.append("{\"id\":\"$id\",\"ox\":$ox,\"oy\":$oy,\"mask\":${tile.hard != null},\"marsh\":${m.hasMarsh}}")
     }
     sb.append("],\"boat\":{\"x\":${boat.x},\"y\":${boat.y},\"z\":${boat.z},\"h\":${boat.heading},\"pitch\":${boat.pitch},\"roll\":${boat.roll},\"t\":${boat.time},\"amp\":${boat.waveAmp},\"kmh\":${boat.speedKmh()}}")
-    val wake = FloatArray(Effects.MAX_WAKE * 3 * 36); val nw = fx.buildWake(boat.time, boat.waveAmp, wake); writeF(File(out, "wake.bin"), wake, nw)
-    val spray = FloatArray(2400 * 60); val ns = fx.buildSpray(spray); writeF(File(out, "spray.bin"), spray, ns)
-    val wk = FloatArray(wsim.n * wsim.n * 4); wsim.pack(wk); writeF(File(out, "wake_sim.bin"), wk)
-    sb.append(",\"wake\":{\"ox\":${wsim.ox},\"oy\":${wsim.oy},\"size\":${wsim.size},\"n\":${wsim.n},\"dx\":${wsim.dirX},\"dy\":${wsim.dirY}}")
+    val spray = FloatArray(Effects.MAX_P * 8); val ns = fx.buildInstances(spray); writeF(File(out, "spray.bin"), spray, ns * 8)
+    sb.append(",\"wake\":{\"ox\":$wox,\"oy\":$woy,\"size\":${wn * wcell},\"n\":$wn,\"dx\":${drv.dirX},\"dy\":${drv.dirY},\"steps\":${steps.size / 57},\"hl\":${Boat.HALF_LEN},\"hb\":${Boat.HALF_BEAM},\"surge\":${boat.surge}}")
     // landmarks
     sb.append(",\"landmarks\":[")
     val lm = File(assets, "landmarks/landmarks.txt").readLines().filter { it.isNotBlank() && !it.startsWith("#") }
-    for ((i, line) in lm.withIndex()) {
+    var nlm = 0
+    for (line in lm) {
         val p = line.trim().split(Regex("\\s+"))
+        if (!File(assets, "landmarks/${p[0]}.mesh").exists()) continue      // zone-only line
+        val i = nlm++
         writeF(File(out, "lm_${p[0]}.bin"), readMesh(File(assets, "landmarks/${p[0]}.mesh")))
         val atlas = File(assets, "landmarks/${p[0]}_atlas.jpg")
         if (atlas.exists()) atlas.copyTo(File(out, "lm_${p[0]}_atlas.jpg"), true)
@@ -70,17 +83,17 @@ fun main(args: Array<String>) {
             File(assets, "landmarks/actv${l}_atlas.jpg").copyTo(File(out, "lm_actv${l}_atlas.jpg"), true)
         }
         File(assets, "landmarks/actv_signs.png").copyTo(File(out, "actv_signs.png"), true)
+        val lay = StopLayout.build(actv.readLines(), world)
         var firstS = true
-        for (line in actv.readLines()) {
-            val p = line.split('\t'); if (p.size < 7) continue
-            val x = p[1].toFloat(); val y = p[2].toFloat()
-            if (hypot(x - cx, y - cy) > 950) continue
+        for (st in lay.stops) {
+            if (hypot(st.x - cx, st.y - cy) > 950) continue
             if (!firstS) sb.append(","); firstS = false
-            sb.append("{\"x\":$x,\"y\":$y,\"rot\":${p[3].toFloat() + (if (p[5].toInt() < 0) 180f else 0f)},\"v\":${listOf(12, 16, 22).minByOrNull { kotlin.math.abs(it - p[4].toFloat()) }},\"slot\":${p[6]}}")
+            sb.append("{\"x\":${st.x},\"y\":${st.y},\"rot\":${Math.toDegrees(st.rot.toDouble())},\"v\":${st.len},\"slot\":${st.slot}}")
         }
+        writeF(File(out, "stop_extras.bin"), lay.extras.floats())
     }
     sb.append("]}")
     File(out, "scene.json").writeText(sb.toString())
     writeF(File(out, "boat.bin"), readMesh(File(assets, "boat.mesh")))
-    println("boat at ${boat.x}, ${boat.y} speed ${boat.speedKmh()} km/h z ${boat.z} pitch ${boat.pitch} amp ${boat.waveAmp}; wake ${nw / 6} verts, spray ${ns / 60}, wake max ${wsim.u.maxOrNull()} foam max ${wsim.foam.maxOrNull()}")
+    println("boat at ${boat.x}, ${boat.y} speed ${boat.speedKmh()} km/h z ${boat.z} pitch ${boat.pitch} amp ${boat.waveAmp}; spray $ns particles; ${steps.size / 57} wake steps")
 }

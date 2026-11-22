@@ -6,10 +6,15 @@ import kotlin.math.*
 object Waves {
     // direction (x, y), wavelength (m), relative amplitude, phase speed factor
     val W = arrayOf(
-        floatArrayOf(0.96f, 0.28f, 9.5f, 1.00f),
+        floatArrayOf(0.96f, 0.28f, 9.5f, 0.80f),
         floatArrayOf(-0.38f, 0.92f, 6.3f, 0.62f),
         floatArrayOf(0.71f, -0.70f, 3.9f, 0.38f),
         floatArrayOf(-0.88f, -0.47f, 2.3f, 0.22f),
+        // shorter, smaller components from scattered directions so the surface never reads as regular stripes
+        floatArrayOf(0.31f, 0.95f, 4.7f, 0.30f),
+        floatArrayOf(-0.97f, 0.24f, 3.3f, 0.24f),
+        floatArrayOf(0.62f, 0.78f, 1.9f, 0.14f),
+        floatArrayOf(-0.15f, -0.99f, 1.5f, 0.11f),
     )
     private const val G = 9.81f
 

@@ -6,8 +6,8 @@ import kotlin.math.*
 
 class Boat(var x: Float, var y: Float, var heading: Float) {
     companion object {
-        const val SCALE = 1.25f            // game-size boat (25% bigger than the real 4.5 m runabout)
-        const val TOP_SPEED = 19f          // m/s (~68 km/h)
+        const val SCALE = 1.44f            // game-size boat (another 15% up from 1.25)
+        const val TOP_SPEED = 36.1f        // m/s (130 km/h)
         const val REVERSE_SPEED = 4f
         const val HALF_LEN = 2.25f * SCALE
         const val HALF_BEAM = 0.92f * SCALE
@@ -18,6 +18,8 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
     }
 
     var surge = 0f; var sway = 0f; var yawRate = 0f
+    /** trim of the outboard, -1 (bow down) .. 1 (bow up): a little more top speed trimmed out, more grip trimmed in */
+    var trim = 0f
     /** extra surface height from the simulated wake (own wake, reflections off walls), if any */
     var wakeHeight: ((Float, Float) -> Float)? = null
     // vertical dynamics
@@ -38,13 +40,18 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         val thr = throttle.coerceIn(-1f, 1f)
         val inWater = !airborne
         // ---- horizontal
-        val accel = if (!inWater) 0f else if (thr >= 0) thr * 5.2f else thr * (if (surge > 0.5f) 8.5f else 2.6f)
-        val drag = if (surge >= 0) 5.2f / (TOP_SPEED * TOP_SPEED) * surge * abs(surge) else 2.6f / (REVERSE_SPEED * REVERSE_SPEED) * surge * abs(surge)
-        surge += (accel - drag * (if (inWater) 1f else 0.15f) - 0.3f * surge * (if (inWater) 1f else 0.1f)) * dt
+        // thrust strong at low speed (hole shot) and fading near the top: 0-100 km/h in ~7 s, 130 km/h flat out
+        val top = TOP_SPEED * (1f + 0.04f * trim)
+        val thrust = 8.6f * (1.15f - 0.35f * (surge / top).coerceIn(0f, 1f))
+        val accel = if (!inWater) 0f else if (thr >= 0) thr * thrust else thr * (if (surge > 0.5f) 11f else 2.6f)
+        val dragK = (8.6f * 0.8f - 0.06f * top) / (top * top)       // thrust = drag exactly at the top speed
+        val drag = if (surge >= 0) dragK * surge * abs(surge) else 2.6f / (REVERSE_SPEED * REVERSE_SPEED) * surge * abs(surge)
+        surge += (accel - drag * (if (inWater) 1f else 0.15f) - (if (surge >= 0) 0.06f else 0.3f) * surge * (if (inWater) 1f else 0.1f)) * dt
         sway += (-sway * (if (inWater) 3.4f else 0.3f) - surge * yawRate * 0.14f) * dt
-        val authority = (abs(surge) / 5f).coerceIn(0f, 1f) * 0.95f + abs(thr) * 0.4f * (1f - (abs(surge) / 6f).coerceIn(0f, 1f))
+        val authority = (abs(surge) / 5f).coerceIn(0f, 1f) * 0.95f * (1f - 0.1f * trim) + abs(thr) * 0.4f * (1f - (abs(surge) / 6f).coerceIn(0f, 1f))
         val dirSign = if (surge >= -0.2f) 1f else -1f
-        val target = if (inWater) steer * authority * dirSign * (1.0f - 0.3f * (abs(surge) / TOP_SPEED)) else yawRate
+        // turn rate drops at high speed (wide, fast arcs instead of spinning on the spot)
+        val target = if (inWater) steer * authority * dirSign * (1.0f - 0.55f * (abs(surge) / TOP_SPEED)) else yawRate
         yawRate += (target - yawRate) * min(1f, dt * 3.0f)
         heading += yawRate * dt
         val c = cos(heading); val s = sin(heading)
@@ -56,18 +63,18 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         var open = 0f
         for (k in 0 until 8) { val a = k * PI.toFloat() / 4; if (world.solid(x + cos(a) * 28f, y + sin(a) * 28f) < 0.5f) open += 1f }
         for (k in 0 until 8) { val a = k * PI.toFloat() / 4 + 0.3f; if (world.solid(x + cos(a) * 70f, y + sin(a) * 70f) < 0.5f) open += 1f }
-        val targetAmp = 0.05f + 0.26f * ((open / 16f - 0.35f) / 0.65f).coerceIn(0f, 1f)
+        val targetAmp = 0.035f + 0.075f * ((open / 16f - 0.35f) / 0.65f).coerceIn(0f, 1f)
         waveAmp += (targetAmp - waveAmp) * min(1f, dt * 0.5f)
 
         // ---- buoyancy on four hull points (bow, stern, port, starboard)
         val L = HALF_LEN * 0.8f; val B = HALF_BEAM * 0.85f
         fun wh(lx: Float, ly: Float): Float {
             val px = x + lx * c - ly * s; val py = y + lx * s + ly * c
-            return Waves.height(px, py, time, waveAmp) + (wakeHeight?.invoke(px, py)?.coerceIn(-0.25f, 0.25f) ?: 0f) * 0.7f
+            return Waves.height(px, py, time, waveAmp)
         }
         val hb = wh(L, 0f); val hs = wh(-L, 0f); val hp = wh(0f, B); val hst = wh(0f, -B)
         val planing = (abs(surge) / 9f).coerceIn(0f, 1f)
-        val lift = planing * 0.16f                         // planing hulls ride higher at speed
+        val lift = planing * (0.16f + 0.04f * trim)        // planing hulls ride higher at speed
         val hump = sin(PI.toFloat() * (abs(surge) / 8f).coerceIn(0f, 1f)) * 0.10f
         // hull point heights given current pose
         val zb = z + sin(pitch) * L; val zs = z - sin(pitch) * L
@@ -85,7 +92,7 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         vz += fz * dt
         z += vz * dt
         // pitch: buoyancy difference + the bow rising over the hump while getting on the plane
-        val pTorque = (fb - fs) * 0.11f + (if (!airborne) hump * 9f - pitch * 6f else -0.6f) - pitchRate * (if (airborne) 0.4f else 3.2f)
+        val pTorque = (fb - fs) * 0.11f + (if (!airborne) hump * 9f + trim * planing * 0.5f - pitch * 6f else -0.6f) - pitchRate * (if (airborne) 0.4f else 3.2f)
         pitchRate += pTorque * dt; pitch = (pitch + pitchRate * dt).coerceIn(-0.35f, 0.45f)
         val rTorque = (fp - fst) * 0.16f + (yawRate * surge * 0.05f).coerceIn(-0.2f, 0.2f) * 6f - roll * 5f - rollRate * (if (airborne) 0.4f else 3.5f)
         rollRate += rTorque * dt; roll = (roll + rollRate * dt).coerceIn(-0.4f, 0.4f)
@@ -116,6 +123,20 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
                 val wx = x + p[0] * c - p[1] * s; val wy = y + p[0] * s + p[1] * c
                 val dx = wx - pp[0]; val dy = wy - pp[1]; val d = hypot(dx, dy)
                 if (d < 0.75f && d > 1e-4f) { pushX += dx / d * (0.75f - d); pushY += dy / d * (0.75f - d); deepest = max(deepest, 0.75f - d) }
+            }
+            for (o in Obstacles.stops) {
+                // oriented box: x, y, rotation, half length, half width
+                if (abs(o[0] - x) > o[3] + 9f || abs(o[1] - y) > o[3] + 9f) continue
+                val oc = cos(o[2]); val os = sin(o[2])
+                for (p in HULL) {
+                    val wx = x + p[0] * c - p[1] * s; val wy = y + p[0] * s + p[1] * c
+                    val dx = wx - o[0]; val dy = wy - o[1]
+                    val lx = dx * oc + dy * os; val ly = -dx * os + dy * oc
+                    val px = o[3] - abs(lx); val py = o[4] - abs(ly)
+                    if (px <= 0f || py <= 0f) continue
+                    if (px < py) { val sgn = if (lx >= 0) 1f else -1f; pushX += oc * sgn * px; pushY += os * sgn * px; deepest = max(deepest, px) }
+                    else { val sgn = if (ly >= 0) 1f else -1f; pushX += -os * sgn * py; pushY += oc * sgn * py; deepest = max(deepest, py) }
+                }
             }
             if (deepest <= 0f) break
             val pl = hypot(pushX, pushY).coerceAtLeast(1e-4f)

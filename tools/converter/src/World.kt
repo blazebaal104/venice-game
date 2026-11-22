@@ -307,7 +307,7 @@ class World(val osm: OsmData, val grid: Grid) {
             val t = w.tags
             // bridges (walkable ways)
             // hand-modelled landmarks replace the generic bridge geometry
-            if (t["name"] in setOf("Ponte di Rialto")) continue
+            if (t["name"] in setOf("Ponte di Rialto", "Ponte della Paglia", "Ponte dei Sospiri")) continue
             if (t["bridge"] != null && t["bridge"] != "no" && t["highway"] != null) {
                 val ln = Assemble.line(osm, w.nodes) ?: continue
                 if (!inExtent(ln.first[0], ln.second[0])) continue

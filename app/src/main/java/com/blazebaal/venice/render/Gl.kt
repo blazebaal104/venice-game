@@ -39,10 +39,10 @@ class Program(vs: String, fs: String, name: String) {
 fun floatBuffer(a: FloatArray): FloatBuffer =
     ByteBuffer.allocateDirect(a.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(a); position(0) }
 
-/** Non-indexed triangle mesh with the 12-float layout (pos, normal, uv, attr). */
-class Mesh(data: FloatArray, stride: Int = 12, layout: IntArray = intArrayOf(3, 3, 2, 4)) {
+/** Non-indexed triangle mesh with the 12-float layout (pos, normal, uv, attr) unless told otherwise. */
+class Mesh(buf: FloatBuffer, val count: Int, stride: Int = 12, layout: IntArray = intArrayOf(3, 3, 2, 4)) {
     val vao: Int; val vbo: Int
-    val count = data.size / stride
+    constructor(data: FloatArray, stride: Int = 12, layout: IntArray = intArrayOf(3, 3, 2, 4)) : this(floatBuffer(data), data.size / stride, stride, layout)
 
     init {
         val a = IntArray(1)
@@ -50,7 +50,8 @@ class Mesh(data: FloatArray, stride: Int = 12, layout: IntArray = intArrayOf(3, 
         glGenBuffers(1, a, 0); vbo = a[0]
         glBindVertexArray(vao)
         glBindBuffer(GL_ARRAY_BUFFER, vbo)
-        glBufferData(GL_ARRAY_BUFFER, data.size * 4, floatBuffer(data), GL_STATIC_DRAW)
+        buf.position(0)
+        glBufferData(GL_ARRAY_BUFFER, count * stride * 4, buf, GL_STATIC_DRAW)
         var off = 0
         for ((loc, n) in layout.withIndex()) {
             glEnableVertexAttribArray(loc)
@@ -155,4 +156,56 @@ class DynMesh(val stride: Int, layout: IntArray, capacityFloats: Int) {
         count = n / stride
     }
     fun draw(mode: Int) { if (count == 0) return; glBindVertexArray(vao); glDrawArrays(mode, 0, count) }
+}
+
+/** Instanced quads: a static 6-vertex corner buffer (location 3) + per-instance data rewritten every frame. */
+class InstMesh(val stride: Int, layout: IntArray, val maxInstances: Int) {
+    val vao: Int; private val vbo: Int; private val cornerVbo: Int
+    private val buf = ByteBuffer.allocateDirect(maxInstances * stride * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+    var count = 0
+    init {
+        val a = IntArray(1); glGenVertexArrays(1, a, 0); vao = a[0]
+        glGenBuffers(1, a, 0); vbo = a[0]; glGenBuffers(1, a, 0); cornerVbo = a[0]
+        glBindVertexArray(vao)
+        glBindBuffer(GL_ARRAY_BUFFER, cornerVbo)
+        glBufferData(GL_ARRAY_BUFFER, 12 * 4, floatBuffer(floatArrayOf(-1f, -1f, 1f, -1f, 1f, 1f, -1f, -1f, 1f, 1f, -1f, 1f)), GL_STATIC_DRAW)
+        glEnableVertexAttribArray(3); glVertexAttribPointer(3, 2, GL_FLOAT, false, 8, 0)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, maxInstances * stride * 4, null, GL_STREAM_DRAW)
+        var off = 0
+        for ((loc, n) in layout.withIndex()) {
+            glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, n, GL_FLOAT, false, stride * 4, off * 4)
+            glVertexAttribDivisor(loc, 1); off += n
+        }
+        glBindVertexArray(0)
+    }
+    fun upload(data: FloatArray, instances: Int) {
+        count = minOf(instances, maxInstances)
+        if (count == 0) return
+        buf.position(0); buf.put(data, 0, count * stride); buf.position(0)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, maxInstances * stride * 4, null, GL_STREAM_DRAW)   // orphan: no sync stall
+        glBufferSubData(GL_ARRAY_BUFFER, 0, count * stride * 4, buf)
+    }
+    fun draw() { if (count == 0) return; glBindVertexArray(vao); glDrawArraysInstanced(GL_TRIANGLES, 0, 6, count) }
+}
+
+/** Depth-only shadow map (hardware PCF compare). */
+class ShadowMap(val size: Int) {
+    var tex = 0; var fbo = 0
+    init {
+        val t = IntArray(1); glGenTextures(1, t, 0); tex = t[0]
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, null)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL)
+        val f = IntArray(1); glGenFramebuffers(1, f, 0); fbo = f[0]
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex, 0)
+        glDrawBuffers(1, intArrayOf(GL_NONE), 0); glReadBuffer(GL_NONE)
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { Log.e("Venice", "shadow FBO incomplete"); tex = 0 }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    }
+    fun bind() { glBindFramebuffer(GL_FRAMEBUFFER, fbo); glViewport(0, 0, size, size) }
 }

@@ -12,6 +12,9 @@ import android.widget.FrameLayout
 import com.blazebaal.venice.render.GameRenderer
 import com.blazebaal.venice.ui.Controls
 import com.blazebaal.venice.ui.HudView
+import com.blazebaal.venice.ui.Settings
+import android.view.Surface
+import android.view.SurfaceHolder
 
 class MainActivity : Activity() {
     private lateinit var glView: GLSurfaceView
@@ -20,6 +23,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Settings.load(this)
+        requestHighRefreshRate()
         renderer = GameRenderer(this)
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(3)
@@ -28,12 +33,35 @@ class MainActivity : Activity() {
             setRenderer(renderer)
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
+        // ask the compositor for 120 Hz on this surface (Android 11+), otherwise many phones keep games at 60 Hz
+        glView.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(h: SurfaceHolder) {
+                if (android.os.Build.VERSION.SDK_INT >= 30) try { h.surface.setFrameRate(Settings.fpsTarget.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) } catch (_: Exception) { }
+            }
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {}
+            override fun surfaceDestroyed(h: SurfaceHolder) {}
+        })
         val root = FrameLayout(this)
         root.addView(glView)
         root.addView(HudView(this))
         setContentView(root)
         hideSystemUi()
     }
+
+    /** Pick the display mode with the highest refresh rate at the current resolution. */
+    private fun requestHighRefreshRate() {
+        if (android.os.Build.VERSION.SDK_INT < 30) return
+        try {
+            val d = display ?: return
+            val cur = d.mode
+            val best = d.supportedModes.filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }
+                .maxByOrNull { it.refreshRate } ?: return
+            window.attributes = window.attributes.apply { preferredDisplayModeId = best.modeId; preferredRefreshRate = best.refreshRate }
+        } catch (_: Exception) { }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() { Controls.paused = !Controls.paused }
 
     private fun hideSystemUi() {
         if (android.os.Build.VERSION.SDK_INT >= 30) {

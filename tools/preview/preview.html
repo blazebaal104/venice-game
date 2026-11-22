@@ -66,7 +66,7 @@ const M = {
 };
 async function loadImg(u) { const b = await (await fetch(u)).blob(); return await createImageBitmap(b, {premultiplyAlpha: 'none', colorSpaceConversion: 'none'}); }
 (async () => { try {
-  const S = {}; for (const n of ['generic','facade','ground','water','sky','depth','wake','spray','bright','blur','composite']) S[n] = prog(await txt(`sh/${n}.vs`), await txt(`sh/${n}.fs`), n);
+  const S = {}; for (const n of ['generic','facade','ground','water','sky','depth','wakesim','spray','bright','blur','composite']) S[n] = prog(await txt(`sh/${n}.vs`), await txt(`sh/${n}.fs`), n);
   const sc = JSON.parse(await txt('exp/scene.json'));
   // texture arrays: the same files the APK loads (albedo c_XX.png, normal+roughness n_XX.jpg), no premultiply
   const arr = [];
@@ -85,8 +85,9 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   const tiles = [];
   for (const t of sc.tiles) {
     const T = {ox: t.ox, oy: t.oy, marsh: t.marsh};
-    T.f = mesh(await bin(`exp/f_${t.id}.bin`), 12, L4);
+    T.f = mesh(await bin(`exp/f_${t.id}.bin`), 16, [3,3,2,4,4]);
     T.g = mesh(await bin(`exp/g_${t.id}.bin`), 12, L4);
+    T.d = mesh(await bin(`exp/d_${t.id}.bin`), 12, L4);
     if (t.mask) { T.mask = tex(258, 258, gl.RG, gl.RG8, new Uint8Array(await bin(`exp/m_${t.id}.bin`)), true); T.cls = tex(258, 258, gl.RED, gl.R8, new Uint8Array(await bin(`exp/c_${t.id}.bin`)), false); }
     tiles.push(T);
   }
@@ -107,83 +108,123 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
     for (const st of sc.stops) {
       lms.push({m: sm[st.v], model: M.mul(M.T(st.x, st.y, 0), M.Rz(st.rot * Math.PI / 180)), x: st.x, y: st.y, at: at[st.v], rect: [(st.slot % 4) * 0.25, Math.floor(st.slot / 4) / 32, 0.25, 1 / 32]}); }
   }
+  const cam0x = () => 0;
   const boat = mesh(await bin('exp/boat.bin'), 12, L4);
-  const wake = mesh(await bin('exp/wake.bin'), 6, [3,3]);
-  const spray = mesh(await bin('exp/spray.bin'), 10, [3,3,2,2]);
-  const WK = sc.wake; const wkTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, wkTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, WK.n, WK.n, 0, gl.RGBA, gl.FLOAT, new Float32Array(await bin('exp/wake_sim.bin')));
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const stopEx = await bin('exp/stop_extras.bin'); if (stopEx && stopEx.byteLength) lms.push({m: mesh(stopEx, 12, L4), model: M.I(), x: cam0x(), y: 0, at: null, always: true});
+  // instanced spray: per instance pos3 vel3 life size, corners from a static buffer (like InstMesh)
+  const sprayBuf = await bin('exp/spray.bin'); const sprayN = sprayBuf.byteLength / 32;
+  const sprayVao = gl.createVertexArray(); gl.bindVertexArray(sprayVao);
+  const cb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, cb); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 8, 0);
+  const ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, ib); gl.bufferData(gl.ARRAY_BUFFER, sprayBuf.byteLength ? sprayBuf : new ArrayBuffer(32), gl.STATIC_DRAW);
+  [[0,3,0],[1,3,12],[2,2,24]].forEach(([l,n,o]) => { gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, n, gl.FLOAT, false, 32, o); gl.vertexAttribDivisor(l, 1); });
+  gl.bindVertexArray(null);
   const quad = mesh(new Float32Array([0,0,0,256,0,0,256,256,0,0,0,0,256,256,0,0,256,0]).buffer, 3, [3]);
   const tri = mesh(new Float32Array([-1,-1,3,-1,-1,3]).buffer, 2, [2]);
+  // ---- GPU wake simulation: replay the boat's recorded steps through the game's own simulation shader
+  gl.getExtension('EXT_color_buffer_float');
+  const WK = sc.wake;
+  const simT = [target(WK.n, WK.n, false, true), target(WK.n, WK.n, false, true)];
+  for (const t of simT) { bindT(t); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); }
+  const solidTex = tex(WK.n, WK.n, gl.RED, gl.R8, new Uint8Array(await bin('exp/solid.bin')), false);
+  const st = new Float32Array(await bin('exp/steps.bin'));
+  { const p = S.wakesim; gl.useProgram(p); gl.disable(gl.DEPTH_TEST);
+    gl.uniform1i(p.u('uState'), 0); gl.uniform1i(p.u('uSolid'), 1); gl.uniform1i(p.u('uN'), WK.n); gl.uniform1f(p.u('uCell'), WK.size / WK.n); gl.uniform2f(p.u('uOrigin'), WK.ox, WK.oy);
+    gl.uniform2i(p.u('uShift'), 0, 0); const dt = 1/60, cell = WK.size / WK.n; gl.uniform1f(p.u('uDt'), dt); gl.uniform1f(p.u('uK'), Math.pow(3.6*dt/cell, 2)); gl.uniform1f(p.u('uBeta'), 0.10*dt*dt/Math.pow(cell, 4));
+    gl.uniform1f(p.u('uNu'), 0.18*dt); gl.uniform1f(p.u('uDamp'), 0.99835); gl.uniform1f(p.u('uSpongeMin'), 0.927); gl.uniform1f(p.u('uFoamDiff'), 0.0075); gl.uniform1f(p.u('uAerDiff'), 0.015);
+    gl.uniform2f(p.u('uHull'), WK.hl, WK.hb);
+    let cur = 0, prevB = [0,0,0,0], prevBb = [0,0,0,0];
+    for (let k = 0; k < WK.steps; k++) {
+      const o = k * 57; const b0 = st.subarray(o, o+4), b0b = st.subarray(o+4, o+8), ns = st[o+8], sp = st.subarray(o+9, o+57);
+      if (k == 0) prevB = [b0[0], b0[1], b0[2], 0];
+      bindT(simT[1-cur]); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, simT[cur].tex); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, solidTex);
+      gl.uniform4fv(p.u('uB0'), b0); gl.uniform4fv(p.u('uB0b'), b0b); gl.uniform4fv(p.u('uB1'), prevB); gl.uniform4fv(p.u('uB1b'), prevBb);
+      gl.uniform4fv(p.u('uSplat'), sp); gl.uniform1i(p.u('uNSplat'), ns);
+      draw(tri); cur = 1 - cur; prevB = Array.from(b0); prevBb = Array.from(b0b);
+    }
+    window.wkTex = simT[cur].tex; gl.enable(gl.DEPTH_TEST); }
+  const wkTex = window.wkTex;
+  const waterN = tex(256, 256, gl.RG, gl.RG8, new Uint8Array(await bin('exp/water_n.bin')), true);
+  gl.bindTexture(gl.TEXTURE_2D, waterN); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
   function grid(half, step, hole) { const n = Math.round(2*half/step), o = []; for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) { const x0 = -half + i*step, y0 = -half + j*step, x1 = x0 + step, y1 = y0 + step;
       if (hole > 0 && x0 >= -hole && x1 <= hole && y0 >= -hole && y1 <= hole) continue; o.push(x0,y0,0,x1,y0,0,x1,y1,0,x0,y0,0,x1,y1,0,x0,y1,0); } return new Float32Array(o).buffer; }
-  const wNear = mesh(grid(64, 0.5, 0), 3, [3]), wMid = mesh(grid(150, 2, 64), 3, [3]), wFar = mesh(grid(1800, 50, 150), 3, [3]);
+  const wNear = mesh(grid(56, 0.5, 0), 3, [3]), wMid = mesh(grid(160, 2, 56), 3, [3]), wFar = mesh(grid(1000, 40, 160), 3, [3]);
   // lighting constants (GameRenderer)
   const az = Number(P.get('az') || 228) * Math.PI / 180, el = Number(P.get('el') || 32) * Math.PI / 180;
   const sunDir = new Float32Array([Math.sin(az)*Math.cos(el), Math.cos(az)*Math.cos(el), Math.sin(el)]);
   const sunCol = [3.3,2.95,2.45], skyAmb = [0.34,0.42,0.56], groundAmb = [0.20,0.18,0.15], fogCol = [0.62,0.68,0.76], zenith = [0.16,0.30,0.62];
   const B = sc.boat; const time = B.t, amp = B.amp;
   let cam, tgt;
-  if (!P.get('cam')) { const d = 10.5 + B.kmh * 0.04, pitch = 0.2; cam = [B.x - Math.cos(B.h)*d*Math.cos(pitch), B.y - Math.sin(B.h)*d*Math.cos(pitch), 1.6 + d*Math.sin(pitch) + B.z*0.6]; tgt = [B.x + Math.cos(B.h)*3, B.y + Math.sin(B.h)*3, 1.2 + B.z*0.7]; }
+  const spk = Math.min(1, B.kmh / 130), spS = spk*spk*(3-2*spk);
+  if (!P.get('cam')) { const d = 7.2 + 9.5 * spS, pitch = 0.2 - spS * 0.06; cam = [B.x - Math.cos(B.h)*d*Math.cos(pitch), B.y - Math.sin(B.h)*d*Math.cos(pitch), 1.6 + d*Math.sin(pitch) + B.z*0.6]; tgt = [B.x + Math.cos(B.h)*3, B.y + Math.sin(B.h)*3, 1.2 + B.z*0.7]; }
   else { cam = P.get('cam').split(',').map(Number); tgt = P.get('tgt').split(',').map(Number); }
-  const fov = Number(P.get('fov') || 62);
-  const vp = M.mul(M.persp(fov * Math.PI / 180, W/H, 0.3, 2600), M.look(cam, tgt, [0,0,1]));
+  const fov = Number(P.get('fov') || (56 + 14 * spS));
+  const vp = M.mul(M.persp(fov * Math.PI / 180, W/H, 0.3, 1100), M.look(cam, tgt, [0,0,1]));
   const mirror = M.I(); mirror[10] = -1; const ident = M.I();
-  let bm = M.mul(M.mul(M.mul(M.mul(M.T(B.x, B.y, B.z), M.Rz(B.h)), M.Ry(-B.pitch)), M.Rx(B.roll)), M.S(1.25)); bm = M.mul(bm, M.T(-2.22, 0, 0));
+  let bm = M.mul(M.mul(M.mul(M.mul(M.T(B.x, B.y, B.z), M.Rz(B.h)), M.Ry(-B.pitch)), M.Rx(B.roll)), M.S(1.44)); bm = M.mul(bm, M.T(-2.22, 0, 0));
   // ---- shadow map
-  const SH = 2048; const stex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, stex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SH, SH, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  const sfbo = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, sfbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, stex, 0); gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+  function shadowMap(SH) { const stex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, stex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SH, SH, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, stex, 0); gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+    return [stex, f]; }
+  const SH = 2048; const [stex, sfbo] = shadowMap(SH); const [btex, bfbo] = shadowMap(1024);
   const yaw = Math.atan2(tgt[1]-cam[1], tgt[0]-cam[0]);
-  const scx = cam[0] + Math.cos(yaw)*150, scy = cam[1] + Math.sin(yaw)*150, half = 210, texel = half*2/SH;
-  const sx = Math.floor(scx/texel)*texel, sy = Math.floor(scy/texel)*texel, dist = 400;
+  const scx = cam[0] + Math.cos(yaw)*120, scy = cam[1] + Math.sin(yaw)*120, half = 230;
+  const sx = Math.floor(scx/64)*64+32, sy = Math.floor(scy/64)*64+32, dist = 400;
   const lightVP = M.mul(M.ortho(-half, half, -half, half, 1, dist*2), M.look([sx+sunDir[0]*dist, sy+sunDir[1]*dist, sunDir[2]*dist], [sx, sy, 0], [0,0,1]));
   gl.viewport(0, 0, SH, SH); gl.enable(gl.DEPTH_TEST); gl.clear(gl.DEPTH_BUFFER_BIT); gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1.6, 2.5);
   gl.useProgram(S.depth); gl.uniformMatrix4fv(S.depth.u('uLightVP'), false, lightVP);
-  for (const t of tiles) { if (Math.abs(t.ox+128-sx) > half+200 || Math.abs(t.oy+128-sy) > half+200) continue; gl.uniformMatrix4fv(S.depth.u('uModel'), false, M.T(t.ox, t.oy, 0)); draw(t.f); draw(t.g); }
+  for (const t of tiles) { if (Math.abs(t.ox+128-sx) > half+200 || Math.abs(t.oy+128-sy) > half+200) continue; gl.uniformMatrix4fv(S.depth.u('uModel'), false, M.T(t.ox, t.oy, 0)); draw(t.f); draw(t.g); draw(t.d); }
   for (const l of lms) { gl.uniformMatrix4fv(S.depth.u('uModel'), false, l.model); draw(l.m); }
-  gl.uniformMatrix4fv(S.depth.u('uModel'), false, bm); draw(boat);
   gl.disable(gl.POLYGON_OFFSET_FILL);
+  // boat shadow (own small map, like the game)
+  const lightVPB = M.mul(M.ortho(-9, 9, -9, 9, 1, 80), M.look([B.x+sunDir[0]*40, B.y+sunDir[1]*40, sunDir[2]*40], [B.x, B.y, 0], [0,0,1]));
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bfbo); gl.viewport(0, 0, 1024, 1024); gl.clear(gl.DEPTH_BUFFER_BIT); gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1.2, 2);
+  gl.uniformMatrix4fv(S.depth.u('uLightVP'), false, lightVPB); gl.uniformMatrix4fv(S.depth.u('uModel'), false, bm); draw(boat); gl.disable(gl.POLYGON_OFFSET_FILL);
   function common(p, mir, clipZ) { gl.useProgram(p); gl.uniformMatrix4fv(p.u('uVP'), false, vp); gl.uniformMatrix4fv(p.u('uMirror'), false, mir);
     gl.uniform3fv(p.u('uSunDir'), sunDir); gl.uniform3fv(p.u('uSunCol'), sunCol); gl.uniform3fv(p.u('uSkyAmb'), skyAmb); gl.uniform3fv(p.u('uGroundAmb'), groundAmb);
-    gl.uniform3fv(p.u('uFogCol'), fogCol); gl.uniform3fv(p.u('uSkyZenith'), zenith); gl.uniform1f(p.u('uFogDens'), 1/1100); gl.uniform3fv(p.u('uCam'), cam); gl.uniform1f(p.u('uTime'), time);
+    gl.uniform3fv(p.u('uFogCol'), fogCol); gl.uniform3fv(p.u('uSkyZenith'), zenith); gl.uniform1f(p.u('uFogDens'), 1/640); gl.uniform3fv(p.u('uCam'), cam); gl.uniform1f(p.u('uTime'), time);
     gl.uniform1f(p.u('uClipZ'), clipZ);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, stex); gl.uniform1i(p.u('uShadow'), 2);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D_ARRAY, arr[0]); gl.uniform1i(p.u('uAlb'), 3);
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D_ARRAY, arr[1]); gl.uniform1i(p.u('uNrm'), 4);
-    gl.uniformMatrix4fv(p.u('uLightVP'), false, lightVP); gl.uniform1f(p.u('uShadowOn'), 1); }
-  function sky(mir) { gl.depthMask(false); gl.useProgram(S.sky); gl.uniformMatrix4fv(S.sky.u('uInvVP'), false, M.inv(vp)); gl.uniform3fv(S.sky.u('uSunDir'), sunDir); gl.uniform3fv(S.sky.u('uFogCol'), fogCol); gl.uniform3fv(S.sky.u('uSkyZenith'), zenith); gl.uniform3fv(S.sky.u('uSunCol'), sunCol); gl.uniform1f(S.sky.u('uMirrorSky'), mir ? 1 : 0); draw(tri); gl.depthMask(true); }
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, btex); gl.uniform1i(p.u('uShadowB'), 9); gl.uniformMatrix4fv(p.u('uLightVPB'), false, lightVPB);
+    gl.uniformMatrix4fv(p.u('uLightVP'), false, lightVP); gl.uniform1f(p.u('uShadowOn'), shOn ? 1 : 0); }
+  let shOn = true;
+  function sky(mir) { gl.depthMask(false); gl.useProgram(S.sky); gl.uniformMatrix4fv(S.sky.u('uInvVP'), false, M.inv(vp)); gl.uniform3fv(S.sky.u('uSunDir'), sunDir); gl.uniform3fv(S.sky.u('uFogCol'), fogCol); gl.uniform3fv(S.sky.u('uSkyZenith'), zenith); gl.uniform3fv(S.sky.u('uSunCol'), sunCol); gl.uniform1f(S.sky.u('uMirrorSky'), mir ? 1 : 0); gl.uniform1f(S.sky.u('uTime'), time); gl.uniform1f(S.sky.u('uCloudCover'), Number(P.get('clouds') || 0.55)); draw(tri); gl.depthMask(true); }
   const near = (t, maxD) => Math.hypot(t.ox+128-cam[0], t.oy+128-cam[1]) < maxD + 200;
   function opaque(mir, clipZ, maxD) {
-    common(S.ground, mir, clipZ); gl.uniform1i(S.ground.u('uMask'), 0); gl.uniform1i(S.ground.u('uClass'), 1);
+    if (mir === ident) { common(S.ground, mir, clipZ); gl.uniform1i(S.ground.u('uMask'), 0); gl.uniform1i(S.ground.u('uClass'), 1);
     for (const t of tiles) { if (!t.mask || !near(t, maxD)) continue; gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, t.mask); gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, t.cls);
       gl.uniform1f(S.ground.u('uMarshPass'), 0); gl.uniformMatrix4fv(S.ground.u('uModel'), false, M.T(t.ox, t.oy, 1.1)); draw(quad);
-      if (t.marsh) { gl.uniform1f(S.ground.u('uMarshPass'), 1); gl.uniformMatrix4fv(S.ground.u('uModel'), false, M.T(t.ox, t.oy, 0.32)); draw(quad); } }
+      if (t.marsh) { gl.uniform1f(S.ground.u('uMarshPass'), 1); gl.uniformMatrix4fv(S.ground.u('uModel'), false, M.T(t.ox, t.oy, 0.32)); draw(quad); } } }
     common(S.facade, mir, clipZ); for (const t of tiles) { if (!near(t, maxD)) continue; gl.uniformMatrix4fv(S.facade.u('uModel'), false, M.T(t.ox, t.oy, 0)); draw(t.f); }
-    common(S.generic, mir, clipZ); for (const t of tiles) { if (!near(t, maxD)) continue; gl.uniformMatrix4fv(S.generic.u('uModel'), false, M.T(t.ox, t.oy, 0)); draw(t.g); }
+    common(S.generic, mir, clipZ); for (const t of tiles) { if (!near(t, mir === ident ? maxD : 140)) continue; gl.uniformMatrix4fv(S.generic.u('uModel'), false, M.T(t.ox, t.oy, 0)); draw(t.g); if (mir === ident && near(t, 150)) draw(t.d); }
     gl.uniform1i(S.generic.u('uAtlas'), 6); gl.uniform1i(S.generic.u('uSign'), 8);
     gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, window.signTex || null);
-    for (const l of lms) if (Math.hypot(l.x-cam[0], l.y-cam[1]) < maxD + 100) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, l.at); gl.uniform4fv(S.generic.u('uSignRect'), l.rect || [0, 0, 0, 0]); gl.uniformMatrix4fv(S.generic.u('uModel'), false, l.model); draw(l.m); }
+    for (const l of lms) if (l.always || Math.hypot(l.x-cam[0], l.y-cam[1]) < maxD + 100) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, l.at); gl.uniform4fv(S.generic.u('uSignRect'), l.rect || [0, 0, 0, 0]); gl.uniformMatrix4fv(S.generic.u('uModel'), false, l.model); draw(l.m); }
     gl.uniformMatrix4fv(S.generic.u('uModel'), false, bm); draw(boat);
   }
-  const refl = target(W/2, H/2, true), scene = target(W, H, true), bA = target(W/4, H/4, false), bB = target(W/4, H/4, false);
+  const refl = target(Math.floor(W*0.42), Math.floor(H*0.42), true), scene = target(W, H, true), bA = target(W/4, H/4, false), bB = target(W/4, H/4, false);
   gl.enable(gl.DEPTH_TEST); gl.clearColor(0,0,0,1);
-  bindT(refl); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); sky(true); opaque(mirror, -0.05, 380);
-  bindT(scene); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); sky(false); opaque(ident, -1000, 99999);
+  bindT(refl); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); shOn = false; sky(true); opaque(mirror, -0.05, 260); shOn = true;
+  bindT(scene); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); sky(false); opaque(ident, -1000, 720);
   common(S.water, ident, -1000); gl.uniform3fv(S.water.u('uCenter'), [Math.floor(cam[0]/50)*50, Math.floor(cam[1]/50)*50, 0]); gl.uniform1f(S.water.u('uWaveAmp'), amp);
   gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, refl.tex); gl.uniform1i(S.water.u('uRefl'), 5); gl.uniform2f(S.water.u('uScreen'), W, H);
   gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, wkTex); gl.uniform1i(S.water.u('uWake'), 7); gl.uniform3f(S.water.u('uWakeO'), WK.ox, WK.oy, WK.size); gl.uniform2f(S.water.u('uWakeDir'), WK.dx, WK.dy);
-  gl.uniform1f(S.water.u('uGridHalf'), 1e6); draw(wNear); gl.uniform1f(S.water.u('uGridHalf'), 150); draw(wMid); gl.uniform1f(S.water.u('uGridHalf'), 1); draw(wFar);
+  gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterN); gl.uniform1i(S.water.u('uWaterN'), 10);
+  gl.uniform4f(S.water.u('uBoat'), B.x, B.y, B.h, WK.surge); gl.uniform2f(S.water.u('uHull'), WK.hl, WK.hb);
+  gl.uniform1f(S.water.u('uGridHalf'), 1e6); draw(wNear); gl.uniform1f(S.water.u('uGridHalf'), 160); draw(wMid); gl.uniform1f(S.water.u('uGridHalf'), 1); draw(wFar);
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
-  common(S.spray, ident, -1000); draw(spray);
+  common(S.spray, ident, -1000); gl.bindVertexArray(sprayVao); if (sprayN) gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, sprayN);
   gl.depthMask(true); gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST);
   bindT(bA); gl.useProgram(S.bright); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, scene.tex); gl.uniform1i(S.bright.u('uTex'), 0); gl.uniform2f(S.bright.u('uTexel'), 1/W, 1/H); draw(tri);
   gl.useProgram(S.blur); gl.uniform1i(S.blur.u('uTex'), 0);
-  for (let k = 0; k < 2; k++) { bindT(bB); gl.bindTexture(gl.TEXTURE_2D, bA.tex); gl.uniform2f(S.blur.u('uDir'), 1.5/bA.w, 0); draw(tri); bindT(bA); gl.bindTexture(gl.TEXTURE_2D, bB.tex); gl.uniform2f(S.blur.u('uDir'), 0, 1.5/bA.h); draw(tri); }
+  for (let k = 0; k < 1; k++) { bindT(bB); gl.bindTexture(gl.TEXTURE_2D, bA.tex); gl.uniform2f(S.blur.u('uDir'), 1.5/bA.w, 0); draw(tri); bindT(bA); gl.bindTexture(gl.TEXTURE_2D, bB.tex); gl.uniform2f(S.blur.u('uDir'), 0, 1.5/bA.h); draw(tri); }
   bindT(null); gl.useProgram(S.composite); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, scene.tex); gl.uniform1i(S.composite.u('uScene'), 0);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bA.tex); gl.uniform1i(S.composite.u('uBloom'), 1); gl.uniform2f(S.composite.u('uTexel'), 1/W, 1/H); gl.uniform1f(S.composite.u('uExposure'), Number(P.get('exp') || 0.85)); draw(tri);
   gl.finish();

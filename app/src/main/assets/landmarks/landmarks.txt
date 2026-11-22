@@ -1,3 +1,16 @@
 # name  x  y  rotDeg  [halfLen halfWidth: converter keeps generated buildings/props out of this rectangle]
 rialto   -240.85   453.9     140.2   26.5   13.0
 campanile   2.68   7.35   19.43   7.4   7.4
+ducale   78.2   -53.1   16.0
+# zone-only lines (no mesh): keep generated buildings out of the Palazzo Ducale and Prigioni footprints
+z_ducale   104.46  -5.0   16.0   39.5   40.0
+z_prigioni 171.83  -5.97  16.0   19.0   23.5
+basilica 32.4   25.6    16.0
+z_basilica 68.1  60.8   16.0   47.0   34.0
+piazza   0.0    0.0     0.0
+z_procv  -71.8  53.8   31.55  95.0   10.5
+z_procn  -53.0  -52.3  21.47  67.5   21.0
+z_ala    -143.2 -35.9  -66.25 29.5   10.5
+z_lib    17.3   -49.4  -68.27 42.0   14.0
+z_zecca  10.9   -87.5  20.2   19.0   8.0
+z_orolog 28.5   106.0  29.1   12.0   5.5

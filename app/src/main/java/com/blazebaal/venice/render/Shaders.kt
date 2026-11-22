@@ -9,6 +9,7 @@ object Shaders {
 uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec3 uSkyAmb; uniform vec3 uGroundAmb; uniform vec3 uFogCol; uniform vec3 uSkyZenith;
 uniform float uFogDens; uniform vec3 uCam; uniform float uTime;
 uniform highp sampler2DShadow uShadow; uniform mat4 uLightVP; uniform float uShadowOn;
+uniform highp sampler2DShadow uShadowB; uniform mat4 uLightVPB;      // boat-only shadow, re-rendered every frame
 uniform float uClipZ;
 uniform mediump sampler2DArray uAlb;   // rgb albedo (sRGB), a = paintable mask
 uniform mediump sampler2DArray uNrm;   // rg normal (GL), b = roughness
@@ -25,12 +26,17 @@ float sunShadow(vec3 wpos, vec3 n) {
     if (uShadowOn < 0.5) return 1.0;
     vec4 lp = uLightVP * vec4(wpos + n * 0.12, 1.0);
     vec3 c = lp.xyz / lp.w * 0.5 + 0.5;
-    if (c.x < 0.0 || c.y < 0.0 || c.x > 1.0 || c.y > 1.0 || c.z > 1.0) return 1.0;
-    float d = c.z - 0.0008; vec2 t = vec2(1.0 / 2048.0);
-    float s = texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, d)) + texture(uShadow, vec3(c.xy + vec2(0.5, -0.5) * t, d))
-            + texture(uShadow, vec3(c.xy + vec2(-0.5, 0.5) * t, d)) + texture(uShadow, vec3(c.xy + vec2(0.5, 0.5) * t, d));
-    vec2 e = smoothstep(vec2(0.0), vec2(0.08), c.xy) * smoothstep(vec2(1.0), vec2(0.92), c.xy);
-    return mix(1.0, s * 0.25, e.x * e.y);
+    float s = 1.0;
+    if (c.x > 0.0 && c.y > 0.0 && c.x < 1.0 && c.y < 1.0 && c.z < 1.0) {
+        float d = c.z - 0.0008; vec2 t = vec2(1.0 / 2048.0);
+        float k = texture(uShadow, vec3(c.xy + vec2(-0.5, -0.5) * t, d)) + texture(uShadow, vec3(c.xy + vec2(0.5, 0.5) * t, d));
+        vec2 e = smoothstep(vec2(0.0), vec2(0.08), c.xy) * smoothstep(vec2(1.0), vec2(0.92), c.xy);
+        s = mix(1.0, k * 0.5, e.x * e.y);
+    }
+    vec4 lb = uLightVPB * vec4(wpos + n * 0.03, 1.0);
+    vec3 cb = lb.xyz / lb.w * 0.5 + 0.5;
+    if (cb.x > 0.0 && cb.y > 0.0 && cb.x < 1.0 && cb.y < 1.0 && cb.z < 1.0) s = min(s, texture(uShadowB, vec3(cb.xy, cb.z - 0.001)));
+    return s;
 }
 
 // texture size in metres per layer group
@@ -147,11 +153,32 @@ void main() {
 """
 
     // ------------------------------------------------------------------ facades, roofs, cornices, quay walls
+    const val FACADE_VS = """#version 300 es
+layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNrm; layout(location=2) in vec2 aUv; layout(location=3) in vec4 aAttr; layout(location=4) in vec4 aStyle;
+uniform mat4 uVP; uniform mat4 uModel; uniform mat4 uMirror;
+out vec3 vW; out vec3 vN; out vec2 vUv; out vec4 vA; flat out vec4 vS;
+void main() {
+    vec4 w = uModel * vec4(aPos, 1.0); vW = w.xyz; vN = mat3(uModel) * aNrm; vUv = aUv; vA = aAttr; vS = aStyle;
+    gl_Position = uVP * uMirror * w;
+}
+"""
     val FACADE_FS = """#version 300 es
 precision highp float;
+precision highp int;
 $COMMON
-in vec3 vW; in vec3 vN; in vec2 vUv; in vec4 vA;
+in vec3 vW; in vec3 vN; in vec2 vUv; in vec4 vA; flat in vec4 vS;
 out vec4 o;
+
+// opening outline: 0 rectangular, 1 round arch, 2 pointed (gothic), 3 ogee (Venetian gothic), 4/5 rectangular with a
+// triangular / segmental pediment, 6 cusped gothic. Returns the height of the opening's top edge at |x| = ax.
+float archTop(int shape, float ax, float hw, float y1) {
+    if (shape == 1) { float ys = y1 - hw; return ys + sqrt(max(hw * hw - ax * ax, 0.0)); }
+    if (shape == 2 || shape == 6) { float rise = hw * 1.2; float R = (rise * rise + hw * hw) / (2.0 * hw); float ys = y1 - rise;
+        return ys + sqrt(max(R * R - (ax + R - hw) * (ax + R - hw), 0.0)); }
+    if (shape == 3) { float rise = hw * 1.35; float ys = y1 - rise; float t = clamp(ax / hw, 0.0, 1.0);
+        return ys + rise * (1.0 - smoothstep(0.0, 1.0, t)) + 0.1 * hw * sin(t * PI); }
+    return y1;
+}
 
 // Venetian intonaco palette (sRGB): rosso veneziano, ochre, pink, salmon, cream, white, sienna, orange, grey-green, faded red
 vec3 paint(float s) {
@@ -175,8 +202,7 @@ void main() {
     if (kind > 0.5 && kind < 1.5) {
         // ---- roof: coppi in courses, 4 tile families, aged
         float layer = 18.0 + floor(hash11(seed * 3.3) * 4.0);
-        vec2 q = vUv;
-        if (hash11(seed * 91.0) > 0.5) q = q.yx;
+        vec2 q = vUv.yx;
         vec4 m = matSample(q / layerScale(layer), layer, vec3(1.0), tn);
         alb = m.rgb * (0.8 + 0.35 * fbm(vUv * 0.12 + seed * 9.0));
         alb = mix(alb, lin(vec3(0.42, 0.40, 0.33)), smoothstep(0.62, 0.82, fbm(vUv * 0.35 + 7.0)) * 0.45);
@@ -235,21 +261,22 @@ void main() {
             alb = rm.rgb * 0.85; rough = rm.a;
         }
     } else {
-        // ---- wall
-        float segLen = vA.x;
-        float u = vUv.x; float z = vUv.y;
-        float rel = z - 1.1;
+        // ---- wall: every quad is one bay of a building; its codes say what opens on each floor
+        int c1 = int(vS.z + 0.5), c2 = int(vS.w + 0.5);
+        int winType = c1 & 7, shut = (c1 >> 3) & 3, frameT = (c1 >> 5) & 3, bayKind = (c1 >> 7) & 3, gKind = (c1 >> 9) & 7;
+        bool pn = ((c1 >> 12) & 1) == 1; int matC = (c1 >> 13) & 3; int strC = (c1 >> 15) & 3; bool rust = ((c1 >> 17) & 1) == 1;
+        float winW = float(c2 & 255) / 100.0, winH = float((c2 >> 8) & 255) * 0.02;
+        int jseed = (c2 >> 16) & 15; int balMask = (c2 >> 20) & 15;
+        float u = vUv.x; float z = vUv.y; float rel = z - 1.1;
+        float bayC = vA.x, bayW = vA.w; float lu = u - bayC;
+        float groundH = max(vS.x, 2.5), floorH = max(vS.y, 2.6);
         vec2 uv = vec2(u, z);
-        float r1 = hash11(seed * 17.31), r2 = hash11(seed * 5.77), r3 = hash11(seed * 29.1);
         vec3 tint = paint(seed);
-        float layer;
-        if (r1 < 0.46) layer = floor(r2 * 6.0);              // painted plaster
-        else if (r1 < 0.78) layer = 6.0 + floor(r2 * 5.0);   // plaster with exposed brick
-        else if (r1 < 0.93) layer = 11.0 + floor(r2 * 4.0);  // fair-faced brick
-        else layer = 15.0;                                    // stone-clad palazzo (Istrian)
+        float lsel = hash11(seed * 5.77);
+        float layer = matC == 0 ? floor(lsel * 6.0) : (matC == 1 ? 6.0 + floor(lsel * 5.0) : (matC == 2 ? 11.0 + floor(lsel * 4.0) : 15.0));
         vec4 m = matSample(uv / layerScale(layer), layer, tint, tn);
-        if (layer > 5.5 && layer < 10.5) {
-            vec3 tnP; vec4 pl = matSample(uv / layerScale(0.0), floor(r3 * 3.0), tint, tnP);
+        if (matC == 1) {
+            vec3 tnP; vec4 pl = matSample(uv / layerScale(0.0), floor(hash11(seed * 29.1) * 3.0), tint, tnP);
             float zone = smoothstep(0.5, 0.62, fbm(uv * 0.12 + seed * 13.0) + smoothstep(5.0, 0.0, rel) * 0.2);
             m = mix(pl, m, zone); tn = mix(tnP, tn, zone);
         }
@@ -257,87 +284,140 @@ void main() {
         float streak = noise(vec2(u * 1.9 + seed * 40.0, z * 0.07)) * smoothstep(0.2, 0.9, fbm(vec2(u * 0.4, z * 0.15) + 3.0));
         alb *= 1.0 - 0.22 * streak;
         alb *= 0.88 + 0.24 * fbm(uv * 0.2 + seed * 3.0);
-        float groundH = 4.0; float floorH = 3.25;
-        if (r3 > 0.72 && rel < groundH - 0.2) {
+        vec3 tnI; vec4 ist = matSample(uv / layerScale(15.0), 15.0, vec3(1.0), tnI);
+        if (rust && rel < groundH - 0.12) {
+            // rusticated Istrian base (bugnato)
             vec3 tnA; vec4 as2 = matSample(uv / layerScale(17.0), 17.0, vec3(0.95), tnA);
             alb = as2.rgb; rough = as2.a; tn = tnA;
         }
-        // ---- openings
-        float fl = rel < groundH ? 0.0 : 1.0 + floor((rel - groundH) / floorH);
-        float fz = rel < groundH ? rel : mod(rel - groundH, floorH);
-        float nwin = max(1.0, floor(segLen / 2.9));
-        float spacing = segLen / nwin;
-        float idx = floor(u / spacing);
-        float lu = mod(u, spacing) - spacing * 0.5;
-        float wHalf = mix(0.42, 0.62, hash11(seed * 13.0));
-        float archType = floor(hash11(seed * 7.0) * 4.0); // 0 rect, 1 round, 2 gothic pointed, 3 gothic ogee
-        float inWin = 0.0, frame = 0.0, shutter = 0.0, balcony = 0.0;
-        bool hasWin = segLen > 2.2 && rel > -0.5;
-        bool poly = fl > 0.5 && fl < 1.5 && segLen > 13.0 && abs(u - segLen * 0.5) < 2.3;
-        if (poly) {
-            // piano nobile: central polifora (four arched lights on columns) above a stone balcony
-            float gx = u - segLen * 0.5 + 2.0;
-            float lx = fract(gx) - 0.5;
-            float hw = 0.36;
-            float y0 = 0.9, y1 = 2.45;
-            float head = archType > 1.5 ? y1 + hw * 1.2 * (1.0 - pow(abs(lx) / hw, 0.75)) : y1 + sqrt(max(hw * hw - lx * lx, 0.0));
-            float inG = step(0.0, gx) * step(gx, 4.0);
-            inWin = step(abs(lx), hw) * step(y0, fz) * step(fz, head) * inG;
-            frame = step(abs(lx), 0.5) * (1.0 - step(abs(lx), hw)) * step(y0, fz) * step(fz, y1 + 0.55) * inG;
-            balcony = step(abs(u - segLen * 0.5), 2.4) * step(0.0, fz) * step(fz, 0.9);
-        } else if (hasWin) {
-            float y0, y1;
-            if (fl < 0.5) {
-                float door = step(0.62, hash21(vec2(idx, seed * 99.0)));
-                y0 = door > 0.5 ? 0.0 : 1.5; y1 = door > 0.5 ? 2.9 : 2.6;
-            } else { y0 = 0.95; y1 = 2.5; }
-            float ax = abs(lu);
-            float head = y1;
-            if (archType > 2.5) head = y1 + wHalf * 1.25 * (1.0 - smoothstep(0.0, 1.0, ax / wHalf)) + 0.12 * sin(ax / wHalf * PI);
-            else if (archType > 1.5) head = y1 + wHalf * 1.1 * (1.0 - pow(ax / wHalf, 0.8));
-            else if (archType > 0.5) head = y1 + sqrt(max(wHalf * wHalf - ax * ax, 0.0));
-            float inside = step(ax, wHalf) * step(y0, fz) * step(fz, head);
-            float outer = step(ax, wHalf + 0.13) * step(y0 - 0.16, fz) * step(fz, head + 0.13);
-            inWin = inside; frame = outer - inside;
-            shutter = inside * step(0.58, hash21(vec2(idx * 7.0 + fl, seed * 51.0))) * step(0.5, fl);
+        // ---- floors
+        float pnF = pn ? 1.22 : 1.0;
+        int fl; float fz, flH;
+        if (rel < groundH) { fl = 0; fz = rel; flH = groundH; }
+        else {
+            float r2 = rel - groundH; float h1 = floorH * pnF;
+            if (r2 < h1) { fl = 1; fz = r2; flH = h1; }
+            else { float r3 = r2 - h1; fl = 2 + int(floor(r3 / floorH)); fz = mod(r3, floorH); flH = floorH; }
         }
-        vec3 tnI; vec4 ist = matSample(uv / layerScale(15.0), 15.0, vec3(1.0), tnI);
-        alb = mix(alb, ist.rgb * 0.95, frame); tn = mix(tn, tnI, frame); rough = mix(rough, ist.a, frame);
-        float scH = fl < 0.5 ? groundH : floorH;
-        float sc = step(abs(fz - scH + 0.06), 0.08) * step(0.35, hash11(seed * 3.0));
-        alb = mix(alb, ist.rgb, sc);
-        if (balcony > 0.5) {
-            float bal = step(0.5, fract((u - segLen * 0.5) / 0.19)) * step(0.12, fz) * step(fz, 0.75);
-            alb = mix(ist.rgb, ist.rgb * 0.25, bal);
-            ao = 0.85;
+        // string courses: a stone band at each floor line
+        bool course = (strC == 1 && fl >= 1 && fz < 0.16) || (strC == 2 && fl == 1 && fz < 0.2);
+        if (course) { alb = mix(alb, ist.rgb, 0.95); tn = tnI; rough = ist.a; ao = 0.92; }
+        // ---- the opening of this bay on this floor
+        bool has = bayKind != 2;
+        bool door = false, shop = false, waterDoor = false, grille = false;
+        bool balHere = fl >= 1 && fl <= 4 && ((balMask >> (fl - 1)) & 1) == 1;
+        bool poly = bayKind == 1 && balHere;
+        float ow = 1.0, y0 = 0.0, y1 = 0.0; int shape = winType; float xoff = 0.0;
+        if (fl == 0) {
+            if (gKind == 4) has = false;
+            else if (gKind == 3) { waterDoor = true; ow = min(bayW - 0.5, 2.4); y0 = -2.0; y1 = min(groundH - 0.55, 3.1); shape = (winType == 2 || winType == 3 || winType == 6) ? winType : 1; }
+            else if (gKind == 1) { door = true; ow = min(bayW - 0.5, 1.25); y0 = 0.0; y1 = min(groundH - 0.45, 2.6); shape = (winType == 0 || winType >= 4) ? 0 : (winType == 1 ? 1 : 2); }
+            else if (gKind == 2) { shop = true; ow = bayW - 0.55; y0 = 0.05; y1 = min(groundH - 0.6, 2.75); shape = 0; }
+            else { grille = true; ow = min(winW, bayW - 0.5); y0 = 1.25; y1 = min(groundH - 0.4, 2.55); shape = winType >= 4 ? 0 : winType; }
+        } else if (bayKind == 1) {
+            if (poly) { ow = bayW - 0.24; y0 = 0.5; y1 = min(flH - 0.5, 0.5 + winH * 1.1); shape = winType == 0 ? 1 : winType; }
+            else { ow = min(winW, bayW - 0.4); y0 = 0.85; y1 = min(flH - 0.45, 0.85 + winH * (flH / floorH)); }
+        } else {
+            ow = min(winW, bayW - 0.4);
+            float sill = (fl == 1 && pn) ? 0.75 : 0.9;
+            y0 = balHere ? 0.05 : sill; y1 = min(flH - 0.45, sill + winH * (flH / floorH));
+            float jit = float((jseed * 7 + fl * 13) % 17) / 16.0 - 0.5;
+            xoff = (pn || matC == 3) ? 0.0 : jit * max(0.0, bayW - ow - 0.6) * 0.35;
         }
-        if (inWin > 0.5) {
-            if (shutter > 0.5) {
-                float slat = step(0.5, fract(fz / 0.085));
-                vec3 sc2 = r2 > 0.82 ? lin(vec3(0.36, 0.25, 0.18)) : lin(vec3(0.12, 0.24, 0.17));
-                vec3 tnS; vec4 sw = matSample(vec2(u * 2.0, z) / layerScale(32.0), 32.0, sc2 * 2.2, tnS);
-                alb = sw.rgb * (0.78 + 0.22 * slat); rough = 0.55; tn = tnS;
-            } else if (fl < 0.5 && fz < 2.95) {
-                alb = lin(vec3(0.2, 0.12, 0.07)); rough = 0.6;           // wooden doors
+        if (y1 - y0 < 0.6) has = false;
+        float hw = ow * 0.5;
+        float lx = lu - xoff; float ax = abs(lx);
+        float fw = frameT == 3 ? 0.0 : (frameT == 1 ? 0.15 : 0.11);
+        float topE = archTop(shape, ax, hw, y1);
+        float inside = (has && ax < hw && fz > y0 && fz < topE) ? 1.0 : 0.0;
+        float topF = archTop(shape, ax * hw / (hw + fw), hw, y1) + fw;
+        float outer = (has && ax < hw + fw && fz > y0 - (door || shop || waterDoor ? 0.0 : 0.09) && fz < topF) ? 1.0 : 0.0;
+        float frame = outer - inside;
+        // stone sill under windows, pediments over the baroque ones
+        float sill2 = (has && !door && !shop && !waterDoor && !balHere && ax < hw + 0.14 && fz > y0 - 0.11 && fz < y0) ? 1.0 : 0.0;
+        float ped = 0.0;
+        if (has && fl >= 1 && (winType == 4 || winType == 5) && !poly) {
+            float pw = hw + 0.22; float pz = y1 + fw + 0.05;
+            float ph = winType == 4 ? 0.42 * (1.0 - ax / pw) : 0.2 + 0.1 * sqrt(max(1.0 - ax * ax / (pw * pw), 0.0));
+            ped = (ax < pw && fz > pz && fz < pz + ph) ? 1.0 : 0.0;
+            if (ax < pw && fz > pz - 0.04 && fz < pz) ao = 0.55;            // shadow under the pediment
+        }
+        // polifora columns between the lights
+        if (poly && ax > hw && fz > y0 && fz < y1) frame = 1.0;
+        float stone = max(max(frame, sill2), ped);
+        vec3 frameCol = frameT == 2 ? alb * 0.8 : (frameT == 0 ? mix(alb, vec3(1.0), 0.35) : ist.rgb * 0.95);
+        alb = mix(alb, frameCol, stone); tn = mix(tn, tnI, stone); rough = mix(rough, ist.a, stone);
+        if (stone > 0.5 && fz < y0 + 0.02 && sill2 > 0.5) ao = 0.8;
+        if (inside > 0.5) {
+            vec3 vdir = normalize(uCam - vW);
+            // the opening has depth: look into it through the jambs (parallax reveal)
+            vec3 vt = vec3(dot(vdir, t), dot(vdir, b), max(dot(vdir, n), 0.12));
+            float depthO = waterDoor ? 0.6 : (door || shop ? 0.18 : 0.22);
+            vec2 q = vec2(lx, fz) - vt.xy / vt.z * depthO;
+            float back = (abs(q.x) < hw && q.y > y0 && q.y < archTop(shape, abs(q.x), hw, y1)) ? 1.0 : 0.0;
+            bool closed = !poly && fl >= 1 && shut != 0 && (jseed * 5 + fl * 11) % 7 < 2;
+            if (back < 0.5) {
+                // jamb / soffit of the reveal, in shade
+                alb = alb * 0.55; ao = 0.6; rough = 0.9;
+            } else if (closed) {
+                vec3 sc2 = shut == 1 ? lin(vec3(0.15, 0.30, 0.20)) : (shut == 2 ? lin(vec3(0.36, 0.25, 0.18)) : lin(vec3(0.62, 0.62, 0.58)));
+                float slat = step(0.5, fract(fz / 0.07));
+                vec3 tnS; vec4 sw = matSample(vec2(lu * 2.0, z) / layerScale(32.0), 32.0, sc2 * 2.2, tnS);
+                alb = sw.rgb * (0.72 + 0.28 * slat); rough = 0.55; tn = tnS;
+                if (abs(lx) < 0.015) alb *= 0.4;                          // the two leaves meet
+            } else if (door) {
+                // painted wooden door with panels and a stone step
+                vec3 dc = hash11(seed * 7.7 + float(jseed)) > 0.5 ? lin(vec3(0.17, 0.24, 0.18)) : lin(vec3(0.30, 0.18, 0.10));
+                float panel = step(0.08, abs(fract(q.y / 0.7) - 0.5)) * step(0.06, abs(abs(q.x) - hw * 0.5));
+                alb = dc * (0.75 + 0.25 * panel); rough = 0.55;
+                if (abs(q.x) < 0.012) alb *= 0.5;
+            } else if (waterDoor) {
+                // portone da acqua: dark wet boathouse behind an old wooden gate
+                float bars = step(0.85, fract(q.x / 0.22)) * step(fz, y1 - 0.4);
+                alb = mix(lin(vec3(0.02, 0.025, 0.02)), lin(vec3(0.20, 0.13, 0.08)), bars * step(0.4, fz)); rough = 0.4;
             } else {
-                vec3 vdir = normalize(uCam - vW);
                 vec3 r = reflect(-vdir, n);
                 vec3 env = mix(uFogCol, uSkyZenith, clamp(r.z * 1.4 + 0.2, 0.0, 1.0));
                 float fres = 0.08 + 0.92 * pow(1.0 - max(dot(n, vdir), 0.0), 4.0);
-                vec3 interior = lin(vec3(0.05, 0.045, 0.04)) * (0.6 + 0.8 * noise(vec2(idx, fl) * 3.7));
-                if (hash21(vec2(idx, fl + seed)) > 0.7) interior = lin(vec3(0.55, 0.50, 0.42)) * 0.35;
-                float mull = step(abs(lu), 0.025) * step(0.5, fl) * (poly ? 0.0 : 1.0);
+                float wid = float(jseed) + float(fl) * 3.1 + seed * 17.0;
+                vec3 interior = lin(vec3(0.05, 0.045, 0.04)) * (0.6 + 0.8 * noise(vec2(wid, 1.0)));
+                if (hash11(wid) > 0.72) interior = lin(vec3(0.55, 0.50, 0.42)) * 0.35;
+                if (shop) {
+                    // shop window: shelves and goods behind the glass, lit from inside
+                    float shelf = step(0.82, fract(q.y / 0.55)) + step(0.9, fract(q.x / 0.7)) * 0.5;
+                    vec3 goods = lin(vec3(0.5 + 0.4 * noise(q * 5.0 + wid), 0.35 + 0.3 * noise(q * 4.0 + 3.0), 0.25 + 0.3 * noise(q * 6.0 + 7.0)));
+                    interior = mix(goods * 0.45, lin(vec3(0.12, 0.09, 0.07)), clamp(shelf, 0.0, 1.0)) * (0.8 + 0.4 * smoothstep(0.3, 2.0, q.y));
+                }
+                // curtains drawn to the sides of some windows
+                if (!shop && hash11(wid * 1.7) > 0.55 && abs(q.x) > hw * (0.5 + 0.2 * hash11(wid * 3.1))) interior = lin(vec3(0.78, 0.74, 0.66)) * (0.45 + 0.1 * sin(q.x * 60.0));
+                // glazing bars: two casements and a transom; leaded roundels in gothic lights
+                float mull = 0.0;
+                if (shape == 0 || shape >= 4) mull = max(step(abs(lx), 0.02), step(abs(fz - (y0 + (y1 - y0) * 0.72)), 0.02));
+                else mull = step(abs(lx), 0.015);
+                if (shop) mull = max(step(abs(fz - min(2.2, y1 - 0.35)), 0.035), step(hw - 0.05, abs(lx)));
                 vec3 glass = interior * (uSkyAmb + uSunCol * 0.2) + env * fres * 0.9
                     + uSunCol * pow(max(dot(reflect(-uSunDir, n), vdir), 0.0), 400.0) * sunShadow(vW, n) * 4.0;
-                glass = mix(glass, ist.rgb * (uSkyAmb + uSunCol * 0.4), mull);
+                if (shape == 2 || shape == 3 || shape == 6) { vec2 rd = fract(vec2(lx, fz) / 0.11) - 0.5; glass *= 0.85 + 0.3 * smoothstep(0.35, 0.5, length(rd)); }
+                glass = mix(glass, lin(vec3(0.28, 0.24, 0.20)) * (uSkyAmb + uSunCol * 0.3), mull);
+                if (grille) { float gb = max(step(abs(fract(lx / 0.13) - 0.5), 0.07), step(abs(fract(fz / 0.45) - 0.5), 0.04)); glass = mix(glass, lin(vec3(0.03)) * uSkyAmb, gb); }
                 o = vec4(fog(glass, vW), 1.0);
                 return;
             }
         }
+        // shop sign board above the shop window
+        if (shop && fl == 0 && abs(lu) < hw && fz > y1 + 0.1 && fz < y1 + 0.5) {
+            float sh2 = hash11(seed * 3.9 + float(jseed));
+            alb = sh2 > 0.66 ? lin(vec3(0.14, 0.22, 0.16)) : (sh2 > 0.33 ? lin(vec3(0.35, 0.10, 0.08)) : lin(vec3(0.85, 0.80, 0.70)));
+            float letters = step(0.5, noise(vec2(lu * 9.0, 3.0))) * step(abs(fz - y1 - 0.3), 0.09) * step(abs(lu), hw * 0.75);
+            alb = mix(alb, sh2 > 0.33 ? lin(vec3(0.9, 0.85, 0.7)) : lin(vec3(0.1)), letters); rough = 0.5;
+        }
+        // rising damp and salt (efflorescence) at the foot of the walls, algae and the tide line on canal walls
         float tide = 0.2 + 0.15 * noise(vec2(u * 0.6, 1.0));
         float algae = smoothstep(tide + 0.25, tide - 0.05, z);
         alb = mix(alb, lin(vec3(0.10, 0.14, 0.08)), algae); rough = mix(rough, 0.25, algae);
         alb = mix(alb, alb * vec3(0.72, 0.74, 0.65) + 0.04, smoothstep(tide + 1.5, tide + 0.3, z) * 0.6);
+        float salt = smoothstep(1.1 + 1.6, 1.1 + 0.4, z) * smoothstep(0.45, 0.7, fbm(uv * vec2(1.3, 2.2) + seed * 7.0)) * step(0.5, z);
+        alb = mix(alb, lin(vec3(0.82, 0.80, 0.74)), salt * 0.45);
         ao = min(ao, mix(0.65, 1.0, smoothstep(0.5, 7.0, rel)));
     }
     n = perturb(n, t, b, tn, 0.9);
@@ -425,75 +505,56 @@ $COMMON
 ${Waves.glsl()}
 in vec3 vW; in float vFade;
 uniform sampler2D uRefl; uniform vec2 uScreen; uniform float uWaveAmp;
-uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir;
+uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir;   // wake state: r height, g previous height, b foam, a aeration
+uniform sampler2D uWaterN;                       // tileable ripple slopes (rg), baked once at start-up
+uniform vec4 uBoat; uniform vec2 uHull;          // x, y, heading, speed ; half length, half beam
 out vec4 o;
-// bubble cells: distance to the nearest of a jittered grid of points (Worley F1)
-float cellF(vec2 x) {
-    vec2 i = floor(x), f = fract(x); float d = 9.0;
-    for (int y = -1; y <= 1; y++) for (int xx = -1; xx <= 1; xx++) {
-        vec2 c = vec2(float(xx), float(y));
-        vec2 h = fract(sin(vec2(dot(i + c, vec2(127.1, 311.7)), dot(i + c, vec2(269.5, 183.3)))) * 43758.5453);
-        d = min(d, length(c + h - f));
-    }
-    return d;
-}
+vec2 ripple(vec2 uv) { return texture(uWaterN, uv).rg * 2.0 - 1.0; }
 void main() {
     vec2 p = vW.xy;
     vec2 g = waveG(p, uTime, uWaveAmp) * max(vFade, 0.35);
-    // simulated wake: slope from the heightfield, foam from its second channel
+    // simulated wake: slope from the heightfield, foam / aeration from its other channels
     vec2 wuv = (p - uWakeO.xy) / uWakeO.z;
-    float foam = 0.0; float wakeE = 0.0; float milkA = 0.0; float nearH = 0.0; vec2 wakeSlope = vec2(0.0);
+    float foam = 0.0; float wakeE = 0.0; float milkA = 0.0; vec2 wakeSlope = vec2(0.0); float hcF = 0.0;
     if (wuv.x > 0.004 && wuv.y > 0.004 && wuv.x < 0.996 && wuv.y < 0.996) {
         float wn = float(textureSize(uWake, 0).x); float e = 1.0 / wn; float cellM = uWakeO.z / wn;
-        float hx = texture(uWake, wuv + vec2(e, 0.0)).r - texture(uWake, wuv - vec2(e, 0.0)).r;
-        float hy = texture(uWake, wuv + vec2(0.0, e)).r - texture(uWake, wuv - vec2(0.0, e)).r;
-        float border = smoothstep(0.0, 0.06, min(min(wuv.x, wuv.y), min(1.0 - wuv.x, 1.0 - wuv.y)));
-        vec2 wg = vec2(hx, hy) / (2.0 * cellM) * border;
-        float hc = texture(uWake, wuv).r;
-        float lapW = (texture(uWake, wuv + vec2(e, 0.0)).r + texture(uWake, wuv - vec2(e, 0.0)).r
-                    + texture(uWake, wuv + vec2(0.0, e)).r + texture(uWake, wuv - vec2(0.0, e)).r - 4.0 * hc) / (cellM * cellM);
-        wakeE = clamp((abs(hc) * 2.5 + length(wg) * 3.0 + clamp(-lapW * 8.0, 0.0, 1.0)) * border, 0.0, 1.5);   // capillary chop on crests
-        float fo = texture(uWake, wuv).g;
-        g += wg * mix(5.0, 1.5, smoothstep(0.3, 0.8, fo)); wakeSlope = wg;    // strong slope on the clean arms, not on the wash
         vec4 wt = texture(uWake, wuv);
-        foam = wt.g * border; milkA = wt.b * border; nearH = wt.a * border;
-        wakeE = max(wakeE, nearH * 1.3) + max(hc, 0.0) * 4.0;   // churn next to the hull and on the stern mound
+        float hE = texture(uWake, wuv + vec2(e, 0.0)).r, hW = texture(uWake, wuv - vec2(e, 0.0)).r;
+        float hN = texture(uWake, wuv + vec2(0.0, e)).r, hS = texture(uWake, wuv - vec2(0.0, e)).r;
+        float border = smoothstep(0.0, 0.06, min(min(wuv.x, wuv.y), min(1.0 - wuv.x, 1.0 - wuv.y)));
+        vec2 wg = vec2(hE - hW, hN - hS) / (2.0 * cellM) * border;
+        float hc = wt.r; hcF = hc;
+        float lapW = (hE + hW + hN + hS - 4.0 * hc) / (cellM * cellM);
+        wakeE = clamp((abs(hc) * 2.5 + length(wg) * 3.0 + clamp(-lapW * 8.0, 0.0, 1.0)) * border, 0.0, 1.5);   // capillary chop on crests
+        foam = wt.b * border; milkA = wt.a * border;
+        g += wg * mix(5.0, 1.5, smoothstep(0.3, 0.8, foam)); wakeSlope = wg;    // strong slope on the clean arms, not on the wash
+        wakeE += max(hc, 0.0) * 4.0;                                           // churn on the stern mound
+    }
+    // churned water right next to a moving hull (no mirror beside a boat at speed)
+    {
+        vec2 d = p - uBoat.xy; float ch = cos(uBoat.z), sh = sin(uBoat.z);
+        vec2 l = vec2(d.x * ch + d.y * sh, -d.x * sh + d.y * ch);
+        float outD = max(abs(l.x) - uHull.x, abs(l.y) - uHull.y);
+        wakeE = max(wakeE, (1.0 - clamp(outD / 3.0, 0.0, 1.0)) * clamp(uBoat.w / 8.0, 0.0, 1.0) * 1.3);
     }
     // frame aligned with the wash: along / across the boat's track
     vec2 al = uWakeDir, ac = vec2(-uWakeDir.y, uWakeDir.x);
-    vec2 pw = vec2(dot(p, al) * 0.2, dot(p, ac));        // stretched 3x along the track -> long turbulent streaks
-    // the boil: churned, bulging water where the wash is fresh (just behind the outboard) - strong animated normals
+    vec2 pw = vec2(dot(p, al) * 0.2, dot(p, ac));        // stretched along the track -> long turbulent streaks
+    // the boil: churned, bulging water where the wash is fresh (just behind the outboard)
     if (foam > 0.35) {
         float bs = smoothstep(0.35, 0.9, foam);
-        vec2 bq = p * 3.5 + uWakeDir * uTime * 2.0;           // streams aft with the wash
-        float b0 = noise(bq) + 0.5 * noise(bq * 2.1 + 3.7) + 0.25 * noise(bq * 4.3 + 1.1);
-        float bx = noise(bq + vec2(0.06, 0.0)) + 0.5 * noise((bq + vec2(0.06, 0.0)) * 2.1 + 3.7) + 0.25 * noise((bq + vec2(0.06, 0.0)) * 4.3 + 1.1);
-        float by = noise(bq + vec2(0.0, 0.06)) + 0.5 * noise((bq + vec2(0.0, 0.06)) * 2.1 + 3.7) + 0.25 * noise((bq + vec2(0.0, 0.06)) * 4.3 + 1.1);
-        g += vec2(bx - b0, by - b0) / 0.06 * 0.25 * bs;
+        g += ripple(p * 0.42 + uWakeDir * uTime * 0.25) * 0.55 * bs;
         wakeE = max(wakeE, bs * 1.5);
     }
-    // wake waves carry a field of short, steep wavelets: much rougher surface where the wake energy is
-    if (wakeE > 0.01) {
-        vec2 r1 = p * 4.5 + vec2(uTime * 1.1, -uTime * 0.7), r2 = p * 9.0 - vec2(uTime * 0.9, uTime * 1.3);
-        float e2 = 0.05;
-        float c0 = noise(r1), cx = noise(r1 + vec2(e2, 0.0)), cy = noise(r1 + vec2(0.0, e2));
-        float d0 = noise(r2), dx = noise(r2 + vec2(e2, 0.0)), dy = noise(r2 + vec2(0.0, e2));
-        g += (vec2(cx - c0, cy - c0) * 0.06 + vec2(dx - d0, dy - d0) * 0.03) / e2 * wakeE;
-    }
-    vec2 q1 = p * 1.3 + vec2(uTime * 0.31, uTime * 0.17);
-    vec2 q2 = p * 3.7 - vec2(uTime * 0.23, -uTime * 0.41);
-    float e = 0.1;
-    float a0 = fbm(q1), ax = fbm(q1 + vec2(e, 0.0)), ay = fbm(q1 + vec2(0.0, e));
-    float b0 = noise(q2), bx = noise(q2 + vec2(e, 0.0)), by = noise(q2 + vec2(0.0, e));
-    // the turbulent track is a slick: the scar kills the small ripples (dark smooth stripe in glitter)
+    // wake waves carry short, steep wavelets: much rougher surface where the wake energy is
+    if (wakeE > 0.01) g += (ripple(p * 0.55 + vec2(uTime * 0.13, -uTime * 0.09)) * 0.16 + ripple(p * 1.1 - vec2(uTime * 0.11, uTime * 0.16)) * 0.09) * wakeE;
+    // ambient ripples (two scrolling layers of the baked slope texture); the turbulent track is a slick that kills them
     float slick = 1.0 - 0.75 * clamp(milkA * 2.0, 0.0, 1.0) * (1.0 - clamp(foam * 2.0, 0.0, 1.0));
-    g += (vec2(ax - a0, ay - a0) / e * 0.05 + vec2(bx - b0, by - b0) / e * 0.018) * slick;
+    g += (ripple(p * 0.085 + vec2(uTime * 0.021, uTime * 0.012)) * 0.075 + ripple(p * 0.23 - vec2(uTime * 0.017, -uTime * 0.03)) * 0.045) * slick;
     vec3 n = normalize(vec3(-g, 1.0));
     vec3 v = normalize(uCam - vW);
     float nv = max(dot(n, v), 0.0);
     float fres = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
-    // churned water breaks the mirror: extra distortion from wake energy and slope, clamped (no smears), none under
-    // white foam, fading with distance
     vec2 roff = clamp(n.xy * 0.05 * wakeE * 2.5 + wakeSlope * 0.12, -0.03, 0.03)
               * (1.0 - clamp(foam, 0.0, 1.0)) * (1.0 - smoothstep(60.0, 200.0, length(uCam - vW)));
     vec2 suv = gl_FragCoord.xy / uScreen + n.xy * 0.035 + roff;
@@ -505,44 +566,118 @@ void main() {
     vec3 body = (deep + scatter) * (uSkyAmb * 1.2 + uSunCol * 0.25 * sh);
     vec3 col = mix(body, refl, fres);
     vec3 h = normalize(uSunDir + v);
-    float spec = pow(max(dot(n, h), 0.0), 600.0) * 40.0 + pow(max(dot(n, h), 0.0), 80.0) * 0.6;
+    float nh = max(dot(n, h), 0.0);
+    float spec = pow(nh, 600.0) * 40.0 + pow(nh, 80.0) * 0.6;
     col += uSunCol * spec * sh * fres * 4.0 * (1.0 - 0.6 * clamp(milkA, 0.0, 1.0));
-    // aerated water: the pale turquoise scar the wash leaves behind (lasts much longer than the white foam)
     float aerT = clamp(milkA * 0.9 + foam * 0.4, 0.0, 1.0);
     // the hollow behind the mound: water drops away and you see deeper into it - darker, glassier
-    if (milkA > 0.15 && wakeSlope != vec2(0.0)) {
-        float hcF = texture(uWake, wuv).r;
-        col *= 1.0 - clamp(-hcF * 3.0, 0.0, 0.35) * (1.0 - clamp(foam * 1.5, 0.0, 1.0));
-    }
+    if (milkA > 0.15) col *= 1.0 - clamp(-hcF * 3.0, 0.0, 0.35) * (1.0 - clamp(foam * 1.5, 0.0, 1.0));
     if (aerT > 0.005) {
-        // fresh scar is turquoise, old scar fades toward green-brown canal water
         vec3 milk = mix(vec3(0.045, 0.075, 0.06), vec3(0.06, 0.15, 0.13), smoothstep(0.08, 0.6, milkA)) * (uSkyAmb * 1.2 + uSunCol * 0.4 * sh);
         col = mix(col, milk, aerT * 0.45);
     }
     if (foam > 0.01) {
-        // lace streaked along the track: torn patches x bubble rafts x fine froth (10-30 cm), slowly boiling
+        // lace streaked along the track: torn patches x bubble rafts x fine froth, slowly boiling
         vec2 q = pw + n.xy * 0.4 + vec2(0.0, milkA * pw.x * 0.25);
         float lace = fbm(q * 0.8 + uTime * 0.05) * 0.25 + noise(q * 2.6 - uTime * 0.15) * 0.32
                    + noise(q * 7.0 + uTime * 0.3) * 0.22 + noise(q * 9.0 + uTime * 0.2) * 0.13 + noise(q * 26.0) * 0.08;
-        // fresh churn right behind the motor is near-solid matte white, then it tears into lace
         float thr = 1.0 - clamp(foam, 0.0, 1.0) * mix(0.64, 0.86, smoothstep(0.6, 0.95, foam));
         float fw = smoothstep(thr - 0.06, thr + 0.06, lace);
-        // lit foam: bubble-cell bumps on top of the wave normal, albedo varies 0.6-0.9
-        vec2 cq = q * 6.0 + uTime * 0.2;
-        float c0 = noise(cq), cx2 = noise(cq + vec2(0.05, 0.0)), cy2 = noise(cq + vec2(0.0, 0.05));
-        vec3 nf = normalize(vec3(-g * 0.6 - vec2(cx2 - c0, cy2 - c0) / 0.05 * 0.35, 1.0));
-        float alb = 0.62 + 0.28 * smoothstep(0.2, 0.8, c0) * (0.7 + 0.3 * noise(p * 3.0));
+        vec2 sb = ripple(q * 0.9 + uTime * 0.02);
+        vec3 nf = normalize(vec3(-g * 0.6 - sb * 0.5, 1.0));
+        float alb = 0.62 + 0.28 * clamp(sb.x * 0.5 + 0.5, 0.0, 1.0) * (0.7 + 0.3 * noise(p * 3.0));
         float dif = max(dot(nf, uSunDir), 0.0);
         vec3 white = vec3(alb, alb * 1.03, alb * 1.02) * (uSunCol * 0.6 * dif * sh + uSkyAmb * (1.1 + 0.4 * nf.z));
-        // submerged foam just under the surface: a subsurface teal glow where the lace is half there
         float sub = smoothstep(thr - 0.3, thr - 0.1, lace) * (1.0 - fw);
         col = mix(col, vec3(0.25, 0.50, 0.45) * (uSkyAmb * 1.1 + uSunCol * 0.35 * sh), sub * 0.45);
-        // thin aerated fringe where the lace thins out, so the foam blends instead of looking cut out
         float fringe = smoothstep(thr - 0.22, thr - 0.04, lace) * (1.0 - fw);
         col = mix(col, vec3(0.20, 0.42, 0.38) * (uSkyAmb * 1.2 + uSunCol * 0.45 * sh), fringe * 0.5);
         col = mix(col, white, fw * 0.95);
     }
     o = vec4(fog(col, vW), 1.0);
+}
+"""
+
+    // ------------------------------------------------------------------ GPU wake simulation (one step per draw, ping-pong)
+    const val WAKESIM_VS = """#version 300 es
+layout(location=0) in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+"""
+    const val WAKESIM_FS = """#version 300 es
+precision highp float;
+precision highp int;
+uniform highp sampler2D uState;      // r height, g previous height, b foam, a aeration (nearest)
+uniform lowp sampler2D uSolid;       // r > 0.5: land / quay wall
+uniform int uN; uniform float uCell; uniform vec2 uOrigin; uniform ivec2 uShift;
+uniform float uDt; uniform float uK; uniform float uBeta; uniform float uNu; uniform float uDamp; uniform float uSpongeMin;
+uniform float uFoamDiff; uniform float uAerDiff;
+uniform vec4 uB0; uniform vec4 uB0b; uniform vec4 uB1; uniform vec4 uB1b; uniform vec2 uHull;
+uniform vec4 uSplat[12]; uniform int uNSplat;
+out vec4 o;
+const float PI = 3.14159265;
+vec4 S(ivec2 c) { c += uShift; if (c.x < 0 || c.y < 0 || c.x >= uN || c.y >= uN) return vec4(0.0); return texelFetch(uState, c, 0); }
+// hull "occupancy" (displacement depth) at world point p for a boat pose: B = x, y, heading, depth; Bb = throttle, planing
+float occ(vec4 B, vec4 Bb, vec2 p) {
+    vec2 d = p - B.xy; float ch = cos(B.z), sh = sin(B.z);
+    float lx = d.x * ch + d.y * sh, ly = -d.x * sh + d.y * ch;
+    float hl = uHull.x, hb = uHull.y;
+    if (B.w <= 0.0 || abs(lx) > hl + 7.0 || abs(ly) > hl + 7.0) return 0.0;
+    if (lx < -hl) {
+        // behind the transom: the outboard throws water up into a mound, then it falls into a hollow
+        float bk = -hl - lx;
+        float latM = max(0.0, 1.0 - pow(ly / (hb * 0.45), 2.0)), latH = max(0.0, 1.0 - pow(ly / (hb * 0.95), 2.0));
+        if (latH <= 0.0 || bk > 6.5) return 0.0;
+        float thr = abs(Bb.x), pl = Bb.y;
+        float mound = (0.05 + 0.10 * pl) * thr * (bk < 2.0 ? sin(PI * bk / 2.0) : 0.0) * latM;
+        float hollow = (0.07 + 0.10 * pl) * thr * (bk >= 2.0 ? sin(PI * (bk - 2.0) / 4.5) : 0.0) * latH;
+        return hollow - mound;
+    }
+    float t = clamp(lx / hl, -1.0, 1.0);
+    float beam = hb * (t > 0.0 ? sqrt(max(0.0, 1.0 - t * t * t)) : 1.0);
+    float outD = max(abs(lx) - hl, abs(ly) - beam);
+    if (outD > 0.4) return 0.0;
+    float aft = 1.0 - Bb.y * 0.6 * max(0.0, t);
+    float inside = max(0.0, 1.0 - pow(ly / (beam + 0.8), 2.0)) * (1.0 - t * t * 0.3);
+    float soft = outD > 0.0 ? pow(1.0 - outD / 0.4, 2.0) : 1.0;
+    return B.w * inside * aft * soft;
+}
+void main() {
+    ivec2 c = ivec2(gl_FragCoord.xy);
+    vec2 p = uOrigin + (vec2(c) + 0.5) * uCell;
+    vec4 s0 = S(c);
+    vec4 sE = S(c + ivec2(1, 0)), sW = S(c - ivec2(1, 0)), sN = S(c + ivec2(0, 1)), sS = S(c - ivec2(0, 1));
+    float dg = S(c + ivec2(1, 1)).r + S(c + ivec2(-1, 1)).r + S(c + ivec2(1, -1)).r + S(c + ivec2(-1, -1)).r;
+    float d2 = S(c + ivec2(2, 0)).r + S(c - ivec2(2, 0)).r + S(c + ivec2(0, 2)).r + S(c - ivec2(0, 2)).r;
+    float u0 = s0.r, up0 = s0.g;
+    float n4 = sE.r + sW.r + sN.r + sS.r;
+    float lap = n4 - 4.0 * u0;
+    float lap2 = 20.0 * u0 - 8.0 * n4 + 2.0 * dg + d2;           // biharmonic: weak dispersion (short waves lag)
+    float lapP = sE.g + sW.g + sN.g + sS.g - 4.0 * up0;
+    float v = 2.0 * u0 - up0 + uK * lap + uBeta * lap2 + uNu * (lap - lapP);
+    // moving hull: its change of footprint is a volume-conserving height displacement (no velocity kick)
+    float dOcc = occ(uB0, uB0b, p) - occ(uB1, uB1b, p);
+    v -= dOcc; float uc = u0 - dOcc;
+    int edge = min(min(c.x, c.y), min(uN - 1 - c.x, uN - 1 - c.y));
+    v *= edge < 16 ? mix(uSpongeMin, uDamp, float(edge) / 16.0) : uDamp;
+    if (edge == 0) { v = 0.0; uc = 0.0; }
+    bool solid = texelFetch(uSolid, c, 0).r > 0.5;
+    // foam: breaking crests near the boat; fresh white foam bleaches fast, aeration lingers and spreads
+    float steep = length(vec2(sE.r - sW.r, sN.r - sS.r)) / (2.0 * uCell);
+    float fAvg = (sE.b + sW.b + sN.b + sS.b) * 0.25;
+    float f0 = s0.b + (fAvg - s0.b) * uFoamDiff;
+    float q = 1.0 - min(f0, 1.0);
+    float gate = 1.0 - clamp((distance(p, uB0.xy) - 10.0) / 10.0, 0.0, 1.0);
+    float f = f0 * exp(-uDt / (1.1 + 4.0 * q * q)) + (max(0.0, steep - 0.12) * 3.0 + max(0.0, u0 - 0.16) * 3.0) * uDt * gate;
+    float aAvg = (sE.a + sW.a + sN.a + sS.a) * 0.25;
+    float a = (s0.a + (aAvg - s0.a) * uAerDiff) * exp(-uDt / 25.0);
+    for (int k = 0; k < 12; k++) {
+        if (k >= uNSplat) break;
+        vec4 sp = uSplat[k];
+        float dd = distance(p, sp.xy) / sp.z;
+        if (dd < 1.0) { float w = sp.w * (1.0 - dd * dd); f += w; a = min(1.0, a + w * 0.5); }
+    }
+    if (solid) { v = 0.0; f = 0.0; a = 0.0; }
+    o = vec4(v, uc, min(f, 1.0), min(a, 1.0));
 }
 """
 
@@ -591,10 +726,11 @@ void main() {
     vec3 along = sp > 0.2 ? vp / sp : normalize(cross(view, vec3(0.0, 0.0, 1.0)));
     vec3 side = normalize(cross(view, along));
     float size = aInfo.y;
-    float stretch = 1.0 + min(sp * 0.045 / max(size, 0.03), 5.0);
+    float stretch = 1.0 + min(sp * 0.03 / max(size, 0.03), 2.2);
     vec3 p = aPos + along * aCorner.y * size * stretch + side * aCorner.x * size;
     vW = p;
-    p += normalize(uCam - p) * min(0.5, size * 2.0);   // keep the sprite from being cut by the water surface vA = aInfo.x; vC = aCorner; vSize = size;
+    p += normalize(uCam - p) * min(0.5, size * 2.0);   // keep the sprite from being cut by the water surface
+    vA = aInfo.x; vC = aCorner; vSize = size;
     gl_Position = uVP * vec4(p, 1.0);
 }
 """
@@ -608,7 +744,7 @@ void main() {
     float ragged = r * (0.85 + 0.4 * noise(vC * 2.5 + vW.xy * 9.0));
     if (ragged > 1.0) discard;
     bool mist = vSize > 0.25;
-    float a = exp(-ragged * (mist ? 2.5 : 3.5)) * smoothstep(0.0, 0.3, vA) * (mist ? 0.10 : 0.7);
+    float a = exp(-ragged * (mist ? 2.5 : 3.5)) * smoothstep(0.0, 0.3, vA) * (mist ? 0.08 : 0.38);
     float sh = sunShadow(vW, vec3(0, 0, 1));
     vec3 v = normalize(uCam - vW);
     float fwd = pow(max(dot(-v, uSunDir), 0.0), 6.0);       // droplets glow when backlit
@@ -639,7 +775,19 @@ void main() { vP = aPos; gl_Position = vec4(aPos, 0.9999, 1.0); }
 precision highp float;
 in vec2 vP;
 uniform mat4 uInvVP; uniform vec3 uSunDir; uniform vec3 uFogCol; uniform vec3 uSkyZenith; uniform vec3 uSunCol; uniform float uMirrorSky;
+uniform float uTime; uniform float uCloudCover;
 out vec4 o;
+float h21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+float fbm5(vec2 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 5; i++) { s += a * vn(p); p = p * 2.02 + vec2(1.7, 9.2); a *= 0.5; } return s; }
+float fbm3(vec2 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 3; i++) { s += a * vn(p); p = p * 2.03 + vec2(4.1, 1.3); a *= 0.5; } return s; }
+// fair-weather cumulus: domain-warped fbm thresholded into puffy cells with soft, broken edges
+float cumulus(vec2 q) {
+    vec2 w = vec2(fbm3(q * 0.55 + 3.1), fbm3(q * 0.55 + 7.7));
+    float d = fbm5(q + (w - 0.5) * 1.3);
+    return smoothstep(0.58 - uCloudCover * 0.18, 0.80, d);
+}
 void main() {
     vec4 a = uInvVP * vec4(vP, -1.0, 1.0); vec4 b = uInvVP * vec4(vP, 1.0, 1.0);
     vec3 d = normalize(b.xyz / b.w - a.xyz / a.w);
@@ -648,6 +796,28 @@ void main() {
     vec3 col = mix(uFogCol * 1.15, uSkyZenith, pow(max(h, 0.0), 0.5));
     float s = max(dot(d, uSunDir), 0.0);
     col += uSunCol * (pow(s, 1800.0) * 60.0 + pow(s, 64.0) * 0.5 + pow(s, 6.0) * 0.18);
+    if (d.z > 0.015) {
+        // cloud layer ~1.5 km up, drifting with the wind
+        vec2 P = d.xy / d.z * 1.5;                      // km on the cloud deck
+        vec2 wind = vec2(uTime * 0.004, uTime * 0.0015);
+        vec2 q = P * 1.1 + wind;
+        float den = cumulus(q);
+        // thin cirrus higher up
+        vec2 cq = d.xy / d.z * 3.0 * vec2(0.35, 1.4) + wind * 0.6;
+        float ci = smoothstep(0.55, 0.85, fbm5(cq + 11.0)) * 0.35;
+        if (den > 0.001 || ci > 0.001) {
+            // self-shadowing: density a little way towards the sun darkens the cloud; thin edges glow (silver lining)
+            float toward = cumulus(q + normalize(uSunDir.xy + 1e-4) * 0.06);
+            float lit = clamp(1.0 - toward * 0.85, 0.0, 1.0);
+            vec3 sunLit = uSunCol * (0.55 + 0.45 * lit) * 0.42;
+            vec3 shade = mix(uSkyZenith * 0.9, uFogCol * 0.85, 0.5) * 0.85;
+            float edge = 1.0 - smoothstep(0.0, 0.6, den);
+            vec3 cc = mix(shade, sunLit + shade * 0.4, lit) + uSunCol * pow(s, 8.0) * edge * 0.9;
+            float far = smoothstep(0.015, 0.22, d.z);   // clouds near the horizon melt into the haze
+            col = mix(col, cc, den * 0.92 * far);
+            col = mix(col, uSunCol * 0.28 + uSkyZenith * 0.5, ci * far * (1.0 - den));
+        }
+    }
     col = mix(col, uFogCol * 0.9, smoothstep(0.02, -0.15, d.z));
     o = vec4(col, 1.0);
 }

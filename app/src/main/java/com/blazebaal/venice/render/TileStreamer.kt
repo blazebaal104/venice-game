@@ -9,20 +9,22 @@ import kotlin.math.*
 
 class GpuTile(
     val tx: Int, val ty: Int, val ox: Float, val oy: Float,
-    val facade: Mesh?, val generic: Mesh?,
+    val facade: Mesh?, val generic: Mesh?, val detail: Mesh?,
     val maskTex: Int, val classTex: Int, val hasMarsh: Boolean,
 ) {
     val model = Mat4.translation(ox, oy, 0f)
     fun release() {
-        facade?.release(); generic?.release()
+        facade?.release(); generic?.release(); detail?.release()
         if (maskTex != 0) Tex.release(maskTex); if (classTex != 0) Tex.release(classTex)
     }
 }
 
-private class Built(val t: TileData, val m: TileMeshes)
+private class Built(val t: TileData, val m: TileMeshes, val fac: java.nio.FloatBuffer?, val gen: java.nio.FloatBuffer?, val det: java.nio.FloatBuffer?)
 
 class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
     val tiles = HashMap<Int, GpuTile>()
+    /** bumped whenever a tile is added or removed (the cached city shadow map uses it) */
+    @Volatile var version = 0
     private val pending = HashSet<Int>()
     private val ready = ConcurrentLinkedQueue<Built>()
     private val pool = Executors.newFixedThreadPool(2) { r -> Thread(r, "tile-builder").apply { priority = Thread.MIN_PRIORITY + 1 } }
@@ -54,7 +56,12 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
             pool.execute {
                 try {
                     val t = world.tile(tx, ty)
-                    if (t != null) ready.add(Built(t, meshers.get()!!.build(t)))
+                    if (t != null) {
+                        val m = meshers.get()!!.build(t)
+                        // vertex data copied into direct buffers here, off the GL thread
+                        fun fb(a: FloatArray) = if (a.isEmpty()) null else floatBuffer(a)
+                        ready.add(Built(t, m, fb(m.facade), fb(m.generic), fb(m.detail)))
+                    }
                 } catch (e: Throwable) { android.util.Log.e("Venice", "tile $tx,$ty failed", e) }
             }
         }
@@ -66,13 +73,14 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
             pending.remove(k)
             tiles[k]?.release()
             tiles[k] = upload(b)
+            version++
             n++
         }
         // unload far tiles
         val it = tiles.entries.iterator()
         while (it.hasNext()) {
             val e = it.next(); val t = e.value
-            if (hypot(t.ox + TILE_SIZE / 2f - cx, t.oy + TILE_SIZE / 2f - cy) > radius + TILE_SIZE * 2.2f) { t.release(); it.remove() }
+            if (hypot(t.ox + TILE_SIZE / 2f - cx, t.oy + TILE_SIZE / 2f - cy) > radius + TILE_SIZE * 2.2f) { t.release(); it.remove(); version++ }
         }
         world.evictFar(cx, cy, rt + 3)
     }
@@ -89,8 +97,9 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
         }
         return GpuTile(
             t.tx, t.ty, t.ox, t.oy,
-            if (m.facade.isNotEmpty()) Mesh(m.facade) else null,
-            if (m.generic.isNotEmpty()) Mesh(m.generic) else null,
+            b.fac?.let { Mesh(it, it.capacity() / FSTRIDE, FSTRIDE, intArrayOf(3, 3, 2, 4, 4)) },
+            b.gen?.let { Mesh(it, it.capacity() / STRIDE) },
+            b.det?.let { Mesh(it, it.capacity() / STRIDE) },
             mask, cls, m.hasMarsh,
         )
     }
