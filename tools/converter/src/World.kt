@@ -10,6 +10,16 @@ import javax.imageio.ImageIO
 import kotlin.math.*
 
 class Building(val poly: Poly, var height: Float, val kind: Int, val heightSource: Int)
+
+/** Oriented rectangle reserved for a hand-built landmark model: no generated buildings or features inside. */
+class Zone(val name: String, val x: Double, val y: Double, val rotDeg: Double, val halfL: Double, val halfW: Double) {
+    private val c = cos(Math.toRadians(rotDeg)); private val s = sin(Math.toRadians(rotDeg))
+    fun contains(px: Double, py: Double): Boolean { val dx = px - x; val dy = py - y; return abs(dx * c + dy * s) <= halfL && abs(-dx * s + dy * c) <= halfW }
+    companion object {
+        fun load(f: File): List<Zone> = if (!f.exists()) emptyList() else f.readLines().filter { it.isNotBlank() && !it.startsWith("#") }.mapNotNull { l ->
+            val p = l.trim().split(Regex("\\s+")); if (p.size < 6) null else Zone(p[0], p[1].toDouble(), p[2].toDouble(), p[3].toDouble(), p[4].toDouble(), p[5].toDouble()) }
+    }
+}
 class Bridge(val xs: DoubleArray, val ys: DoubleArray, val width: Float, val steps: Boolean, val name: String)
 class LinePier(val xs: DoubleArray, val ys: DoubleArray, val width: Float)
 class PointFeature(val type: Int, val x: Double, val y: Double, val dir: Float = 0f, val name: String = "")
@@ -28,6 +38,7 @@ class FillOp(val rings: List<Ring>, val fn: (Int) -> Int) {
 }
 
 class World(val osm: OsmData, val grid: Grid) {
+    var zones: List<Zone> = emptyList()
     val ops = ArrayList<FillOp>()
     private fun op(rings: List<Ring>, fn: (Int) -> Int) { val o = FillOp(rings, fn); ops.add(o); grid.fill(rings, fn) }
     val islands = ArrayList<Poly>()
@@ -95,6 +106,32 @@ class World(val osm: OsmData, val grid: Grid) {
             carveLine(ln.first, ln.second, width / 2) { Cell.WATER }; carved++
         }
         log("carved line canals: $carved")
+        removeSlivers()
+    }
+
+    /** Water polygons mapped in pieces (split at bridges) leave 1-2 m strips of "land" across canals: drop them. */
+    private fun removeSlivers() {
+        val a = grid.a; var n = 0
+        // pass 0: rows (stride 1), pass 1: columns (stride w)
+        for (pass in 0..1) {
+            val lines = if (pass == 0) grid.h else grid.w
+            val lim = if (pass == 0) grid.w else grid.h
+            for (line in 0 until lines) {
+                fun idx(k: Int) = if (pass == 0) line * grid.w + k else k * grid.w + line
+                var c = 0
+                while (c < lim) {
+                    if (a[idx(c)].toInt() != Cell.LAND) { c++; continue }
+                    var e = c
+                    while (e < lim && a[idx(e)].toInt() == Cell.LAND) e++
+                    val len = e - c
+                    if (len <= 2 && c > 0 && e < lim && a[idx(c - 1)].toInt() == Cell.WATER && a[idx(e)].toInt() == Cell.WATER) {
+                        for (k in c until e) a[idx(k)] = Cell.WATER.toByte(); n += len
+                    }
+                    c = e
+                }
+            }
+        }
+        log("land slivers removed: $n cells")
     }
 
     fun carveLine(xs: DoubleArray, ys: DoubleArray, r: Double, v: (Int) -> Int) {
@@ -130,7 +167,8 @@ class World(val osm: OsmData, val grid: Grid) {
         @Suppress("UNCHECKED_CAST")
         val fc = Json(geojson.readText()).parse() as Map<String, Any?>
         val feats = fc["features"] as List<Map<String, Any?>>
-        var srcOsm = 0; var srcCop = 0; var srcDef = 0
+        var srcOsm = 0; var srcCop = 0; var srcDef = 0; var dropped = 0
+        val tall = ArrayList<String>()
         for (f in feats) {
             val g = f["geometry"] as Map<String, Any?>? ?: continue
             val props = f["properties"] as Map<String, Any?>
@@ -156,9 +194,13 @@ class World(val osm: OsmData, val grid: Grid) {
                 val bb = outer.bbox()
                 val cands = HashSet<OsmH>()
                 for (gx in floor(bb[0] / cell).toInt()..floor(bb[2] / cell).toInt()) for (gy in floor(bb[1] / cell).toInt()..floor(bb[3] / cell).toInt()) idx[key(gx, gy)]?.let { cands.addAll(it) }
+                // take an OSM height only from a footprint of comparable size: a bell tower or dome mapped inside a
+                // big church/convent block must not lift the whole block to the tower's height
+                val myA = outer.area()
                 for (o in cands) {
                     val (ox, oy) = o.poly.outer.centroid()
-                    if (outer.contains(ox, oy) || o.poly.outer.contains(cx, cy)) h = max(h, o.h)
+                    val ratio = o.poly.outer.area() / myA
+                    if ((outer.contains(ox, oy) || o.poly.outer.contains(cx, cy)) && ratio > 0.35 && ratio < 3.0) h = max(h, o.h)
                 }
                 if (h > 0) src = 1 else {
                     // sample Copernicus block height inside the footprint
@@ -184,12 +226,61 @@ class World(val osm: OsmData, val grid: Grid) {
                 var bkind = kind
                 if (onWater && outer.area() < 400 && src != 1) { h = 3.0; bkind = 5 }
                 h = h.coerceIn(2.5, 99.0)
+                // slender and tall: a campanile
+                if (bkind != 5 && myA < 420 && h >= 24 && h > 1.9 * sqrt(myA)) bkind = 6
+                // big blocks from the 10 m Copernicus raster: churches and convents rarely exceed 30 m at the eaves
+                if (src == 2 && myA > 300) h = min(h, 30.0)
                 when (src) { 1 -> srcOsm++; 2 -> srcCop++; else -> srcDef++ }
+                if (zones.any { z -> z.contains(cx, cy) || (0 until outer.n).count { z.contains(outer.x[it], outer.y[it]) } * 2 > outer.n }) { dropped++; continue }
+                if (h > 26) tall.add("src=$src k=$bkind " + "%.0f,%.0f h=%.1f kind=%d area=%.0f".format(cx, cy, h, kind, outer.area()))
                 buildings.add(Building(poly, h.toFloat(), bkind, src))
             }
         }
         for (b in buildings) op(listOf(b.poly.outer)) { old -> if (old == Cell.WATER || old == Cell.MARSH) Cell.LAND else -1 }
-        log("buildings ${buildings.size}: heights from OSM $srcOsm, Copernicus $srcCop, default $srcDef")
+        log("buildings ${buildings.size}: heights from OSM $srcOsm, Copernicus $srcCop, default $srcDef; dropped in landmark zones $dropped")
+        log("tall (Copernicus >26 m): ${tall.size}"); tall.forEach { log("  $it") }
+    }
+
+    class Pontoon(val name: String, val x: Double, val y: Double, val rotDeg: Double, val length: Double, val landSide: Int)
+
+    /** ACTV floating stops: the platform piers (pontoons) with their names; orientation from the polygon's principal axis,
+     *  the side facing land (gangway) from the land grid. Each one also reserves a landmark zone. */
+    fun findPontoons(): List<Pontoon> {
+        val stopNames = ArrayList<Triple<Double, Double, String>>()
+        for (n in osm.taggedNodes.values) {
+            val t = n.tags; val nm = t["name"] ?: continue
+            if (t["amenity"] == "ferry_terminal" || t["ferry"] == "yes") stopNames.add(Triple(Proj.x(n.lon), Proj.y(n.lat), nm))
+        }
+        val out = ArrayList<Pontoon>()
+        for (w in osm.ways.values) {
+            val t = w.tags
+            if (!(t["public_transport"] == "platform" && t["man_made"] == "pier") && !(t["man_made"] == "pier" && t["floating"] == "yes" && t["name"] != null)) continue
+            val poly = closedWayPoly(w) ?: continue
+            val r = poly.outer
+            val (cx, cy) = r.centroid()
+            if (cx < grid.minX || cy < grid.minY || cx > grid.minX + grid.w || cy > grid.minY + grid.h) continue
+            // principal axis
+            var sxx = 0.0; var syy = 0.0; var sxy = 0.0
+            for (i in 0 until r.n) { val dx = r.x[i] - cx; val dy = r.y[i] - cy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy }
+            val ang = 0.5 * atan2(2 * sxy, sxx - syy)
+            val ux = cos(ang); val uy = sin(ang)
+            var lo = 1e9; var hi = -1e9; var wlo = 1e9; var whi = -1e9
+            for (i in 0 until r.n) { val dx = r.x[i] - cx; val dy = r.y[i] - cy; val a = dx * ux + dy * uy; val b = -dx * uy + dy * ux; lo = min(lo, a); hi = max(hi, a); wlo = min(wlo, b); whi = max(whi, b) }
+            val len = hi - lo; val wid = whi - wlo
+            if (len < 8 || len > 45 || wid > 12) continue
+            val mx = cx + ux * (lo + hi) / 2 - uy * (wlo + whi) / 2; val my = cy + uy * (lo + hi) / 2 + ux * (wlo + whi) / 2
+            // which side is land: sample the grid a few metres out on both sides
+            fun landAt(sg: Int): Int { var c = 0; for (d in intArrayOf(5, 8, 12)) for (k in -2..2) { val px = mx - uy * sg * d + ux * k * 3; val py = my + ux * sg * d + uy * k * 3; if (grid.atWorld(px, py) != Cell.WATER) c++ }; return c }
+            val side = if (landAt(1) >= landAt(-1)) 1 else -1
+            val name = t["name"] ?: stopNames.minByOrNull { hypot(it.first - mx, it.second - my) }?.takeIf { hypot(it.first - mx, it.second - my) < 40 }?.third ?: continue
+            out.add(Pontoon(name, mx, my, Math.toDegrees(ang), len, side))
+        }
+        // one pontoon per place (OSM sometimes maps the deck and the cabin separately)
+        val dedup = ArrayList<Pontoon>()
+        for (p in out.sortedByDescending { it.length }) if (dedup.none { hypot(it.x - p.x, it.y - p.y) < 8 }) dedup.add(p)
+        zones = zones + dedup.map { Zone("actv", it.x, it.y, it.rotDeg, it.length / 2 + 1.5, 4.5) }
+        log("ACTV pontoons: ${dedup.size}")
+        return dedup
     }
 
     fun collectFeatures() {
@@ -215,6 +306,8 @@ class World(val osm: OsmData, val grid: Grid) {
         for (w in osm.ways.values) {
             val t = w.tags
             // bridges (walkable ways)
+            // hand-modelled landmarks replace the generic bridge geometry
+            if (t["name"] in setOf("Ponte di Rialto")) continue
             if (t["bridge"] != null && t["bridge"] != "no" && t["highway"] != null) {
                 val ln = Assemble.line(osm, w.nodes) ?: continue
                 if (!inExtent(ln.first[0], ln.second[0])) continue
@@ -235,6 +328,15 @@ class World(val osm: OsmData, val grid: Grid) {
                 else -> 0
             }
             if (type != 0) Assemble.ringFromNodes(osm, w.nodes)?.centroid()?.let { (x, y) -> if (inExtent(x, y)) points.add(PointFeature(type, x, y)) }
+        }
+        if (zones.isNotEmpty()) {
+            fun inZ(x: Double, y: Double) = zones.any { it.contains(x, y) }
+            points.removeAll { inZ(it.x, it.y) }
+            bridges.removeAll { b -> val m = b.xs.size / 2; inZ(b.xs[m], b.ys[m]) || inZ((b.xs.first() + b.xs.last()) / 2, (b.ys.first() + b.ys.last()) / 2) }
+            bridgeAreas.removeAll { a -> val (x, y) = a.outer.centroid(); inZ(x, y) }
+            // piers / pontoon decks mapped in OSM where a landmark or an ACTV stop now stands (they went through the hull)
+            piers.removeAll { a -> val (x, y) = a.outer.centroid(); inZ(x, y) || (0 until a.outer.n).any { inZ(a.outer.x[it], a.outer.y[it]) } }
+            linePiers.removeAll { lp -> lp.xs.indices.any { inZ(lp.xs[it], lp.ys[it]) } }
         }
         log("points ${points.size} (" + points.groupBy { it.type }.map { "${it.key}:${it.value.size}" }.joinToString() + "), bridges ${bridges.size}, bridge areas ${bridgeAreas.size}, piers ${piers.size} + ${linePiers.size} lines")
     }

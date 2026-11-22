@@ -1,7 +1,8 @@
 // Growable vertex buffer + primitive generators. Pure Kotlin.
 // Vertex layout (12 floats): position xyz, normal xyz, uv (2), attr (4)
 //  - facade shader: uv = (u along wall m, z m), attr = (segLen, seed01, kind, 0)
-//  - generic shader: attr = (r, g, b, gloss)
+//  - generic shader: attr = (m, r, g, b): m >= 0 -> texture layer m tinted by rgb (triplanar),
+//                    m < 0 -> plain colour rgb with gloss = -m - 1
 package com.blazebaal.venice.core
 
 import kotlin.math.*
@@ -25,11 +26,13 @@ class MeshBuilder(initial: Int = 4096) {
     }
 
     // ---------- colored (generic shader) primitives ----------
-    var r = 1f; var g = 1f; var b = 1f; var gloss = 0f
-    fun color(r: Float, g: Float, b: Float, gloss: Float = 0f) { this.r = r; this.g = g; this.b = b; this.gloss = gloss }
-    fun color(c: FloatArray) { r = c[0]; g = c[1]; b = c[2]; gloss = if (c.size > 3) c[3] else 0f }
+    var r = 1f; var g = 1f; var b = 1f; var m = -1f
+    fun color(r: Float, g: Float, b: Float, gloss: Float = 0f) { this.r = r; this.g = g; this.b = b; this.m = -1f - gloss }
+    fun color(c: FloatArray) { r = c[0]; g = c[1]; b = c[2]; m = if (c.size > 3 && c[3] >= 100f) c[3] - 100f else -1f - (if (c.size > 3) c[3] else 0f) }
+    /** Textured material: layer index from the texture array, tinted. */
+    fun mat(layer: Int, r: Float = 1f, g: Float = 1f, b: Float = 1f) { this.r = r; this.g = g; this.b = b; this.m = layer.toFloat() }
 
-    fun cv(x: Float, y: Float, z: Float, nx: Float, ny: Float, nz: Float) = v(x, y, z, nx, ny, nz, 0f, 0f, r, g, b, gloss)
+    fun cv(x: Float, y: Float, z: Float, nx: Float, ny: Float, nz: Float) = v(x, y, z, nx, ny, nz, 0f, 0f, m, r, g, b)
 
     /** Triangle with computed flat normal (counter-clockwise = front). */
     fun tri(ax: Float, ay: Float, az: Float, bx: Float, by: Float, bz: Float, cx: Float, cy: Float, cz: Float) {

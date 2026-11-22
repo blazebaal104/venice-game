@@ -9,17 +9,17 @@ object Z {
     const val WALL_BOTTOM = -1.8f
 }
 
-object Kind { const val WALL = 0f; const val ROOF = 1f; const val QUAY = 2f; const val CORNICE = 3f }
+object Kind { const val WALL = 0f; const val ROOF = 1f; const val QUAY = 2f; const val CORNICE = 3f; const val TOWER = 4f }
 
 class TileMeshes(val facade: FloatArray, val generic: FloatArray, val hasGround: Boolean, val hasMarsh: Boolean)
 
 object Palette {
-    val BRICK = floatArrayOf(0.50f, 0.24f, 0.17f, 0.05f)
-    val ISTRIAN = floatArrayOf(0.84f, 0.83f, 0.78f, 0.15f)
-    val TRACHYTE = floatArrayOf(0.42f, 0.42f, 0.41f, 0.05f)
-    val WOOD_DARK = floatArrayOf(0.25f, 0.18f, 0.12f, 0.02f)
-    val WOOD_POLE = floatArrayOf(0.33f, 0.27f, 0.21f, 0.02f)
-    val WOOD_DECK = floatArrayOf(0.42f, 0.32f, 0.22f, 0.05f)
+    val BRICK = floatArrayOf(1f, 1f, 1f, 100f + L.BRICK0)
+    val ISTRIAN = floatArrayOf(1f, 0.99f, 0.95f, 100f + L.ISTRIAN)
+    val TRACHYTE = floatArrayOf(1f, 1f, 1f, 100f + L.MASEGNI)
+    val WOOD_DARK = floatArrayOf(0.7f, 0.65f, 0.6f, 100f + L.PLANKS_OLD)
+    val WOOD_POLE = floatArrayOf(0.9f, 0.85f, 0.8f, 100f + L.POLE)
+    val WOOD_DECK = floatArrayOf(1f, 1f, 1f, 100f + L.PLANKS)
     val IRON = floatArrayOf(0.08f, 0.10f, 0.09f, 0.4f)
     val LEAF = arrayOf(floatArrayOf(0.20f, 0.32f, 0.13f), floatArrayOf(0.25f, 0.36f, 0.15f), floatArrayOf(0.17f, 0.28f, 0.12f))
     val TRUNK = floatArrayOf(0.30f, 0.24f, 0.18f, 0f)
@@ -48,9 +48,10 @@ class CityMesher {
 
     // ------------------------------------------------------------------ buildings
     private fun building(b: BuildingData) {
+        if (b.kind == 6) { tower(b); return }
         val top = Z.GROUND + b.height
         val seed01 = (b.seed and 0xffff) / 65535f
-        val kind = if (b.kind == 4) Kind.WALL else Kind.WALL
+        val kind = Kind.WALL
         var start = 0
         for ((ri, n) in b.ringSizes.withIndex()) {
             for (i in 0 until n) {
@@ -82,6 +83,45 @@ class CityMesher {
             }
         }
         chimneys(b, top)
+    }
+
+    /** Campanile: brick shaft (facade shader draws lesene and the belfry arcade), stone cornice, spire. */
+    private fun tower(b: BuildingData) {
+        val n = b.ringSizes[0]
+        val total = Z.GROUND + b.height
+        val r = rnd(b.seed, 5)
+        val spireH = b.height * (0.20f + 0.08f * r)
+        val top = total - spireH
+        val seed01 = (b.seed and 0xffff) / 65535f
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            val ax = b.xy[i * 2]; val ay = b.xy[i * 2 + 1]; val bx = b.xy[j * 2]; val by = b.xy[j * 2 + 1]
+            val dx = bx - ax; val dy = by - ay; val len = sqrt(dx * dx + dy * dy)
+            if (len < 0.05f) continue
+            val nx = dy / len; val ny = -dx / len
+            val z0 = Z.WALL_BOTTOM; val z1 = top - 0.32f
+            fac.v(ax, ay, z0, nx, ny, 0f, 0f, z0, len, seed01, Kind.TOWER, top)
+            fac.v(bx, by, z0, nx, ny, 0f, len, z0, len, seed01, Kind.TOWER, top)
+            fac.v(bx, by, z1, nx, ny, 0f, len, z1, len, seed01, Kind.TOWER, top)
+            fac.v(ax, ay, z0, nx, ny, 0f, 0f, z0, len, seed01, Kind.TOWER, top)
+            fac.v(bx, by, z1, nx, ny, 0f, len, z1, len, seed01, Kind.TOWER, top)
+            fac.v(ax, ay, z1, nx, ny, 0f, 0f, z1, len, seed01, Kind.TOWER, top)
+        }
+        cornice(b, 0, n, top, seed01)
+        // spire: pyramid from the (slightly inset) cornice ring to an apex, lead/copper or brick
+        var cx = 0f; var cy = 0f
+        for (i in 0 until n) { cx += b.xy[i * 2]; cy += b.xy[i * 2 + 1] }
+        cx /= n; cy /= n
+        when { r < 0.35f -> gen.mat(L.LEAD, 0.55f, 0.82f, 0.70f); r < 0.7f -> gen.mat(L.BRICK0, 0.95f, 0.85f, 0.8f); else -> gen.mat(L.LEAD, 0.9f, 0.9f, 0.92f) }
+        val apex = total
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            val ax = cx + (b.xy[i * 2] - cx) * 0.86f; val ay = cy + (b.xy[i * 2 + 1] - cy) * 0.86f
+            val bx = cx + (b.xy[j * 2] - cx) * 0.86f; val by = cy + (b.xy[j * 2 + 1] - cy) * 0.86f
+            gen.tri(ax, ay, top, bx, by, top, cx, cy, apex)
+        }
+        gen.mat(L.ISTRIAN, 1f, 1f, 1f)
+        gen.frustum(cx, cy, apex - 0.2f, 0.18f, 0.05f, 1.6f, 6)   // finial
     }
 
     private fun cornice(b: BuildingData, start: Int, n: Int, top: Float, seed01: Float) {
@@ -137,7 +177,7 @@ class CityMesher {
             val x = b.xy[i0 * 2] + (b.xy[i1 * 2] - b.xy[i0 * 2]) * u + (b.xy[i2 * 2] - b.xy[i0 * 2]) * v
             val y = b.xy[i0 * 2 + 1] + (b.xy[i1 * 2 + 1] - b.xy[i0 * 2 + 1]) * u + (b.xy[i2 * 2 + 1] - b.xy[i0 * 2 + 1]) * v
             val col = Palette.CHIMNEY[(rnd(b.seed, 40 + c) * 3).toInt().coerceAtMost(2)]
-            gen.color(col[0], col[1], col[2], 0.02f)
+            gen.mat(L.PLASTER0 + 2, col[0] * 1.25f, col[1] * 1.25f, col[2] * 1.25f)
             val h = 1.4f + rnd(b.seed, 50 + c) * 0.8f
             val rot = rnd(b.seed, 60 + c) * 1.57f
             gen.box(x, y, top + h / 2, 0.28f, 0.28f, h / 2, rot)
@@ -255,7 +295,7 @@ class CityMesher {
                     else gen.quad(Vec3(ix0, iy0, zA), Vec3(ix1, iy1, z), Vec3(ix1, iy1, z + ph), Vec3(ix0, iy0, zA + ph))
                 }
                 // arch intrados (underside)
-                gen.color(body[0] * 0.8f, body[1] * 0.8f, body[2] * 0.8f, 0f)
+                gen.mat((body[3] - 100f).toInt(), 0.75f, 0.75f, 0.72f)
                 gen.quad(Vec3(ax + nx * hw, ay + ny * hw, prevU), Vec3(bx + nbx * hw, by + nby * hw, uz), Vec3(bx - nbx * hw, by - nby * hw, uz), Vec3(ax - nx * hw, ay - ny * hw, prevU))
                 if (flat && k % 12 == 0) { // piers for long causeway bridges
                     gen.color(Palette.ISTRIAN)
@@ -343,10 +383,10 @@ class CityMesher {
             }
             Feature.TREE -> {
                 val h = 3f + rnd(s, 1) * 4f
-                gen.color(Palette.TRUNK)
+                gen.mat(L.POLE, 0.8f, 0.75f, 0.7f)
                 gen.frustum(p.x, p.y, gz, 0.18f, 0.12f, h * 0.65f, 6)
                 val c = Palette.LEAF[(rnd(s, 2) * 3).toInt().coerceAtMost(2)]
-                gen.color(c[0], c[1], c[2], 0f)
+                gen.mat(L.GRASS, c[0] * 2.2f, c[1] * 2.0f, c[2] * 2.2f)
                 val rad = 1.3f + rnd(s, 3) * 1.2f
                 gen.blob(p.x, p.y, gz + h * 0.75f, rad, 0.85f, s)
                 gen.blob(p.x + rad * 0.5f, p.y + rad * 0.2f, gz + h * 0.62f, rad * 0.75f, 0.8f, s + 1)

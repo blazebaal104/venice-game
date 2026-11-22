@@ -26,7 +26,10 @@ fun main(args: Array<String>) {
     log("grid ${grid.w} x ${grid.h}")
 
     val world = World(osm, grid)
+    world.zones = Zone.load(File(args.getOrElse(2) { "landmarks.txt" })).also { log("landmark zones: " + it.joinToString { z -> z.name }) }
     world.buildLand()
+    val pontoons = world.findPontoons()
+    File(outDir, "actv.txt").printWriter().use { w -> for (p in pontoons) w.println("%s\t%.2f\t%.2f\t%.2f\t%.2f\t%d".format(p.name, p.x, p.y, p.rotDeg, p.length, p.landSide)) }
     world.loadBuildings(File(dataDir, "veneto_edifici.geojson"), dataDir.listFiles { f -> f.name.endsWith(".tif") }?.firstOrNull()
         ?: File(dataDir, "bbh").walk().first { it.name.endsWith(".tif") })
     world.collectFeatures()
