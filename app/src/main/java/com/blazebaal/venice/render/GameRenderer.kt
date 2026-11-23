@@ -163,6 +163,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val lines = try { ctx.assets.open("bridges/bridges.txt").bufferedReader().readLines() } catch (e: Exception) { return }
         val atlas = loadAtlas("bridges/bridges_atlas.jpg"); if (atlas == 0) return
         val meshes = HashMap<String, Mesh?>()
+        val own = (ctx.assets.list("bridges") ?: emptyArray()).filter { it.endsWith("_atlas.jpg") && it != "bridges_atlas.jpg" }.associate { it.removeSuffix("_atlas.jpg") to loadAtlas("bridges/$it") }  // models baked on their own sheet
         val g = 1.1f
         for (line in lines) {
             if (line.isBlank() || line.startsWith("#")) continue
@@ -172,7 +173,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val sx = p[4].toFloat(); val sy = p[5].toFloat(); val sz = p[6].toFloat()
             val sc = Mat4.identity().also { it[0] = sx; it[5] = sy; it[10] = sz; it[14] = g * (1f - sz) }
             val model = Mat4.mul(Mat4.mul(Mat4.translation(x, y, 0f), Mat4.rotZ(rot)), sc)
-            landmarks.add(Landmark(mesh, model, x, y, atlas))
+            landmarks.add(Landmark(mesh, model, x, y, own[p[0]] ?: atlas))
         }
     }
 

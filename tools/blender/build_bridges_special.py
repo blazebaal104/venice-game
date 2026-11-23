@@ -143,5 +143,56 @@ def build_costituzione():
             tbox(a, b, min(ya, yb) - 0.05, max(ya, yb) + 0.05, A.raw(a) + 1.0, A.raw(b) + 1.0, A.raw(a) + 1.1, A.raw(b) + 1.1, "bronze")
     return end_part("b_costituzione", 2.2), dict(L=L, W=WMAX, long=False, height=10.5, lens=34, hero_h=0.30, look_z=3.5, low=True)
 
-for nm, fn in (("guglie", build_guglie), ("scalzi", build_scalzi), ("costituzione", build_costituzione)):
+def build_accademia():
+    """Ponte dell'Accademia (Miozzi, 1933): 48 m shallow timber arch with a steel arch hidden behind the wooden fascia,
+    wide shallow plank steps, deep laminated side beams that thicken towards the abutments, timber railings."""
+    L, W, R = 48.0, 9.0, 3.6
+    class WA(Arch):
+        def raw(s, x):
+            u = min(abs(x) / s.hl, 1.0)
+            return G + s.R * (1 - u ** 1.7)
+    A = WA(L, W, R, abut=3.0, t=1.2, springz=0.30, plateau=0.0, tread=0.62, riser=0.13)
+    hl = A.hl
+    def depth(x): return 0.62 + 0.85 * (abs(x) / hl) ** 2          # fascia beam depth, thicker at the springs
+    new_part()
+    xs = xs_dense(-hl, hl, 0.5)
+    # deck underside (planked soffit) + cross beams
+    for a, b in zip(xs[:-1], xs[1:]):
+        tbox(a, b, -W / 2, W / 2, A.raw(a) - 0.42, A.raw(b) - 0.42, A.raw(a) - 0.06, A.raw(b) - 0.06, "wood", bottom=True)
+    for x in xs_dense(-hl + 0.4, hl - 0.4, 1.5):
+        bx(x - 0.09, x + 0.09, -W / 2 + 0.05, W / 2 - 0.05, A.raw(x) - 0.62, A.raw(x) - 0.42, "wood", bottom=True)
+    # side fascia beams (laminated timber), slightly proud of the deck edge
+    for sg in (-1, 1):
+        y0, y1 = (sg * W / 2 - 0.14, sg * W / 2 + 0.10) if sg > 0 else (sg * W / 2 - 0.10, sg * W / 2 + 0.14)
+        for a, b in zip(xs[:-1], xs[1:]):
+            tbox(a, b, y0, y1, A.raw(a) - depth(a) - 0.12, A.raw(b) - depth(b) - 0.12, A.raw(a) + 0.02, A.raw(b) + 0.02, "wood", bottom=True)
+    # steel arches behind/under the deck (three ribs) with diagonal struts up to the deck
+    for y in (-W / 2 + 1.0, 0.0, W / 2 - 1.0):
+        for a, b in zip(xs[:-1], xs[1:]):
+            tbox(a, b, y - 0.11, y + 0.11, A.raw(a) - depth(a) - 0.40, A.raw(b) - depth(b) - 0.40, A.raw(a) - depth(a) - 0.12, A.raw(b) - depth(b) - 0.12, "steel_grey", bottom=True)
+        for x in xs_dense(-hl + 1.0, hl - 1.0, 1.5):
+            z0 = A.raw(x) - depth(x) - 0.12; z1 = A.raw(x) - 0.42
+            if z1 - z0 > 0.08: bx(x - 0.04, x + 0.04, y - 0.05, y + 0.05, z0, z1, "steel_grey")
+    # abutments: stone blocks carrying the arch ends on the quay
+    for sx in (-1, 1):
+        a, b = sorted((sx * (hl - 2.4), sx * hl))
+        qd(V(a, -W / 2, -0.6), V(b, -W / 2, -0.6), V(b, -W / 2, G), V(a, -W / 2, G), "stone", (0, -1, 0))
+        qd(V(a, W / 2, -0.6), V(b, W / 2, -0.6), V(b, W / 2, G), V(a, W / 2, G), "stone", (0, 1, 0))
+        qd(V(sx * hl, -W / 2, -0.6), V(sx * hl, W / 2, -0.6), V(sx * hl, W / 2, G), V(sx * hl, -W / 2, G), "stone", (sx, 0, 0))
+    A.deck("planks", "wood")
+    # timber railings: heavy posts every 1.5 m, four rails, wide top rail
+    ph = 1.08
+    for sg in (-1, 1):
+        y = sg * (W / 2 - 0.08)
+        for a, b in zip(xs[:-1], xs[1:]):
+            for zo, hh in ((0.22, 0.03), (0.52, 0.03), (0.80, 0.03)):
+                tbox(a, b, y - 0.025, y + 0.025, A.raw(a) + zo - hh, A.raw(b) + zo - hh, A.raw(a) + zo + hh, A.raw(b) + zo + hh, "wood")
+            tbox(a, b, y - 0.085, y + 0.085, A.raw(a) + ph - 0.04, A.raw(b) + ph - 0.04, A.raw(a) + ph + 0.04, A.raw(b) + ph + 0.04, "wood")
+        np_ = int(L / 1.5)
+        for i in range(np_ + 1):
+            x = -hl + 0.12 + (L - 0.24) * i / np_
+            bx(x - 0.055, x + 0.055, y - 0.055, y + 0.055, A.raw(x) - 0.05, A.raw(x) + ph, "wood")
+    return end_part("b_accademia", 1.5), dict(L=L, W=W, long=False, height=5.0, lens=44, low=True, look_z=2.4)
+
+for nm, fn in (("guglie", build_guglie), ("scalzi", build_scalzi), ("costituzione", build_costituzione), ("accademia", build_accademia)):
     if want(nm): reg(nm, *fn())

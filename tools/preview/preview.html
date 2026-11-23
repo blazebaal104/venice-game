@@ -103,11 +103,14 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
     const bim = await loadImg('exp/bridges_atlas.jpg'); const bat = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, bat);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bim); gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const bm = {};
+    const bm = {}, bown = {};
     for (const b of sc.bridges) {
+      if (b.own && !bown[b.n]) { const im = await loadImg(`exp/br_${b.n}_atlas.jpg`); const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); bown[b.n] = t; }
       if (!bm[b.n]) bm[b.n] = mesh(await bin(`exp/br_${b.n}.bin`), 12, L4);
       const sc4 = M.I(); sc4[0] = b.sx; sc4[5] = b.sy; sc4[10] = b.sz; sc4[14] = 1.1 * (1 - b.sz);
-      lms.push({m: bm[b.n], model: M.mul(M.mul(M.T(b.x, b.y, 0), M.Rz(b.rot * Math.PI / 180)), sc4), x: b.x, y: b.y, at: bat});
+      lms.push({m: bm[b.n], model: M.mul(M.mul(M.T(b.x, b.y, 0), M.Rz(b.rot * Math.PI / 180)), sc4), x: b.x, y: b.y, at: bown[b.n] || bat});
     }
   }
   if (sc.stops && sc.stops.length) {

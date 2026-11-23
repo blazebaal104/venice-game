@@ -83,9 +83,12 @@ fun main(args: Array<String>) {
         for (line in bf.readLines().filter { it.isNotBlank() && !it.startsWith("#") }) {
             val p = line.trim().split(Regex("\\s+"))
             if (hypot(p[1].toFloat() - cx, p[2].toFloat() - cy) > 950) continue
-            if (done.add(p[0])) writeF(File(out, "br_${p[0]}.bin"), readMesh(File(assets, "bridges/${p[0]}.mesh")))
+            if (done.add(p[0])) {
+                writeF(File(out, "br_${p[0]}.bin"), readMesh(File(assets, "bridges/${p[0]}.mesh")))
+                val own = File(assets, "bridges/${p[0]}_atlas.jpg"); if (own.exists()) own.copyTo(File(out, "br_${p[0]}_atlas.jpg"), true)   // models with their own sheet
+            }
             if (!fb) sb.append(","); fb = false
-            sb.append("{\"n\":\"${p[0]}\",\"x\":${p[1]},\"y\":${p[2]},\"rot\":${p[3]},\"sx\":${p[4]},\"sy\":${p[5]},\"sz\":${p[6]}}")
+            sb.append("{\"n\":\"${p[0]}\",\"x\":${p[1]},\"y\":${p[2]},\"rot\":${p[3]},\"sx\":${p[4]},\"sy\":${p[5]},\"sz\":${p[6]},\"own\":${File(assets, "bridges/${p[0]}_atlas.jpg").exists()}}")
         }
     }
     sb.append("]")

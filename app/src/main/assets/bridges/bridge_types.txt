@@ -19,3 +19,4 @@ stucco 6.00 2.50
 stucco_m 10.00 2.90
 stucco_s 4.20 2.20
 timber 36.00 3.00 6.00
+accademia 48.00 9.00

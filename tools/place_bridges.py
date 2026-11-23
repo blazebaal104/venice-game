@@ -17,7 +17,6 @@ X = lambda lon: (lon - LON0) * mlon
 Y = lambda lat: (lat - LAT0) * mlat
 MINX, MAXX, MINY, MAXY = X(12.285), X(12.430), Y(45.360), Y(45.475)
 G = 1.1
-ACCADEMIA = (-788.8, -224.5)      # kept as the hand-built wooden bridge in CityMesher (all ways within 90 m)
 
 nodes = {}; ways = {}
 for f in sorted(glob.glob(data_dir + "/venice_osm_tile*.osm")):
@@ -146,7 +145,13 @@ for c, ids in comp.items():
         a = max(pts_all, key=lambda p: math.dist(p, pts_all[0])); b = max(pts_all, key=lambda p: math.dist(p, a)); pts = [a, b]
     mid = pts[len(pts) // 2]
     if not (MINX <= pts[0][0] < MAXX and MINY <= pts[0][1] < MAXY): dropped["outside"] += 1; continue
-    if any("Accademia" in n for n in names) or math.dist(mid, ACCADEMIA) < 90: dropped["accademia (hand-built)"] += 1; continue
+    if any("Accademia" in n for n in names):
+        # the mapped stretch includes the approach stairs on land: the bridge itself is the longest footway part
+        spans = [[nodes[n] for n in br[i][0] if n in nodes] for i in ids if br[i][1].get("highway") == "footway"]
+        a, b = max(((s_[0], s_[-1]) for s_ in spans), key=lambda ab: math.dist(*ab))
+        if "accademia" in types: place_special("accademia", a, b)
+        else: dropped["accademia (no model)"] += 1
+        continue
     if in_zone(*mid) or in_zone((pts[0][0] + pts[-1][0]) / 2, (pts[0][1] + pts[-1][1]) / 2): dropped["landmark zone"] += 1; continue
     a, b = pts[0], pts[-1]; chord = math.dist(a, b)
     if chord < 1.2: dropped["tiny"] += 1; continue
