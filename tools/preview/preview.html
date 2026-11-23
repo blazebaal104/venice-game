@@ -99,6 +99,17 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); }
     lms.push({m: mesh(await bin(`exp/lm_${l.name}.bin`), 12, L4), model: M.mul(M.T(l.x, l.y, 0), M.Rz(l.rot * Math.PI / 180)), x: l.x, y: l.y, at});
   }
+  if (sc.bridges && sc.bridges.length && !P.get('nobr')) {
+    const bim = await loadImg('exp/bridges_atlas.jpg'); const bat = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, bat);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bim); gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const bm = {};
+    for (const b of sc.bridges) {
+      if (!bm[b.n]) bm[b.n] = mesh(await bin(`exp/br_${b.n}.bin`), 12, L4);
+      const sc4 = M.I(); sc4[0] = b.sx; sc4[5] = b.sy; sc4[10] = b.sz; sc4[14] = 1.1 * (1 - b.sz);
+      lms.push({m: bm[b.n], model: M.mul(M.mul(M.T(b.x, b.y, 0), M.Rz(b.rot * Math.PI / 180)), sc4), x: b.x, y: b.y, at: bat});
+    }
+  }
   if (sc.stops && sc.stops.length) {
     const sm = {}; for (const l of [12, 16, 22]) sm[l] = mesh(await bin(`exp/lm_actv${l}.bin`), 12, L4);
     const mkTex = async (u) => { const im = await loadImg(u); const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);

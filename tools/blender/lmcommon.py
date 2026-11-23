@@ -50,7 +50,7 @@ def ramp_val(nt, v, a, b):
     L(nt, v, m.inputs["Value"]); m.inputs["From Min"].default_value = a; m.inputs["From Max"].default_value = b
     return m.outputs[0]
 
-def ao(nt, dist=1.2):
+def ao(nt, dist=float(os.environ.get("AO_DIST", "1.2"))):
     a = N(nt, "ShaderNodeAmbientOcclusion", samples=int(os.environ.get("AO_SAMPLES", "8")), inside=False, only_local=False)
     a.inputs["Distance"].default_value = dist
     return a.outputs["AO"]

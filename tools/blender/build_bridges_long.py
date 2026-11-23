@@ -105,9 +105,7 @@ def build_timber():
         while x <= hl + 1e-6:
             z = zf(x); bx(x - 0.06, x + 0.06, y - 0.06, y + 0.06, z, z + 1.12, "wood"); x += 1.5
     # mooring dolphins (briccole): a few tall piles beside the bridge
-    for x, y in ((-6.0, -3.0), (-5.6, -3.4), (9.0, 3.2), (9.4, 3.6)):
-        lathe_pile(x, y, -3.0, 2.6, 0.22)
-    return end_part("b_timber", 1.0), dict(L=L, W=W, long=True, height=4.0, lens=40, look_z=0.5, hero_h=0.30)
+    return end_part("b_timber", 1.0), dict(L=L, W=W, long=True, height=4.0, lens=40, look_z=0.5, hero_h=0.30, slice=6.0)
 
 # ------------------------------------------------------------------ L2 Ponte della Liberta (road viaduct)
 def build_liberta():
@@ -137,7 +135,7 @@ def build_liberta():
     wall_parapet(xs, zf, W, 1.0, 0.35, "ashlar", "stone", "slab", pil_every=6.0, pil_mat="stone")
     for x in (-hl + 6, hl - 6):
         for sg in (-1, 1): lamp(x, sg * (W / 2 - 0.9), top + 0.18, 7.0, 0.0 if False else 1.6, sg)
-    return end_part("b_liberta", 1.6), dict(L=L, W=W, long=True, height=6.0, lens=45, look_z=1.5, hero_h=0.30)
+    return end_part("b_liberta", 1.6), dict(L=L, W=W, long=True, height=6.0, lens=45, look_z=1.5, hero_h=0.30, slice=6.0)
 
 # ------------------------------------------------------------------ L3 railway viaduct (1846)
 def build_rail():
@@ -170,7 +168,7 @@ def build_rail():
             bx(x - 0.12, x + 0.12, sg * (W / 2 - 0.65) - 0.12, sg * (W / 2 - 0.65) + 0.12, top + 0.22, top + 6.6, "steel_grey")
             bx(x - 0.05, x + 0.05, min(sg * (W / 2 - 0.65), sg * 1.6), max(sg * (W / 2 - 0.65), sg * 1.6), top + 5.6, top + 5.75, "steel_grey")
     for ty in (-1.6, 1.6): bx(-hl, hl, ty - 0.012, ty + 0.012, top + 5.5, top + 5.54, "dark")
-    return end_part("b_rail", 1.6), dict(L=L, W=W, long=True, height=7.5, lens=42, look_z=3.0, hero_h=0.30)
+    return end_part("b_rail", 1.6), dict(L=L, W=W, long=True, height=7.5, lens=42, look_z=3.0, hero_h=0.30, slice=5.0)
 
 # ------------------------------------------------------------------ L4 concrete girder bridge
 def build_girder():
@@ -193,7 +191,7 @@ def build_girder():
     tube_rail(xs, zf, W, 1.15, "steel_grey", post_every=2.0, rails=(0.35, 0.75, 1.1), off=0.1, bars=0.0, post=0.045)
     for x in (-hl + 8, hl - 8):
         for sg in (-1, 1): lamp(x, sg * (W / 2 - 0.35), top, 7.5, 1.7, sg)
-    return end_part("b_girder", 1.2), dict(L=L, W=W, long=True, height=7.5, lens=42, look_z=1.5, hero_h=0.32)
+    return end_part("b_girder", 1.2), dict(L=L, W=W, long=True, height=7.5, lens=42, look_z=1.5, hero_h=0.32, slice=12.0)
 
 # ------------------------------------------------------------------ L5 steel bowstring (tied arch) footbridge
 def build_bowstring():
@@ -236,7 +234,7 @@ def build_ribbon():
     for sx in (-1, 1):
         qd(V(sx * hl, -W / 2, zf(sx * hl) - 0.38), V(sx * hl, W / 2, zf(sx * hl) - 0.38), V(sx * hl, W / 2, zf(sx * hl)), V(sx * hl, -W / 2, zf(sx * hl)), "concrete", (sx, 0, 0))
     tube_rail(xs, zf, W, 1.2, "steel_grey", post_every=2.25, rails=(0.45, 1.2), off=0.06, bars=0.18, post=0.035)
-    return end_part("b_ribbon", 1.0), dict(L=L, W=W, long=True, height=4.5, lens=45, look_z=1.2, hero_h=0.28)
+    return end_part("b_ribbon", 1.0), dict(L=L, W=W, long=True, height=4.5, lens=45, look_z=1.2, hero_h=0.28, slice=9.0)
 
 for nm, fn in (("timber", build_timber), ("liberta", build_liberta), ("rail", build_rail), ("girder", build_girder), ("bowstring", build_bowstring), ("ribbon", build_ribbon)):
     if want(nm): reg(nm, *fn())

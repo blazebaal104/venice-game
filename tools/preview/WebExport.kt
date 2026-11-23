@@ -74,6 +74,21 @@ fun main(args: Array<String>) {
         if (i > 0) sb.append(","); sb.append("{\"name\":\"${p[0]}\",\"x\":${p[1]},\"y\":${p[2]},\"rot\":${p[3]},\"atlas\":${atlas.exists()}}")
     }
     sb.append("]")
+    // hand-built bridges (assets/bridges/bridges.txt): mesh x y rot sx sy sz
+    sb.append(",\"bridges\":[")
+    val bf = File(assets, "bridges/bridges.txt")
+    if (bf.exists()) {
+        val done = HashSet<String>(); var fb = true
+        File(assets, "bridges/bridges_atlas.jpg").copyTo(File(out, "bridges_atlas.jpg"), true)
+        for (line in bf.readLines().filter { it.isNotBlank() && !it.startsWith("#") }) {
+            val p = line.trim().split(Regex("\\s+"))
+            if (hypot(p[1].toFloat() - cx, p[2].toFloat() - cy) > 950) continue
+            if (done.add(p[0])) writeF(File(out, "br_${p[0]}.bin"), readMesh(File(assets, "bridges/${p[0]}.mesh")))
+            if (!fb) sb.append(","); fb = false
+            sb.append("{\"n\":\"${p[0]}\",\"x\":${p[1]},\"y\":${p[2]},\"rot\":${p[3]},\"sx\":${p[4]},\"sy\":${p[5]},\"sz\":${p[6]}}")
+        }
+    }
+    sb.append("]")
     // ACTV stops (shared pontoon model, per-stop length, side and name slot)
     sb.append(",\"stops\":[")
     val actv = File(assets, "landmarks/actv.txt")

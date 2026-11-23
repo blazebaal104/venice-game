@@ -147,10 +147,10 @@ def bx(x0, x1, y0, y1, z0, z1, mat, bottom=False):
     qd(V(x0, y0, z0), V(x0, y1, z0), V(x0, y1, z1), V(x0, y0, z1), mat, (-1, 0, 0))
     qd(V(x1, y0, z0), V(x1, y1, z0), V(x1, y1, z1), V(x1, y0, z1), mat, (1, 0, 0))
 
-def tbox(x0, x1, y0, y1, za0, za1, zb0, zb1, mat):
-    """box whose bottom/top follow a slope: bottom z goes za0 -> za1, top zb0 -> zb1 along x"""
+def tbox(x0, x1, y0, y1, za0, za1, zb0, zb1, mat, bottom=False):
+    """box whose bottom/top follow a slope: bottom z goes za0 -> za1, top zb0 -> zb1 along x (bottom face only if asked)"""
     qd(V(x0, y0, zb0), V(x1, y0, zb1), V(x1, y1, zb1), V(x0, y1, zb0), mat, (0, 0, 1))
-    qd(V(x0, y0, za0), V(x1, y0, za1), V(x1, y1, za1), V(x0, y1, za0), mat, (0, 0, -1))
+    if bottom: qd(V(x0, y0, za0), V(x1, y0, za1), V(x1, y1, za1), V(x0, y1, za0), mat, (0, 0, -1))
     qd(V(x0, y0, za0), V(x1, y0, za1), V(x1, y0, zb1), V(x0, y0, zb0), mat, (0, -1, 0))
     qd(V(x0, y1, za0), V(x1, y1, za1), V(x1, y1, zb1), V(x0, y1, zb0), mat, (0, 1, 0))
 
@@ -160,6 +160,11 @@ def pyramid(cx, cy, z0, hx, hy, h, mat):
     for i in range(4):
         a, b = c[i], c[(i + 1) % 4]
         tri(a, b, ap, mat, ((a + b) / 2 - V(cx, cy, z0)) + V(0, 0, 0.3))
+
+def bar(x, y, z0, z1, r, mat):
+    """vertical bar, 4 side faces (no caps)"""
+    for (ax, ay, bx_, by_, n) in ((x - r, y - r, x + r, y - r, (0, -1, 0)), (x + r, y - r, x + r, y + r, (1, 0, 0)), (x + r, y + r, x - r, y + r, (0, 1, 0)), (x - r, y + r, x - r, y - r, (-1, 0, 0))):
+        qd(V(ax, ay, z0), V(bx_, by_, z0), V(bx_, by_, z1), V(ax, ay, z1), mat, n)
 
 def post(x, y, z0, z1, r, mat):
     bx(x - r, x + r, y - r, y + r, z0, z1, mat)
@@ -264,11 +269,11 @@ def balustrade(A, ph=0.95, pillar_every=2.2, mat="stone", rail="stone"):
     """stone balustrade: plinth, turned (square-section) balusters, rail; pillars at the ends and every ~2 m"""
     for side in (-1, 1):
         y = side * (A.W / 2 - 0.16)
-        xs = xs_dense(-A.hl, A.hl, 0.18)
+        xs = xs_dense(-A.hl, A.hl, 0.55)
         for a, b in zip(xs[:-1], xs[1:]):       # plinth + rail strips (follow the curve)
             tbox(a, b, y - 0.16, y + 0.16, A.raw(a), A.raw(b), A.raw(a) + 0.20, A.raw(b) + 0.20, mat)
             tbox(a, b, y - 0.17, y + 0.17, A.raw(a) + ph - 0.16, A.raw(b) + ph - 0.16, A.raw(a) + ph, A.raw(b) + ph, rail)
-        n = int(A.L / 0.24)
+        n = int(A.L / 0.30)
         npil = max(2, int(round(A.L / pillar_every)))
         pil = [-A.hl + 0.25 + (A.L - 0.5) * i / npil for i in range(npil + 1)]
         for k in range(n + 1):
@@ -276,17 +281,17 @@ def balustrade(A, ph=0.95, pillar_every=2.2, mat="stone", rail="stone"):
             if any(abs(x - p) < 0.2 for p in pil): continue
             z0 = A.raw(x) + 0.18
             # baluster: vase = wide belly low, thin neck
-            bx(x - 0.045, x + 0.045, y - 0.045, y + 0.045, z0, z0 + ph - 0.30, mat)
-            bx(x - 0.065, x + 0.065, y - 0.065, y + 0.065, z0 + 0.08, z0 + 0.28, mat)
+            bar(x, y, z0, z0 + ph - 0.30, 0.045, mat)
+            bar(x, y, z0 + 0.08, z0 + 0.28, 0.07, mat)
         for p in pil:
             z0 = A.raw(p)
             bx(p - 0.19, p + 0.19, y - 0.19, y + 0.19, z0, z0 + ph + 0.18, mat)
             bx(p - 0.23, p + 0.23, y - 0.23, y + 0.23, z0 + ph + 0.18, z0 + ph + 0.26, rail)
 
-def iron_rail(A, ph=1.0, kerb=0.26, bars=0.13, mat="iron", kerb_mat="slab", posts_every=2.0, scroll=False):
+def iron_rail(A, ph=1.0, kerb=0.26, bars=0.17, mat="iron", kerb_mat="slab", posts_every=2.0, scroll=False):
     for side in (-1, 1):
         y = side * (A.W / 2 - 0.12)
-        xs = xs_dense(-A.hl, A.hl, 0.3)
+        xs = xs_dense(-A.hl, A.hl, 0.7)
         for a, b in zip(xs[:-1], xs[1:]):
             tbox(a, b, y - 0.12, y + 0.12, A.raw(a), A.raw(b), A.raw(a) + kerb, A.raw(b) + kerb, kerb_mat)
             for z_off in (kerb + 0.07, ph - 0.03):
@@ -295,8 +300,7 @@ def iron_rail(A, ph=1.0, kerb=0.26, bars=0.13, mat="iron", kerb_mat="slab", post
         for k in range(n + 1):
             x = -A.hl + 0.15 + (A.L - 0.3) * k / n
             z0 = A.raw(x) + kerb
-            bx(x - 0.011, x + 0.011, y - 0.011, y + 0.011, z0, z0 + ph - kerb, mat)
-            if k % 2 == 0: pyramid(x, y, z0 + ph - kerb, 0.02, 0.02, 0.07, mat)           # spear points on alternate bars
+            bar(x, y, z0, z0 + ph - kerb, 0.013, mat)
         np_ = max(2, int(round(A.L / posts_every)))
         for i in range(np_ + 1):
             x = -A.hl + 0.15 + (A.L - 0.3) * i / np_
@@ -314,17 +318,25 @@ def kerb_only(A, w=0.30, h=0.22, mat="slab"):
             bx(a, b, min(y0, y1), max(y0, y1), z - 0.02, z + h, mat)
 
 # ---------------------------------------------------------------- small types
-def build_masonry(kind):
-    spec = dict(
-        brick=dict(L=7.0, W=2.8, R=1.55),
-        balustrade=dict(L=9.0, W=3.3, R=1.95),
-        stucco=dict(L=6.0, W=2.5, R=1.35),
-        noparapet=dict(L=8.0, W=3.0, R=1.80),
-        irongate=dict(L=12.0, W=3.7, R=2.45),
-    )[kind]
-    A = Arch(**spec, t={"brick": 0.5, "balustrade": 0.6, "stucco": 0.5, "noparapet": 0.55, "irongate": 0.65}[kind])
+VARIANTS = {   # name: (base kind, L, W, R, arch thickness, spandrel material)
+    "stucco_s": ("stucco", 4.2, 2.2, 1.00, 0.45, "stucco_pink"),
+    "stucco": ("stucco", 6.0, 2.5, 1.35, 0.50, "stucco_ochre"),
+    "brick": ("brick", 7.0, 2.8, 1.55, 0.50, "brick"),
+    "noparapet": ("noparapet", 8.0, 3.0, 1.80, 0.55, "brick2"),
+    "balustrade": ("balustrade", 9.0, 3.3, 1.95, 0.60, "ashlar"),
+    "stucco_m": ("stucco", 10.0, 2.9, 1.90, 0.55, "stucco_pink"),
+    "brick_m": ("brick", 11.0, 3.1, 2.20, 0.55, "brick2"),
+    "irongate": ("irongate", 12.0, 3.7, 2.45, 0.65, "stucco_pink"),
+    "brick_l": ("brick", 16.0, 3.5, 2.90, 0.60, "brick"),
+    "balustrade_l": ("balustrade", 19.0, 3.8, 3.20, 0.70, "ashlar"),
+    "irongate_l": ("irongate", 23.0, 4.2, 3.60, 0.75, "stucco_ochre"),
+}
+
+def build_masonry(name):
+    kind, L_, W_, R_, t_, sp = VARIANTS[name]
+    spec = dict(L=L_, W=W_, R=R_)
+    A = Arch(**spec, t=t_)
     new_part()
-    sp = {"brick": "brick", "balustrade": "ashlar", "stucco": "stucco_ochre", "noparapet": "brick2", "irongate": "stucco_pink"}[kind]
     for side in (-1, 1):
         if kind in ("brick", "stucco", "noparapet", "irongate"):
             A.spandrel(side, sp, 0.0)
@@ -336,7 +348,7 @@ def build_masonry(kind):
     if kind == "brick":
         parapet_wall(A, "brick", "brick", "slab", ph=0.80, pt=0.32)
     elif kind == "stucco":
-        parapet_wall(A, "stucco_ochre", "stucco_ochre", "stone", ph=0.88, pt=0.36)
+        parapet_wall(A, sp, sp, "stone", ph=0.88, pt=0.36)
     elif kind == "balustrade":
         balustrade(A)
         # string course under the balustrade
@@ -352,7 +364,7 @@ def build_masonry(kind):
             xs = xs_dense(-A.hl, A.hl, 0.4)
             for a, b in zip(xs[:-1], xs[1:]):
                 tbox(a, b, side * A.W / 2 - (0.0 if side < 0 else 0.07), side * A.W / 2 + (0.07 if side > 0 else 0.0), A.raw(a) - 0.12, A.raw(b) - 0.12, A.raw(a) + 0.0, A.raw(b) + 0.0, "stone")
-    return end_part("b_" + kind, 1.0), spec
+    return end_part("b_" + name, 1.0), spec
 
 def build_castiron():
     """19th-century cast-iron bridge: shallow arch of iron ribs, pierced spandrels, plank steps, iron railing"""
@@ -372,7 +384,7 @@ def build_castiron():
         # abutment tops under the iron
         bx(sx * A.S - (0 if sx > 0 else 0), sx * A.S + sx * 0.02, -W / 2, W / 2, A.springz - 0.02, A.springz, "ashlar")
     # iron: three ribs (two fascia + one central), each a curved box girder; vertical struts and rings in the fascia spandrel
-    xr = xs_dense(-A.S, A.S, 0.35)
+    xr = xs_dense(-A.S, A.S, 0.7)
     for y, w in ((-W / 2 + 0.07, 0.14), (0.0, 0.12), (W / 2 - 0.07, 0.14)):
         for a, b in zip(xr[:-1], xr[1:]):
             tbox(a, b, y - w / 2, y + w / 2, A.intr(a), A.intr(b), A.intr(a) + 0.34, A.intr(b) + 0.34, "castiron")
@@ -382,15 +394,15 @@ def build_castiron():
         for a, b in zip(xr[:-1], xr[1:]):
             tbox(a, b, y - 0.06, y + 0.06, A.raw(a) - 0.30, A.raw(b) - 0.30, A.raw(a) - 0.04, A.raw(b) - 0.04, "castiron")
         # struts + rings between rib and deck beam
-        for x in [v for v in xs_dense(-A.S + 0.4, A.S - 0.4, 0.9)]:
+        for x in [v for v in xs_dense(-A.S + 0.4, A.S - 0.4, 1.4)]:
             z0 = A.intr(x) + 0.34; z1 = A.raw(x) - 0.30
             if z1 - z0 > 0.1:
                 bx(x - 0.045, x + 0.045, y - 0.05, y + 0.05, z0, z1, "castiron")
                 if z1 - z0 > 0.35:                 # ring in the panel
                     zc = (z0 + z1) / 2; rr = min(0.22, (z1 - z0) / 2 - 0.05); xo = x + 0.45
                     if xo < A.S - 0.2:
-                        for i in range(10):
-                            t0, t1 = i * 2 * PI / 10, (i + 1) * 2 * PI / 10
+                        for i in range(8):
+                            t0, t1 = i * 2 * PI / 8, (i + 1) * 2 * PI / 8
                             for yy, sg in ((y - 0.045, -1), (y + 0.045, 1)):
                                 qd(V(xo + rr * math.cos(t0), yy, zc + rr * math.sin(t0)), V(xo + rr * math.cos(t1), yy, zc + rr * math.sin(t1)),
                                    V(xo + (rr - 0.045) * math.cos(t1), yy, zc + (rr - 0.045) * math.sin(t1)), V(xo + (rr - 0.045) * math.cos(t0), yy, zc + (rr - 0.045) * math.sin(t0)), "castiron", (0, sg, 0))
@@ -399,7 +411,7 @@ def build_castiron():
     for x in xs_dense(-A.S, A.S, 1.2):
         bx(x - 0.05, x + 0.05, -W / 2 + 0.1, W / 2 - 0.1, A.raw(x) - 0.28, A.raw(x) - 0.10, "castiron")
     A.deck("planks", "wood")
-    iron_rail(A, ph=1.0, kerb=0.0, bars=0.14, mat="castiron", kerb_mat="castiron", posts_every=1.75)
+    iron_rail(A, ph=1.0, kerb=0.0, bars=0.2, mat="castiron", kerb_mat="castiron", posts_every=1.75)
     for side in (-1, 1):    # fascia plate along the deck edge
         xs2 = xs_dense(-A.hl, A.hl, 0.4)
         for a, b in zip(xs2[:-1], xs2[1:]):
@@ -411,11 +423,8 @@ BUILT = []      # (name, object, spec)
 def want(n): return not ONLY or n in ONLY
 def reg(name, ob, spec): BUILT.append((name, ob, spec))
 
-if want("brick"): reg("brick", *build_masonry("brick"))
-if want("balustrade"): reg("balustrade", *build_masonry("balustrade"))
-if want("stucco"): reg("stucco", *build_masonry("stucco"))
-if want("noparapet"): reg("noparapet", *build_masonry("noparapet"))
-if want("irongate"): reg("irongate", *build_masonry("irongate"))
+for _n in VARIANTS:
+    if want(_n): reg(_n, *build_masonry(_n))
 if want("castiron"): reg("castiron", *build_castiron())
 
 exec(open(os.path.join(HERE, "build_bridges_long.py")).read()) if os.path.exists(os.path.join(HERE, "build_bridges_long.py")) else None

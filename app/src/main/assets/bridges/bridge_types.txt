@@ -1,0 +1,21 @@
+# name  L(nominal)  W  [slice half-length c: _a = x<=-c, _m = -c..c repeated every 2c, _z = x>=c]
+balustrade 9.00 3.30
+balustrade_l 19.00 3.80
+bowstring 60.00 6.00
+brick 7.00 2.80
+brick_l 16.00 3.50
+brick_m 11.00 3.10
+castiron 14.00 3.40
+costituzione 80.00 17.70
+girder 48.00 9.00 12.00
+guglie 22.00 6.20
+irongate 12.00 3.70
+irongate_l 23.00 4.20
+liberta 38.00 22.00 6.00
+noparapet 8.00 3.00
+ribbon 54.00 3.20 9.00
+scalzi 40.00 9.00
+stucco 6.00 2.50
+stucco_m 10.00 2.90
+stucco_s 4.20 2.20
+timber 36.00 3.00 6.00

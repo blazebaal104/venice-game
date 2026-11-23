@@ -725,7 +725,9 @@ class CityMesher {
         if (total < 1f) return
         val flat = total > 70f
         val midX = t.ox + br.xy[(n / 2) * 2]; val midY = t.oy + br.xy[(n / 2) * 2 + 1]
-        if (!flat && total > 30f && hypot(midX - Places.accademia.x, midY - Places.accademia.y) < 90f) { woodBridge(br, total, cum); return }
+        // every bridge except the Accademia area is now a hand-built model (assets/bridges, see GameRenderer.loadBridges)
+        if (hypot(midX - Places.accademia.x, midY - Places.accademia.y) >= 90f) return
+        if (!flat && total > 30f) { woodBridge(br, total, cum); return }
         val rise = if (flat) 0f else (0.11f * total + 0.35f).coerceIn(0.5f, 7.0f)
         val w = br.width.coerceIn(1.6f, if (flat) 30f else 24f)
         val hw = w / 2

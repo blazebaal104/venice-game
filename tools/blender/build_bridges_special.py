@@ -35,7 +35,7 @@ def build_guglie():
         for a, b in zip(xs[:-1], xs[1:]):
             tbox(a, b, y - 0.025, y + 0.025, A.raw(a) + 0.9, A.raw(b) + 0.9, A.raw(a) + 0.95, A.raw(b) + 0.95, "iron")
         for x in xs_dense(-A.hl + 0.6, A.hl - 0.6, 1.6): bx(x - 0.025, x + 0.025, y - 0.025, y + 0.025, A.raw(x), A.raw(x) + 0.95, "iron")
-    return end_part("b_guglie", 1.6), dict(L=22.0, W=6.2, long=False, height=6.2, low=True, look_z=1.5)
+    return end_part("b_guglie", 1.3), dict(L=22.0, W=6.2, long=False, height=6.2, low=True, look_z=1.5)
 
 def build_scalzi():
     L, W, R = 40.0, 9.0, 5.65
@@ -66,7 +66,7 @@ def build_scalzi():
         for a, b in zip(xs[:-1], xs[1:]):
             tbox(a, b, y - 0.025, y + 0.025, A.raw(a) + 0.88, A.raw(b) + 0.88, A.raw(a) + 0.93, A.raw(b) + 0.93, "iron")
         for x in xs_dense(-A.hl + 0.8, A.hl - 0.8, 2.0): bx(x - 0.025, x + 0.025, y - 0.025, y + 0.025, A.raw(x), A.raw(x) + 0.93, "iron")
-    return end_part("b_scalzi", 2.4), dict(L=L, W=W, long=False, height=8.0, lens=38, low=True, look_z=3.0)
+    return end_part("b_scalzi", 1.8), dict(L=L, W=W, long=False, height=8.0, lens=38, low=True, look_z=3.0)
 
 def build_costituzione():
     """Calatrava bridge: 80 m steel arch, deck flares from 9.4 m (crown) to 17.7 m (abutments), low wide steps alternating
@@ -141,7 +141,7 @@ def build_costituzione():
         for a, b in zip(xh[:-1], xh[1:]):
             ya, yb = sg * (wf(a) / 2 - 0.10), sg * (wf(b) / 2 - 0.10)
             tbox(a, b, min(ya, yb) - 0.05, max(ya, yb) + 0.05, A.raw(a) + 1.0, A.raw(b) + 1.0, A.raw(a) + 1.1, A.raw(b) + 1.1, "bronze")
-    return end_part("b_costituzione", 3.2), dict(L=L, W=WMAX, long=False, height=10.5, lens=34, hero_h=0.30, look_z=3.5, low=True)
+    return end_part("b_costituzione", 2.2), dict(L=L, W=WMAX, long=False, height=10.5, lens=34, hero_h=0.30, look_z=3.5, low=True)
 
 for nm, fn in (("guglie", build_guglie), ("scalzi", build_scalzi), ("costituzione", build_costituzione)):
     if want(nm): reg(nm, *fn())

@@ -92,6 +92,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         waterN = WaterNormals.create()
         boatMesh = loadMesh("boat.mesh")
         loadLandmarks()
+        loadBridges()
         loadStops()
         boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
         Obstacles.stops = stopBoxes
@@ -153,6 +154,25 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val mesh = loadMesh("landmarks/${p[0]}.mesh") ?: continue
             val x = p[1].toFloat(); val y = p[2].toFloat(); val rot = Math.toRadians(p[3].toDouble()).toFloat()
             landmarks.add(Landmark(mesh, Mat4.mul(Mat4.translation(x, y, 0f), Mat4.rotZ(rot)), x, y, loadAtlas("landmarks/${p[0]}_atlas.jpg")))
+        }
+    }
+
+    /** Hand-built bridge types (assets/bridges): one line per instance `mesh x y rotDeg sx sy sz`, the mesh is
+     *  stretched along the walkway (sx), across (sy) and in height about the quay level (sz). One shared atlas. */
+    private fun loadBridges() {
+        val lines = try { ctx.assets.open("bridges/bridges.txt").bufferedReader().readLines() } catch (e: Exception) { return }
+        val atlas = loadAtlas("bridges/bridges_atlas.jpg"); if (atlas == 0) return
+        val meshes = HashMap<String, Mesh?>()
+        val g = 1.1f
+        for (line in lines) {
+            if (line.isBlank() || line.startsWith("#")) continue
+            val p = line.trim().split(Regex("\\s+")); if (p.size < 7) continue
+            val mesh = meshes.getOrPut(p[0]) { loadMesh("bridges/${p[0]}.mesh") } ?: continue
+            val x = p[1].toFloat(); val y = p[2].toFloat(); val rot = Math.toRadians(p[3].toDouble()).toFloat()
+            val sx = p[4].toFloat(); val sy = p[5].toFloat(); val sz = p[6].toFloat()
+            val sc = Mat4.identity().also { it[0] = sx; it[5] = sy; it[10] = sz; it[14] = g * (1f - sz) }
+            val model = Mat4.mul(Mat4.mul(Mat4.translation(x, y, 0f), Mat4.rotZ(rot)), sc)
+            landmarks.add(Landmark(mesh, model, x, y, atlas))
         }
     }
 
