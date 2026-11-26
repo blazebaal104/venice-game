@@ -71,6 +71,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         }
         if (s != Screen.MAP) MapLayer.dropRegion()
         teleportOpen = false
+        gui.consumeScroll()
         Controls.screen = s
         invalidate()
     }
@@ -110,7 +111,12 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     // ---------------------------------------------------------------- drawing
     override fun onDraw(canvas: Canvas) {
         val sc = Controls.screen
-        if (sc != lastScreen) { if (sc == Screen.MAP && lastScreen != Screen.MAP) { centreMapOnBoat(); selX = Float.NaN }; lastScreen = sc }
+        if (sc != lastScreen) {
+            // pages opened straight from the HUD (minimap tap, pause button) return to the game
+            if (sc == Screen.MAP) { if (lastScreen == Screen.NONE) mapReturn = Screen.NONE; centreMapOnBoat(); selX = Float.NaN }
+            if (sc == Screen.PAUSE) teleportOpen = false
+            gui.consumeScroll(); lastScreen = sc
+        }
         if (sc == Screen.NONE) return
         c = canvas; ink.c = canvas
         when (sc) {

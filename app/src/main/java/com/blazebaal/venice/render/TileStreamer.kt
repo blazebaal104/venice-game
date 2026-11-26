@@ -77,7 +77,7 @@ class TileCache(root: File, key: String) {
             buf.putInt(MAGIC); buf.putInt(if (m.hasMarsh) 1 else 0)
             for (a in arrays) buf.putInt(a.size)
             for (a in arrays) buf.asFloatBuffer().put(a).also { buf.position(buf.position() + a.size * 4) }
-            val tmp = File(dir, "${tx}_$ty.tmp")
+            val tmp = File(dir, "${tx}_$ty.${Thread.currentThread().id}.tmp")
             tmp.writeBytes(buf.array())
             tmp.renameTo(file(tx, ty))
         } catch (_: Exception) { }

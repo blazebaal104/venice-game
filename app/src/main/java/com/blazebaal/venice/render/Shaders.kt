@@ -85,7 +85,7 @@ vec3 fog(vec3 c, vec3 wpos) {
     f = max(f, (1.0 - exp(-d * 0.00035)) * 0.35);   // light lagoon haze
     // caligo: the low mist that sits on the lagoon - thicker near the water, thinning out over the rooftops
     float low = exp(-max(wpos.z, 0.0) / 16.0);
-    f = max(f, (1.0 - exp(-d * uFogDens * 1.35)) * (0.55 + 0.45 * low));
+    f = max(f, (1.0 - exp(-d * uFogDens * 0.9)) * (0.55 + 0.45 * low));
     // render distance: everything is fully inside the fog before the edge where chunks are unloaded
     if (uFogEnd > 1.0) {
         float e = smoothstep(uFogStart, uFogEnd, d);

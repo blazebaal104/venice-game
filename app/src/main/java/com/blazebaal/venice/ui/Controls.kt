@@ -84,9 +84,9 @@ object Settings {
     // ---- graphics
     @Volatile var quality = BALANCED
     /** radius (m) of the loaded world: everything past it is unloaded and hidden in the fog. 256 m = one chunk (map tile). */
-    @Volatile var renderDistance = 640f
+    @Volatile var renderDistance = 512f
     @Volatile var vegetationDistance = 180f
-    @Volatile var detailDistance = 260f
+    @Volatile var detailDistance = 240f
     /** 0 = dynamic resolution, otherwise a fixed internal resolution in percent */
     @Volatile var resolution = 0
     @Volatile var fpsTarget = 60
@@ -122,10 +122,10 @@ object Settings {
     fun applyPreset(q: Int) {
         quality = q
         when (q) {
-            PERFORMANCE -> { renderDistance = 450f; vegetationDistance = 110f; detailDistance = 160f; shadows = false; reflections = true; bloom = false }
-            BALANCED -> { renderDistance = 640f; vegetationDistance = 180f; detailDistance = 260f; shadows = true; reflections = true; bloom = true }
-            QUALITY -> { renderDistance = 850f; vegetationDistance = 260f; detailDistance = 330f; shadows = true; reflections = true; bloom = true }
-            else -> { renderDistance = 1100f; vegetationDistance = 380f; detailDistance = 420f; shadows = true; reflections = true; bloom = true }
+            PERFORMANCE -> { renderDistance = 384f; vegetationDistance = 110f; detailDistance = 160f; shadows = false; reflections = true; bloom = false }
+            BALANCED -> { renderDistance = 512f; vegetationDistance = 180f; detailDistance = 240f; shadows = true; reflections = true; bloom = true }
+            QUALITY -> { renderDistance = 768f; vegetationDistance = 260f; detailDistance = 330f; shadows = true; reflections = true; bloom = true }
+            else -> { renderDistance = 1024f; vegetationDistance = 380f; detailDistance = 420f; shadows = true; reflections = true; bloom = true }
         }
     }
 
@@ -137,7 +137,7 @@ object Settings {
     fun load(ctx: Context) {
         val p = ctx.getSharedPreferences("venice", Context.MODE_PRIVATE)
         quality = p.getInt("quality", BALANCED)
-        renderDistance = p.getFloat("renderDistance", 640f); vegetationDistance = p.getFloat("vegDistance", 180f); detailDistance = p.getFloat("detailDistance", 260f)
+        renderDistance = p.getFloat("renderDistance", 512f); vegetationDistance = p.getFloat("vegDistance", 180f); detailDistance = p.getFloat("detailDistance", 240f)
         resolution = p.getInt("resolution", 0)
         // the old default of 120 FPS pushed the dynamic resolution down to 50 % on most phones
         fpsTarget = if (p.getInt("settingsVersion", 1) < 2) 60 else p.getInt("fps", 60)
