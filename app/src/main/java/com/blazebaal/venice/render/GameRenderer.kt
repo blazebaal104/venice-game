@@ -119,7 +119,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     companion object {
         /** bump whenever CityMesher output changes, so cached tiles on players' phones are rebuilt */
-        const val MESHER_VERSION = 2
+        const val MESHER_VERSION = 3
     }
 
     private fun loadMesh(asset: String): Mesh? = try {
@@ -168,13 +168,16 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun loadLandmarks() {
         // each line: name, world x, world y, rotation (deg); local +X runs along the structure
         val lines = try { ctx.assets.open("landmarks/landmarks.txt").bufferedReader().readLines() } catch (e: Exception) { emptyList() }
+        val zones = ArrayList<FloatArray>()
         for (line in lines) {
             if (line.isBlank() || line.startsWith("#")) continue
             val p = line.trim().split(Regex("\\s+"))
+            if (p.size >= 6) zones.add(floatArrayOf(p[1].toFloat(), p[2].toFloat(), Math.toRadians(p[3].toDouble()).toFloat(), p[4].toFloat(), p[5].toFloat()))
             val mesh = loadMesh("landmarks/${p[0]}.mesh") ?: continue
             val x = p[1].toFloat(); val y = p[2].toFloat(); val rot = Math.toRadians(p[3].toDouble()).toFloat()
             landmarks.add(Landmark(mesh, Mat4.mul(Mat4.translation(x, y, 0f), Mat4.rotZ(rot)), x, y, loadAtlas("landmarks/${p[0]}_atlas.jpg")))
         }
+        Exclusions.zones = zones
     }
 
     /** Hand-built bridge types (assets/bridges): one line per instance `mesh x y rotDeg sx sy sz`, the mesh is

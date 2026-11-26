@@ -6,7 +6,7 @@ brick 7.00 2.80
 brick_l 16.00 3.50
 brick_m 11.00 3.10
 castiron 14.00 3.40
-costituzione 80.00 17.70
+costituzione 102.00 9.38
 girder 48.00 9.00 12.00
 guglie 22.00 6.20
 irongate 12.00 3.70

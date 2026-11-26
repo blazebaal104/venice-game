@@ -14,3 +14,8 @@ z_ala    -143.2 -35.9  -66.25 29.5   10.5
 z_lib    17.3   -49.4  -68.27 42.0   14.0
 z_zecca  10.9   -87.5  20.2   19.0   8.0
 z_orolog 28.5   106.0  29.1   12.0   5.5
+# Venezia Santa Lucia station front building (tools/procedural/ferrovia.py); zones replace the generic OSM building
+# and keep street props out from under the canopy and off the steps
+ferrovia -1418.3 756.2 51.3
+z_ferrovia -1406.4 806.2 51.3 47.0 24.0
+z_ferrovia_steps -1385.7 789.7 51.3 44.0 5.5

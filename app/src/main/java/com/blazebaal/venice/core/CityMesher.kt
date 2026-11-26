@@ -144,6 +144,11 @@ class CityMesher {
 
     // ------------------------------------------------------------------ buildings
     private fun building(b: BuildingData, bi: Int, t: TileData) {
+        if (Exclusions.zones.isNotEmpty()) {
+            var sx = 0f; var sy = 0f; val n = b.ringSizes[0]
+            for (i in 0 until n) { sx += b.xy[i * 2]; sy += b.xy[i * 2 + 1] }
+            if (n > 0 && Exclusions.inside(t.ox + sx / n, t.oy + sy / n)) return      // replaced by a landmark
+        }
         if (b.kind == 6) { tower(b); return }
         val top = Z.GROUND + b.height
         val seed01 = (b.seed and 0xffff) / 65535f
@@ -853,6 +858,7 @@ class CityMesher {
 
     // ------------------------------------------------------------------ street furniture & lagoon props
     private fun prop(p: PointData, t: TileData) {
+        if (Exclusions.zones.isNotEmpty() && Exclusions.inside(t.ox + p.x, t.oy + p.y)) return
         val onLand = t.solidAt(p.x, p.y) > 0.5f
         val gz = if (onLand) Z.GROUND else 0f
         val s = (p.x * 73.1f + p.y * 19.7f).toInt()
