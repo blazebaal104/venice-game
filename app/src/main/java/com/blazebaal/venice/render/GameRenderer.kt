@@ -120,7 +120,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     companion object {
         /** bump whenever CityMesher output changes, so cached tiles on players' phones are rebuilt */
-        const val MESHER_VERSION = 4
+        const val MESHER_VERSION = 5
     }
 
     private fun loadMesh(asset: String): Mesh? = try {
