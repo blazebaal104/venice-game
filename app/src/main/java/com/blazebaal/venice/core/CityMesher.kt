@@ -856,10 +856,36 @@ class CityMesher {
         }
     }
 
+    /** Is the tile-local point on a pier deck (line pier within its width, or inside a pier polygon)? */
+    private fun onPier(t: TileData, x: Float, y: Float): Boolean {
+        for (p in t.piers) {
+            val hw = (p.width / 2).coerceIn(0.6f, 4f) + 0.6f
+            for (i in 0 until p.xy.size / 2 - 1) {
+                val ax = p.xy[i * 2]; val ay = p.xy[i * 2 + 1]; val ex = p.xy[i * 2 + 2] - ax; val ey = p.xy[i * 2 + 3] - ay
+                val l2 = ex * ex + ey * ey; if (l2 < 1e-6f) continue
+                val k = (((x - ax) * ex + (y - ay) * ey) / l2).coerceIn(0f, 1f)
+                if (hypot(ax + ex * k - x, ay + ey * k - y) < hw) return true
+            }
+        }
+        for (pp in t.pierPolys) {
+            val n = pp.xy.size / 2; var inside = false; var j = n - 1
+            for (i in 0 until n) {
+                val xi = pp.xy[i * 2]; val yi = pp.xy[i * 2 + 1]; val xj = pp.xy[j * 2]; val yj = pp.xy[j * 2 + 1]
+                if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi + 1e-9f) + xi) inside = !inside
+                j = i
+            }
+            if (inside) return true
+        }
+        return false
+    }
+
     // ------------------------------------------------------------------ street furniture & lagoon props
     private fun prop(p: PointData, t: TileData) {
         if (Exclusions.zones.isNotEmpty() && Exclusions.inside(t.ox + p.x, t.oy + p.y)) return
         val onLand = t.solidAt(p.x, p.y) > 0.5f
+        // street furniture OSM puts a few metres into a canal (lamps, benches, bins, trees...) is not built,
+        // unless it stands on a pier or pontoon deck
+        if (p.type != Feature.BRICOLA && p.type != Feature.STOP && t.solidAt(p.x, p.y) < 0.3f && !onPier(t, p.x, p.y)) return
         val gz = if (onLand) Z.GROUND else 0f
         val s = (p.x * 73.1f + p.y * 19.7f).toInt()
         val dir = if (p.dir >= 0) Math.toRadians(90.0 - p.dir).toFloat() else rnd(s, 7) * PI.toFloat()
