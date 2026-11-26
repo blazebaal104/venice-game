@@ -3,6 +3,7 @@
 // so it glides instead of jumping. Also publishes collision boxes for the player's boat and map markers for the UI.
 package com.blazebaal.venice.render
 
+import com.blazebaal.venice.core.Mat4
 import com.blazebaal.venice.core.Obstacles
 import com.blazebaal.venice.core.Places
 import com.blazebaal.venice.core.Waves
