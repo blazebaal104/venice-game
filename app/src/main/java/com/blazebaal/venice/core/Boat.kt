@@ -154,7 +154,7 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
             }
             // oriented boxes: vaporetto pontoons and gangways, then line piers
             world.piers(x, y, pierBoxes, pierPolys)
-            for (list in arrayOf(Obstacles.stops, pierBoxes)) for (o in list) {
+            for (list in arrayOf(Obstacles.stops, pierBoxes, Obstacles.boats)) for (o in list) {
                 // oriented box: x, y, rotation, half length, half width
                 if (abs(o[0] - x) > o[3] + 9f || abs(o[1] - y) > o[3] + 9f) continue
                 val oc = cos(o[2]); val os = sin(o[2])

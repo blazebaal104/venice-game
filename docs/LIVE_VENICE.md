@@ -22,7 +22,22 @@ Turn it off in *Impostazioni → Meteo e mondo*. Without a connection the game u
 **Next:** rain/snow particles and wet surfaces (`isRain()`), gust bursts on the water, sun position + night lighting
 from the real clock (`is_day`, sunrise/sunset), *acqua alta* from the tide gauge (Comune di Venezia, Punta della Salute).
 
-## 2. Vaporetti — plan
+## 2. Vaporetti — v1 done (live positions)
+
+Implemented in `live/Vaporetti.kt` + `render/LiveBoats.kt`, straight from **ACTV's own open data** (the same source
+miniVenice uses; miniVenice's terms don't allow other apps to use its real-time service, so we never touch it):
+* positions: GTFS-Realtime `https://tpl.actv.it/nav/GTFSRT/vehiclePositions`, polled every 15 s, decoded by a tiny
+  hand-written protobuf reader (no library);
+* line numbers / destinations: `routes.txt` + `trips.txt` from the GTFS zip
+  `https://actv.avmspa.it/sites/default/files/attachments/opendata/navigazione/actv_nav.zip`, downloaded once a week;
+* each boat is dead-reckoned along its bearing between fixes and eased, drawn with `assets/live/vaporetto.mesh`
+  (`tools/procedural/vaporetto.py`), solid for the player's boat, and shown with its line number on the minimap and
+  the full-screen map. Toggle: *Impostazioni → Meteo e mondo → Vaporetti ACTV in tempo reale*.
+
+Still to do from the plan below: timetable simulation when offline (Layer A), different hull types per line, the line
+number on the boat's own sign board, following the water paths instead of straight dead reckoning.
+
+## 2b. Vaporetti — original plan
 
 Two layers, so the boats are always there and become "real" whenever live data is available:
 

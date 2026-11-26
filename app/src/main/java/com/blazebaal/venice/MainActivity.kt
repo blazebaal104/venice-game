@@ -9,6 +9,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import com.blazebaal.venice.live.Vaporetti
 import com.blazebaal.venice.live.Weather
 import com.blazebaal.venice.render.GameRenderer
 import com.blazebaal.venice.ui.Controls
@@ -32,6 +33,7 @@ class MainActivity : Activity(), GameActions {
         Settings.load(this)
         Controls.screen = Screen.MENU
         if (Settings.liveWeather) Weather.start() else Weather.climateFallback()
+        Vaporetti.enabled = Settings.liveVaporetti; Vaporetti.start(this)
         requestHighRefreshRate()
         renderer = GameRenderer(this)
         glView = GLSurfaceView(this).apply {
@@ -100,9 +102,9 @@ class MainActivity : Activity(), GameActions {
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) hideSystemUi() }
-    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start() }
+    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start(); Vaporetti.start(this) }
     override fun onPause() {
-        super.onPause(); glView.onPause(); Settings.save(this); Weather.stop()
+        super.onPause(); glView.onPause(); Settings.save(this); Weather.stop(); Vaporetti.stop()
         // leaving the app mid-run opens the pause menu, so you don't come back to a boat already moving
         if (Controls.screen == Screen.NONE) Controls.screen = Screen.PAUSE
     }

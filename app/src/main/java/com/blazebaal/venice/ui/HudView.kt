@@ -203,6 +203,14 @@ class HudView(ctx: Context) : View(ctx) {
         val rot = if (Settings.minimapNorthUp) 0f else Math.toDegrees(GameState.heading.toDouble()).toFloat() - 90f
         c.translate(cx, cy)
         MapLayer.draw(ink, GameState.x, GameState.y, pxPerM, rot, false)
+        // live vaporetti on the minimap
+        if (Settings.liveVaporetti) for (v in com.blazebaal.venice.render.LiveBoats.markers) {
+            val q = MapLayer.toScreen(v.x, v.y, GameState.x, GameState.y, pxPerM, rot)
+            if (abs(q.x) > r.width() / 2 || abs(q.y) > r.height() / 2) continue
+            ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW; c.drawCircle(q.x, q.y, 6.5f * s, ink.fill)
+            ink.stroke.color = Theme.INK; ink.stroke.strokeWidth = 1.2f * s; c.drawCircle(q.x, q.y, 6.5f * s, ink.stroke)
+            ink.label(v.line, q.x, q.y + 2.8f * s, if (v.line.length > 2) 6f else 7.5f, Theme.INK, Paint.Align.CENTER)
+        }
         // waypoint: line from the boat + pin (clamped to the rim when off-map)
         if (GameState.hasWaypoint()) {
             val p = MapLayer.toScreen(GameState.wpX, GameState.wpY, GameState.x, GameState.y, pxPerM, rot)
