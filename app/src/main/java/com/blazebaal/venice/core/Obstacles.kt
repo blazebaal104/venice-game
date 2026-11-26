@@ -4,6 +4,8 @@ package com.blazebaal.venice.core
 object Obstacles {
     /** oriented boxes: x, y, rotation (rad), half length, half width */
     @Volatile var stops: List<FloatArray> = emptyList()
+    /** live ACTV vaporetti, same box format, refreshed every frame */
+    @Volatile var boats: List<FloatArray> = emptyList()
 }
 
 /** Areas where a hand-built landmark replaces the map's generic buildings and street props (oriented rectangles:

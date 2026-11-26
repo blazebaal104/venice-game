@@ -111,6 +111,7 @@ object Settings {
     @Volatile var volAmbience = 0.6f
     // ---- world
     @Volatile var liveWeather = true
+    @Volatile var liveVaporetti = true
     @Volatile var language = 0           // 0 italiano, 1 english
 
     /** highest internal resolution (fraction of the screen) the dynamic scaler may use */
@@ -149,6 +150,7 @@ object Settings {
         minimapNorthUp = p.getBoolean("northUp", false)
         volMaster = p.getFloat("volMaster", 0.8f); volEngine = p.getFloat("volEngine", 0.8f); volAmbience = p.getFloat("volAmbience", 0.6f)
         liveWeather = p.getBoolean("liveWeather", true); language = p.getInt("language", 0)
+        liveVaporetti = p.getBoolean("liveVaporetti", true)
     }
     fun save(ctx: Context) {
         ctx.getSharedPreferences("venice", Context.MODE_PRIVATE).edit()
@@ -160,7 +162,7 @@ object Settings {
             .putBoolean("analog", analogSteering).putFloat("steerSens", steerSensitivity).putFloat("camSens", cameraSensitivity)
             .putBoolean("vibration", vibration).putInt("speedUnit", speedUnit).putFloat("hudScale", hudScale).putBoolean("northUp", minimapNorthUp)
             .putFloat("volMaster", volMaster).putFloat("volEngine", volEngine).putFloat("volAmbience", volAmbience)
-            .putBoolean("liveWeather", liveWeather).putInt("language", language)
+            .putBoolean("liveWeather", liveWeather).putBoolean("liveVaporetti", liveVaporetti).putInt("language", language)
             .apply()
     }
 }

@@ -421,7 +421,10 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         ink.label(st, x, y + 18 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed); y += 30 * dp
         ink.label("Dati: Open-Meteo.com (CC BY 4.0), aggiornati ogni 10 minuti. Pioggia e vento sulle onde: in arrivo.", x, y + 18 * dp, 11.5f, Theme.TEXT_FAINT, face = Theme.condensed); y += 36 * dp
         y = section(x, y, "VAPORETTI DAL VIVO")
-        ink.label("In preparazione: i vaporetti ACTV veri, sulla loro linea e nella loro posizione reale.", x, y + 18 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
+        Settings.liveVaporetti = gui.toggle(row(x, y, w, "Vaporetti ACTV in tempo reale", "I battelli veri, sulla loro linea, dove sono adesso"), Settings.liveVaporetti); y += 56 * dp
+        com.blazebaal.venice.live.Vaporetti.enabled = Settings.liveVaporetti
+        ink.label(com.blazebaal.venice.live.Vaporetti.status, x, y + 18 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed); y += 26 * dp
+        ink.label("Dati: ACTV S.p.A., open data GTFS / GTFS-Realtime (Comune di Venezia), aggiornati ogni 15 secondi.", x, y + 18 * dp, 11.5f, Theme.TEXT_FAINT, face = Theme.condensed)
         return y + 34 * dp
     }
 
@@ -451,6 +454,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         "Altezze: Copernicus Land Monitoring Service, Urban Atlas Building Block Height 2021 (Unione Europea)" to 2,
         "METEO" to 1,
         "Meteo in tempo reale: Open-Meteo.com · CC BY 4.0" to 2,
+        "VAPORETTI" to 1,
+        "Posizioni e orari dei vaporetti: ACTV S.p.A., open data (GTFS e GTFS-Realtime) secondo le regole open data del Comune di Venezia." to 2,
         "MODELLI" to 1,
         "Barca, ponti, pontili ACTV e monumenti modellati in Blender via script." to 2,
     )
@@ -529,6 +534,12 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW; c.drawRoundRect(q.x - 3.5f * dp, q.y - 3.5f * dp, q.x + 3.5f * dp, q.y + 3.5f * dp, 1 * dp, 1 * dp, ink.fill)
             if (z > 1.1f) { ink.text.setShadowLayer(3 * dp, 0f, 1 * dp, Color.BLACK); ink.label(st.name, q.x + 6 * dp, q.y - 4 * dp, 10f, Theme.YELLOW, face = Theme.condensed); ink.text.clearShadowLayer() }
         }
+        // live vaporetti: arrow + line number
+        if (Settings.liveVaporetti) for (v in com.blazebaal.venice.render.LiveBoats.markers) {
+            val q = sp(v.x, v.y)
+            if (abs(q.x) > W / 2 + 30 * dp || abs(q.y) > H / 2 + 30 * dp) continue
+            vaporettoMark(q.x, q.y, v.h, v.line, z > 0.25f)
+        }
         // waypoint + route line
         if (GameState.hasWaypoint()) {
             val b = sp(GameState.x, GameState.y); val w = sp(GameState.wpX, GameState.wpY)
@@ -589,6 +600,18 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             selX = mapCx + (p.x - W / 2) / mapScale; selY = mapCy - (p.y - H / 2) / mapScale
             selName = nearestName(selX, selY)
         }
+    }
+
+    /** Yellow ACTV chip with the line number and a small heading arrow. */
+    private fun vaporettoMark(x: Float, y: Float, h: Float, line: String, label: Boolean) {
+        val sv = c.save(); c.translate(x, y); c.rotate(-Math.toDegrees(h.toDouble()).toFloat() + 90f)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.INK
+        ink.path.reset(); ink.path.moveTo(0f, -11 * dp); ink.path.lineTo(5 * dp, -4 * dp); ink.path.lineTo(-5 * dp, -4 * dp); ink.path.close(); c.drawPath(ink.path, ink.fill)
+        c.restoreToCount(sv)
+        val r = if (label) 9 * dp else 5 * dp
+        ink.fill.color = Theme.YELLOW; c.drawCircle(x, y, r, ink.fill)
+        ink.stroke.color = Theme.INK; ink.stroke.strokeWidth = 1.5f * dp; c.drawCircle(x, y, r, ink.stroke)
+        if (label) ink.label(line, x, y + 3.5f * dp, if (line.length > 2) 8f else 10f, Theme.INK, Paint.Align.CENTER)
     }
 
     private fun nearestName(x: Float, y: Float): String {
