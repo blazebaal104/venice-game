@@ -8,6 +8,8 @@ import android.content.Context
 import android.opengl.GLES30.*
 import android.opengl.GLSurfaceView
 import com.blazebaal.venice.core.*
+import com.blazebaal.venice.live.Weather
+import com.blazebaal.venice.ui.Screen
 import com.blazebaal.venice.ui.Controls
 import com.blazebaal.venice.ui.GameState
 import com.blazebaal.venice.ui.Settings
@@ -21,7 +23,8 @@ class Landmark(val mesh: Mesh, val model: FloatArray, val x: Float, val y: Float
 
 class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private lateinit var world: WorldMap
-    private lateinit var streamer: TileStreamer
+    lateinit var streamer: TileStreamer; private set
+    @Volatile var ready = false; private set
     private lateinit var generic: Program; private lateinit var facade: Program; private lateinit var ground: Program
     private lateinit var water: Program; private lateinit var sky: Program; private lateinit var depth: Program
     private lateinit var sprayP: Program
@@ -59,16 +62,26 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private val sunCol = floatArrayOf(3.3f, 2.95f, 2.45f)
     private val skyAmb = floatArrayOf(0.34f, 0.42f, 0.56f)
     private val groundAmb = floatArrayOf(0.20f, 0.18f, 0.15f)
-    private val fogCol = floatArrayOf(0.62f, 0.68f, 0.76f)
-    private val zenith = floatArrayOf(0.16f, 0.30f, 0.62f)
-    private val FOG_DENS = 1f / 640f
-    private val DRAW_DIST = 720f
+    // clear-day values; blended towards overcast / fog by the live weather every frame
+    private val fogClear = floatArrayOf(0.62f, 0.68f, 0.76f); private val fogGrey = floatArrayOf(0.66f, 0.68f, 0.70f)
+    private val zenithClear = floatArrayOf(0.16f, 0.30f, 0.62f); private val zenithGrey = floatArrayOf(0.42f, 0.46f, 0.52f)
+    private val fogCol = fogClear.copyOf()
+    private val zenith = zenithClear.copyOf()
+    private var fogDens = 1f / 640f
+    private var fogStart = 400f; private var fogEnd = 640f
+    /** = Settings.renderDistance, read once per frame */
+    private var drawDist = 640f
+    private var tripTime = 0f; private var topKmh = 0f
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        val map = MapData(ctx.assets.open("venice.map"))
+        val bytes = ctx.assets.open("venice.map").use { it.readBytes() }
+        val map = MapData(java.io.ByteArrayInputStream(bytes))
         world = WorldMap(map)
-        GameState.minX = map.minX; GameState.minY = map.minY
-        streamer = TileStreamer(world, 700f)
+        GameState.minX = map.minX; GameState.minY = map.minY; GameState.lat0 = map.lat0; GameState.lon0 = map.lon0
+        // meshed tiles are cached on the phone; the key changes with the map data and with every app build
+        val crc = java.util.zip.CRC32().apply { update(bytes) }.value
+        val build = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).let { if (android.os.Build.VERSION.SDK_INT >= 28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong() } } catch (_: Exception) { 0L }
+        streamer = TileStreamer(world, Settings.renderDistance, TileCache(ctx.filesDir, "${java.lang.Long.toHexString(crc)}-$build-m$MESHER_VERSION"))
         generic = Program(Shaders.STD_VS, Shaders.GENERIC_FS, "generic")
         facade = Program(Shaders.FACADE_VS, Shaders.FACADE_FS, "facade")
         ground = Program(Shaders.GROUND_VS, Shaders.GROUND_FS, "ground")
@@ -101,6 +114,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glEnable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE)
         lastNs = System.nanoTime()
         scale = Settings.maxScale()
+        ready = true
+    }
+
+    companion object {
+        /** bump whenever CityMesher output changes, so cached tiles on players' phones are rebuilt */
+        const val MESHER_VERSION = 2
     }
 
     private fun loadMesh(asset: String): Mesh? = try {
@@ -118,6 +137,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glGenerateMipmap(GL_TEXTURE_2D)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        Aniso.apply(GL_TEXTURE_2D, 4f)
         t[0]
     } catch (e: Exception) { 0 }
 
@@ -188,13 +208,33 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         return out.copyOf(o)
     }
 
-    private fun findWater() {
-        if (world.solid(boat.x, boat.y) < 0.2f) return
-        for (r in 1..200) for (k in 0 until 16) {
+    /** Puts the boat on open water: only if it is on land, or (strict) anywhere that is not clear on all sides. */
+    private fun findWater(strict: Boolean = false) {
+        fun clear(x: Float, y: Float, r: Float) = world.solid(x, y) < 0.05f && world.solid(x + r, y) < 0.05f && world.solid(x - r, y) < 0.05f && world.solid(x, y + r) < 0.05f && world.solid(x, y - r) < 0.05f
+        val r0 = if (strict) 6f else 4f
+        if (!strict && world.solid(boat.x, boat.y) < 0.2f) return
+        if (strict && clear(boat.x, boat.y, r0)) return
+        for (r in 1..300) for (k in 0 until 16) {
             val a = k * PI.toFloat() / 8
             val x = boat.x + cos(a) * r; val y = boat.y + sin(a) * r
-            if (world.solid(x, y) < 0.05f && world.solid(x + 4, y) < 0.05f && world.solid(x - 4, y) < 0.05f && world.solid(x, y + 4) < 0.05f && world.solid(x, y - 4) < 0.05f) { boat.x = x; boat.y = y; return }
+            if (clear(x, y, r0)) { boat.x = x; boat.y = y; return }
         }
+    }
+
+    /** Fog distances from the render distance + fog setting, and fog / sky colours from the live weather. */
+    private fun updateAtmosphere(dt: Float) {
+        val live = Settings.liveWeather && Weather.live
+        val grey = if (live) (Weather.cloudCover * 0.75f + (if (Weather.isFog() || Weather.isRain()) 0.45f else 0f)).coerceIn(0f, 1f) else 0f
+        val k = 1f - exp(-dt * 0.5f)   // ease weather changes in over a few seconds
+        for (i in 0..2) {
+            fogCol[i] += (fogClear[i] + (fogGrey[i] - fogClear[i]) * grey - fogCol[i]) * k
+            zenith[i] += (zenithClear[i] + (zenithGrey[i] - zenithClear[i]) * grey * 0.85f - zenith[i]) * k
+        }
+        val wf = if (Settings.liveWeather) Weather.fogFactor() else 1f
+        fogEnd = drawDist * 0.97f
+        val startK = when (Settings.fogDensity) { 0 -> 0.72f; 2 -> 0.3f; else -> 0.5f } / sqrt(wf)
+        fogStart = fogEnd * startK.coerceIn(0.08f, 0.9f)
+        fogDens = wf / (drawDist * 1.25f) * when (Settings.fogDensity) { 0 -> 0.8f; 2 -> 1.3f; else -> 1f }
     }
 
     override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
@@ -218,7 +258,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val target = 1f / Settings.fpsTarget
         frameEma += (dt - frameEma) * 0.08f
         if (frameEma > target * 1.12f) { badT += dt; goodT = 0f } else { badT = max(0f, badT - dt * 0.5f); if (frameEma < target * 1.05f) goodT += dt else goodT = 0f }
-        val maxS = Settings.maxScale(); val minS = 0.5f
+        val maxS = Settings.maxScale(); val minS = Settings.minScale()
+        if (scale < minS - 0.01f) scale = minS
         if (scale > maxS + 0.01f) scale = maxS
         if (badT > 0.7f && scale > minS + 0.01f) { scale = max(minS, scale - 0.08f); badT = 0f; goodT = 0f; lastDrop = time }
         else if (goodT > 5f && scale < maxS - 0.01f && time - lastDrop > 12f) { scale = min(maxS, scale + 0.05f); goodT = 0f }
@@ -239,16 +280,39 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         lastNs = now
         fpsAcc += rawDt; fpsN++
         if (fpsAcc > 0.5f) { GameState.fps = fpsN / fpsAcc; fpsAcc = 0f; fpsN = 0 }
+        drawDist = Settings.renderDistance
+        streamer.radius = drawDist
+        // title screen: the page covers the whole view, so don't render the city - just stream in the chunks around
+        // the start position so "Gioca" drops you straight into a loaded Venice
+        if (Controls.screen == Screen.MENU) {
+            streamer.update(boat.x, boat.y, cos(boat.heading), sin(boat.heading), 2)
+            GameState.tilesLoaded = streamer.tiles.size; GameState.tilesWanted = streamer.wanted
+            GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
+            glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
+            glClearColor(0.05f, 0.08f, 0.12f, 1f); glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+            lastNs = System.nanoTime()
+            return
+        }
         adaptResolution(rawDt.coerceAtMost(0.1f))
         ensureTargets()
         val paused = Controls.paused
         val sdt = if (paused) 0f else dt
         time += sdt
+        // one-shot requests from the menus
+        if (Controls.requestRespawn) { Controls.requestRespawn = false; boat.surge = 0f; boat.sway = 0f; boat.yawRate = 0f; findWater(true) }
+        if (!Controls.teleportX.isNaN()) {
+            boat.x = Controls.teleportX; boat.y = Controls.teleportY; boat.surge = 0f; boat.sway = 0f
+            Controls.teleportX = Float.NaN; Controls.teleportY = Float.NaN
+            findWater(true); camX = boat.x - 9f; camY = boat.y
+        }
+        updateAtmosphere(dt)
 
         // ---- simulate
         val thr = Controls.throttle(); val st = Controls.steer()
         if (!paused) {
             boat.trim = Controls.trim
+            boat.weatherWaves = if (Settings.liveWeather) Weather.waveFactor() else 1f
+            tripTime += sdt
             val ox = boat.x; val oy = boat.y
             for (k in 0 until 3) boat.update(sdt / 3, if (Controls.engineOn) thr else 0f, st, world)
             distance += hypot(boat.x - ox, boat.y - oy)
@@ -257,17 +321,21 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         }
         GameState.x = boat.x; GameState.y = boat.y; GameState.heading = boat.heading; GameState.speedKmh = boat.speedKmh()
         GameState.distanceM = distance.toFloat()
+        topKmh = max(topKmh, boat.speedKmh()); GameState.topSpeedKmh = topKmh; GameState.tripSeconds = tripTime
+        GameState.boatPitch = boat.pitch; GameState.porpoising = boat.porpoise
 
         // ---- camera: zoomed in when slow, pulled back (and wider) as the speed builds up
-        camYawOff += Controls.camYawDelta; Controls.camYawDelta = 0f
-        camPitch = (camPitch + Controls.camPitchDelta).coerceIn(0.04f, 0.9f); Controls.camPitchDelta = 0f
+        camYawOff += Controls.camYawDelta * Settings.cameraSensitivity; Controls.camYawDelta = 0f
+        camPitch = (camPitch + Controls.camPitchDelta * Settings.cameraSensitivity).coerceIn(0.04f, 0.9f); Controls.camPitchDelta = 0f
         if (abs(thr) > 0.1f) camYawOff *= exp(-dt * 1.2f)
         val yaw = boat.heading + camYawOff
-        val sp = (boat.speedKmh() / 130f).coerceIn(0f, 1f)
+        // speed feel: the camera used to pull far back as you sped up, which made 130 km/h feel like 70. Now it stays
+        // low and close behind the boat, the field of view widens and the water rushes past at the screen edges.
+        val sp = (boat.speedKmh() / 140f).coerceIn(0f, 1f)
         val spS = sp * sp * (3f - 2f * sp)
         val mode = Controls.cameraMode
-        val wantDist = when (mode) { 1 -> 15f + 8f * spS; 2 -> 0f; else -> 7.2f + 9.5f * spS }
-        val wantFov = when (mode) { 2 -> 70f; else -> 56f + 14f * spS }
+        val wantDist = when (mode) { 1 -> 15f + 3f * spS; 2 -> 0f; else -> 7.2f + 1.8f * spS }
+        val wantFov = when (mode) { 2 -> 70f + 12f * spS; else -> 56f + 26f * spS }
         camDist += (wantDist - camDist) * (1f - exp(-dt * 1.6f))
         camFov += (wantFov - camFov) * (1f - exp(-dt * 1.6f))
         val view: FloatArray
@@ -277,56 +345,60 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             camX = boat.x - c * 0.9f * Boat.SCALE; camY = boat.y - s * 0.9f * Boat.SCALE; camZ = boat.z + 1.75f * Boat.SCALE
             view = Mat4.lookAt(camX, camY, camZ, camX + cos(yaw) * 10f, camY + sin(yaw) * 10f, camZ - 0.6f - camPitch * 4f + boat.pitch * 6f, 0f, 0f, 1f)
         } else {
-            val pitch = (camPitch + (if (mode == 1) 0.25f else 0f) - spS * 0.06f).coerceIn(0.03f, 1.0f)
+            val pitch = (camPitch + (if (mode == 1) 0.25f else 0f) - spS * 0.11f).coerceIn(0.03f, 1.0f)
             val tx = boat.x - cos(yaw) * camDist * cos(pitch); val ty = boat.y - sin(yaw) * camDist * cos(pitch)
             val tz = 1.6f + camDist * sin(pitch) + boat.z * 0.6f
             val k = 1f - exp(-dt * (5f + 4f * spS))
             camX += (tx - camX) * k; camY += (ty - camY) * k; camZ += (tz - camZ) * (1f - exp(-dt * 3f))
             if (world.solid(camX, camY) > 0.5f && camZ < 14f) { camX += (boat.x - camX) * 0.25f; camY += (boat.y - camY) * 0.25f }
             camZ = max(camZ, Waves.height(camX, camY, boat.time, boat.waveAmp) + 0.6f)
-            val shake = boat.bump * 0.05f + spS * 0.012f
+            val shake = boat.bump * 0.05f + spS * spS * 0.028f + boat.porpoise * 0.06f
             view = Mat4.lookAt(camX + sin(time * 40) * shake, camY, camZ + cos(time * 37) * shake, boat.x + cos(boat.heading) * 3f, boat.y + sin(boat.heading) * 3f, 1.2f + boat.z * 0.7f, 0f, 0f, 1f)
         }
         val sc = scene!!
-        val proj = Mat4.perspective(Math.toRadians(camFov.toDouble()).toFloat(), sc.w.toFloat() / sc.h, 0.3f, 1100f)
+        val proj = Mat4.perspective(Math.toRadians(camFov.toDouble()).toFloat(), sc.w.toFloat() / sc.h, 0.3f, max(700f, drawDist * 1.6f))
         val vp = Mat4.mul(proj, view)
 
-        streamer.update(camX, camY, cos(yaw), sin(yaw), 1)
-        GameState.tilesLoaded = streamer.tiles.size
-        GameState.loading = streamer.tiles.size < 4
+        streamer.update(camX, camY, cos(yaw), sin(yaw), if (boat.speedKmh() > 60f) 2 else 1)
+        GameState.tilesLoaded = streamer.tiles.size; GameState.tilesWanted = streamer.wanted
+        GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
 
         val bm = boatModel()
-        renderCityShadow(camX + cos(yaw) * 120f, camY + sin(yaw) * 120f)
+        if (Settings.shadows) renderCityShadow(camX + cos(yaw) * 120f, camY + sin(yaw) * 120f)
         renderBoatShadow(bm)
 
-        // ---- reflection pass: low resolution, nearby city only, no shadows
+        // ---- reflection pass: low resolution, nearby city only, no shadows (sky only when reflections are off)
         val r = refl!!
         r.bind()
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
         drawSky(vp, true)
-        drawOpaque(vp, mirror, -0.05f, 260f, bm, true)
+        if (Settings.reflections) drawOpaque(vp, mirror, -0.05f, min(260f, drawDist), bm, true)
 
         // ---- main HDR scene
         sc.bind()
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
         drawSky(vp, false)
-        drawOpaque(vp, ident, -1000f, DRAW_DIST, bm, false)
+        drawOpaque(vp, ident, -1000f, drawDist, bm, false)
         drawWater(vp, r)
         drawSpray(vp)
 
         // ---- post
         glDisable(GL_DEPTH_TEST)
         val ba = bloomA!!; val bb = bloomB!!
+        if (Settings.bloom) {
         ba.bind(); brightP.use(); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sc.tex); brightP.i("uTex", 0)
         glUniform2f(brightP.loc("uTexel"), 1f / sc.w, 1f / sc.h); skyTri?.draw()
         blurP.use(); blurP.i("uTex", 0)
         bb.bind(); glBindTexture(GL_TEXTURE_2D, ba.tex); glUniform2f(blurP.loc("uDir"), 1.5f / ba.w, 0f); skyTri?.draw()
         ba.bind(); glBindTexture(GL_TEXTURE_2D, bb.tex); glUniform2f(blurP.loc("uDir"), 0f, 1.5f / ba.h); skyTri?.draw()
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
         compP.use()
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sc.tex); compP.i("uScene", 0)
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ba.tex); compP.i("uBloom", 1)
         glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", if (sc.isHdr) 0.85f else 1.45f)
+        // sharpen more when the internal resolution is lower
+        compP.f("uSharpen", Settings.sharpen * (1f + (1f - scale) * 1.5f)); compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
         skyTri?.draw()
         glEnable(GL_DEPTH_TEST)
     }
@@ -334,7 +406,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun drawSky(vp: FloatArray, mirrored: Boolean) {
         glDepthMask(false)
         sky.use(); sky.mat4("uInvVP", Mat4.invert(vp)); sky.vec3("uSunDir", sunDir); sky.vec3("uFogCol", fogCol); sky.vec3("uSkyZenith", zenith); sky.vec3("uSunCol", sunCol)
-        sky.f("uMirrorSky", if (mirrored) 1f else 0f); sky.f("uTime", time); sky.f("uCloudCover", 0.55f)
+        sky.f("uMirrorSky", if (mirrored) 1f else 0f); sky.f("uTime", time)
+        sky.f("uCloudCover", if (Settings.liveWeather) Weather.clouds() else 0.55f)
+        sky.f("uHazeH", (34f / drawDist).coerceIn(0.02f, 0.25f))
+        if (Settings.liveWeather && Weather.live) sky.vec2("uWind", Weather.windX(), Weather.windY()) else sky.vec2("uWind", 1f, 0.375f)
         skyTri?.draw()
         glDepthMask(true)
     }
@@ -342,19 +417,19 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun common(p: Program, vp: FloatArray, mir: FloatArray, clipZ: Float, shadows: Boolean = true) {
         p.mat4("uVP", vp); p.mat4("uMirror", mir)
         p.vec3("uSunDir", sunDir); p.vec3("uSunCol", sunCol); p.vec3("uSkyAmb", skyAmb); p.vec3("uGroundAmb", groundAmb)
-        p.vec3("uFogCol", fogCol); p.vec3("uSkyZenith", zenith); p.f("uFogDens", FOG_DENS); p.vec3("uCam", camX, camY, camZ); p.f("uTime", boat.time)
+        p.vec3("uFogCol", fogCol); p.vec3("uSkyZenith", zenith); p.f("uFogDens", fogDens); p.f("uFogStart", fogStart); p.f("uFogEnd", fogEnd); p.vec3("uCam", camX, camY, camZ); p.f("uTime", boat.time)
         p.f("uClipZ", clipZ)
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, cityShadow.tex); p.i("uShadow", 2)
         glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, boatShadow.tex); p.i("uShadowB", 9)
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[0]); p.i("uAlb", 3)
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[1]); p.i("uNrm", 4)
-        p.mat4("uLightVP", lightVP); p.mat4("uLightVPB", lightVPB); p.f("uShadowOn", if (shadows && cityShadow.tex != 0) 1f else 0f)
+        p.mat4("uLightVP", lightVP); p.mat4("uLightVPB", lightVPB); p.f("uShadowOn", if (shadows && Settings.shadows && cityShadow.tex != 0) 1f else 0f)
     }
 
     private fun drawOpaque(vp: FloatArray, mir: FloatArray, clipZ: Float, maxDist: Float, bm: FloatArray, reflection: Boolean) {
         val pv = Mat4.mul(vp, mir)
         visible.clear()
-        for (t in streamer.tiles.values) if (hypot(t.ox + 128 - camX, t.oy + 128 - camY) < maxDist + 182 && inFrustum(pv, t.ox, t.oy)) visible.add(t)
+        for (t in streamer.tiles.values) if (hypot(t.cx - camX, t.cy - camY) < maxDist + 182 && inFrustum(pv, t.ox, t.oy)) visible.add(t)
         if (!reflection) {
             ground.use(); common(ground, vp, mir, clipZ); ground.i("uMask", 0); ground.i("uClass", 1)
             for (t in visible) {
@@ -368,17 +443,27 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         facade.use(); common(facade, vp, mir, clipZ, !reflection)
         for (t in visible) { val m = t.facade ?: continue; facade.mat4("uModel", t.model); m.draw() }
         generic.use(); common(generic, vp, mir, clipZ, !reflection)
+        generic.f("uFadeDist", 0f)
         val genDist = if (reflection) 140f else maxDist
         for (t in visible) {
-            if (hypot(t.ox + 128 - camX, t.oy + 128 - camY) > genDist + 182) continue
+            if (hypot(t.cx - camX, t.cy - camY) > genDist + 182) continue
             val m = t.generic ?: continue; generic.mat4("uModel", t.model); m.draw()
-            // close-up detail (balconies, shutters, sills, chimney pots, antennas): only for nearby tiles
-            if (!reflection && hypot(t.ox + 128 - camX, t.oy + 128 - camY) < 330f) t.detail?.let { d -> generic.mat4("uModel", t.model); d.draw() }
         }
+        // close-up detail (balconies, shutters, sills, chimney pots, antennas) and vegetation: their own, shorter
+        // distances, dissolving out with a dither instead of popping
+        if (!reflection) {
+            val dd = min(Settings.detailDistance, maxDist)
+            generic.f("uFadeDist", dd)
+            for (t in visible) if (hypot(t.cx - camX, t.cy - camY) < dd + 182) t.detail?.let { d -> generic.mat4("uModel", t.model); d.draw() }
+        }
+        val vd = if (reflection) min(90f, Settings.vegetationDistance) else min(Settings.vegetationDistance, maxDist)
+        generic.f("uFadeDist", vd)
+        for (t in visible) if (hypot(t.cx - camX, t.cy - camY) < vd + 182) t.vegetation?.let { v -> generic.mat4("uModel", t.model); v.draw() }
+        generic.f("uFadeDist", 0f)
         stopExtras?.let { generic.mat4("uModel", ident); it.draw() }
         generic.i("uAtlas", 6); generic.i("uSign", 8)
         glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, signTex)
-        val lmDist = if (reflection) 200f else maxDist + 100f
+        val lmDist = if (reflection) 200f else maxDist + 60f
         for (l in landmarks) if (hypot(l.x - camX, l.y - camY) < lmDist) {
             glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, l.atlas)
             glUniform4f(generic.loc("uSignRect"), l.signRect[0], l.signRect[1], l.signRect[2], l.signRect[3])
@@ -430,6 +515,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         for (t in streamer.tiles.values) {
             if (abs(t.ox + 128 - sx) > half + 200 || abs(t.oy + 128 - sy) > half + 200) continue
             depth.mat4("uModel", t.model); t.facade?.draw(); t.generic?.draw(); t.detail?.draw()
+            if (hypot(t.cx - camX, t.cy - camY) < Settings.vegetationDistance + 182) t.vegetation?.draw()
         }
         for (l in landmarks) if (abs(l.x - sx) < half + 80 && abs(l.y - sy) < half + 80) { depth.mat4("uModel", l.model); l.mesh.draw() }
         glDisable(GL_POLYGON_OFFSET_FILL)

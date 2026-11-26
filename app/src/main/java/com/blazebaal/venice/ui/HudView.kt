@@ -1,102 +1,97 @@
-// HUD + touch controls, drawn with Android Canvas over the GL view.
-// Layout: round speedometer + square map (top left), place / temperature / clock pill and camera / pause buttons
-// (top centre), trip distance (top right), settings, engine and trim buttons with the throttle lever ("manetta",
-// right), left / right steering arrows (bottom left). Pause menu with the graphics settings.
+// In-game HUD + touch controls, drawn with Android Canvas over the GL view.
+// Layout: speedometer + minimap (top left, tap the map for the full-screen map), place / weather / clock pill (top
+// centre), camera + pause (top right) with the waypoint / trip card under them, throttle lever ("manetta") with the
+// engine and trim controls (right), analog steering pad or arrows (bottom left).
 package com.blazebaal.venice.ui
 
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.*
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import com.blazebaal.venice.core.Places
+import com.blazebaal.venice.live.Weather
 import java.util.Calendar
 import kotlin.math.*
 
 class HudView(ctx: Context) : View(ctx) {
-    private val dp = resources.displayMetrics.density
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-    private val bold = Typeface.create("sans-serif-condensed", Typeface.BOLD)
-    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; typeface = bold }
-    private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(200, 255, 255, 255); textSize = 8.5f * resources.displayMetrics.density }
-    private val PANEL = Color.argb(205, 18, 30, 58)
-    private val PANEL_EDGE = Color.argb(90, 255, 255, 255)
-    private val ACCENT = Color.rgb(64, 196, 255)
-    private var minimap: Bitmap? = null
-    private val mmMetresPerPx = 6f // asset is 3 m/px, decoded at half size
-    private val path = Path(); private val rect = RectF()
+    private val ink = Ink(ctx)
+    private val base = ink.baseDp
+    private val s get() = base * Settings.hudScale
+    private lateinit var c: Canvas
 
     // touch tracking
-    private var leverId = -1; private var leftId = -1; private var rightId = -1; private var camId = -1
+    private var leverId = -1; private var leftId = -1; private var rightId = -1; private var camId = -1; private var padId = -1
     private var camLx = 0f; private var camLy = 0f
-    private val tempC: Int
+    private var lastLeverTap = 0L; private var lastNeutral = true
+    private var placeName = ""; private var placeAt = 0L
 
     init {
-        Thread {
-            try {
-                val opts = BitmapFactory.Options().apply { inSampleSize = 2; inPreferredConfig = Bitmap.Config.RGB_565 }
-                minimap = ctx.assets.open("minimap.png").use { BitmapFactory.decodeStream(it, null, opts) }
-                postInvalidate()
-            } catch (_: Exception) { }
-        }.start()
-        // typical afternoon temperature in Venice for the current month
-        val m = Calendar.getInstance().get(Calendar.MONTH)
-        tempC = intArrayOf(7, 9, 13, 17, 22, 26, 28, 28, 24, 18, 12, 8)[m]
-        val tick = object : Runnable { override fun run() { invalidate(); postDelayed(this, 33) } }
+        MapLayer.load(ctx) { postInvalidate() }
+        val tick = object : Runnable { override fun run() { if (Controls.screen == Screen.NONE || Controls.screen == Screen.PAUSE) invalidate(); postDelayed(this, 33) } }
         post(tick)
     }
 
+    private fun haptic() { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+
     // ---------------------------------------------------------------- layout
-    private val margin get() = 14 * dp
-    private fun speedoC() = PointF(margin + 46 * dp, margin + 46 * dp)
-    private fun mapRect() = RectF(margin + 100 * dp, margin + 2 * dp, margin + 190 * dp, margin + 92 * dp)
-    private fun leverRect() = RectF(width - margin - 46 * dp, height * 0.40f, width - margin, height - margin - 34 * dp)
-    private fun leftArrow() = RectF(margin + 4 * dp, height - margin - 70 * dp, margin + 74 * dp, height - margin)
-    private fun rightArrow() = RectF(margin + 86 * dp, height - margin - 70 * dp, margin + 156 * dp, height - margin)
-    private fun roundBtn(i: Int) = PointF(width / 2f + 92 * dp + i * 46 * dp, margin + 22 * dp)   // camera, pause
-    private fun sideBtn(i: Int): PointF { val x = width - margin - 23 * dp - 58 * dp; return PointF(x, height * 0.40f + 18 * dp + i * 46 * dp) } // gear, power, +, -
-    private fun pauseItems(): List<Pair<RectF, String>> {
-        val cx = width / 2f; val w = 300 * dp; val top = height / 2f - 120 * dp
-        val out = ArrayList<Pair<RectF, String>>()
-        out.add(Pair(RectF(cx - w / 2, top, cx + w / 2, top + 44 * dp), "resume"))
-        val q = listOf("Prestazioni", "Bilanciata", "Qualità")
-        for (i in 0..2) { val x0 = cx - w / 2 + i * (w / 3); out.add(Pair(RectF(x0 + 3 * dp, top + 84 * dp, x0 + w / 3 - 3 * dp, top + 124 * dp), "q$i:${q[i]}")) }
-        for ((i, f) in listOf(60, 120).withIndex()) { val x0 = cx - w / 2 + i * (w / 2); out.add(Pair(RectF(x0 + 3 * dp, top + 162 * dp, x0 + w / 2 - 3 * dp, top + 202 * dp), "f$f")) }
-        out.add(Pair(RectF(cx - w / 2, top + 214 * dp, cx + w / 2, top + 250 * dp), "fps"))
-        return out
-    }
+    private val margin get() = 14 * s
+    private fun speedoC() = PointF(margin + 48 * s, margin + 48 * s)
+    private fun mapRect() = RectF(margin + 104 * s, margin, margin + 104 * s + 112 * s, margin + 112 * s)
+    private fun leverRect() = RectF(width - margin - 48 * s, height * 0.40f, width - margin, height - margin - 36 * s)
+    private fun sideX() = width - margin - 48 * s - 36 * s
+    private fun engineBtn() = PointF(sideX(), height * 0.40f + 22 * s)
+    private fun trimUp() = PointF(sideX(), height * 0.40f + 82 * s)
+    private fun trimDown() = PointF(sideX(), height - margin - 58 * s)
+    private fun pauseBtn() = PointF(width - margin - 23 * s, margin + 23 * s)
+    private fun camBtn() = PointF(width - margin - 23 * s - 54 * s, margin + 23 * s)
+    private fun padRect() = RectF(margin, height - margin - 86 * s, margin + 250 * s, height - margin)
+    private fun leftArrow() = RectF(margin + 4 * s, height - margin - 72 * s, margin + 76 * s, height - margin)
+    private fun rightArrow() = RectF(margin + 88 * s, height - margin - 72 * s, margin + 160 * s, height - margin)
+    private fun hit(p: PointF, x: Float, y: Float) = hypot(x - p.x, y - p.y) < 26 * s
 
     // ---------------------------------------------------------------- input
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (Controls.screen != Screen.NONE) { release(-2); return false }
         val idx = e.actionIndex
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val id = e.getPointerId(idx); val x = e.getX(idx); val y = e.getY(idx)
-                if (Controls.paused) { pauseTap(x, y); invalidate(); return true }
                 val lr = leverRect()
                 when {
-                    RectF(lr.left - 16 * dp, lr.top - 20 * dp, lr.right + 8 * dp, lr.bottom + 20 * dp).contains(x, y) -> { leverId = id; setLever(y) }
-                    leftArrow().contains(x, y) -> { leftId = id; Controls.leftHeld = true }
-                    rightArrow().contains(x, y) -> { rightId = id; Controls.rightHeld = true }
-                    hit(roundBtn(0), x, y) -> Controls.cameraMode = (Controls.cameraMode + 1) % 3
-                    hit(roundBtn(1), x, y) || hit(sideBtn(0), x, y) -> Controls.paused = true
-                    hit(sideBtn(1), x, y) -> { Controls.engineOn = !Controls.engineOn; if (!Controls.engineOn) Controls.lever = 0f }
-                    hit(sideBtn(2), x, y) -> Controls.trim = (Controls.trim + 0.1f).coerceAtMost(1f)
-                    hit(sideBtn(3), x, y) -> Controls.trim = (Controls.trim - 0.1f).coerceAtLeast(0f)
+                    RectF(lr.left - 10 * s, lr.top - 20 * s, lr.right + 8 * s, lr.bottom + 30 * s).contains(x, y) -> {
+                        val now = System.currentTimeMillis()
+                        if (now - lastLeverTap < 300) { Controls.lever = 0f; haptic() } else { leverId = id; setLever(y) }   // double tap: neutral
+                        lastLeverTap = now
+                    }
+                    Settings.analogSteering && padRect().contains(x, y) -> { padId = id; setPad(x) }
+                    !Settings.analogSteering && leftArrow().contains(x, y) -> { leftId = id; Controls.leftHeld = true }
+                    !Settings.analogSteering && rightArrow().contains(x, y) -> { rightId = id; Controls.rightHeld = true }
+                    mapRect().contains(x, y) -> { Controls.screen = Screen.MAP; haptic() }
+                    hit(pauseBtn(), x, y) -> { Controls.screen = Screen.PAUSE; haptic() }
+                    hit(camBtn(), x, y) -> { Controls.cameraMode = (Controls.cameraMode + 1) % 3; haptic() }
+                    hit(engineBtn(), x, y) -> { Controls.engineOn = !Controls.engineOn; if (!Controls.engineOn) Controls.lever = 0f; haptic() }
+                    hit(trimUp(), x, y) -> { Controls.trim = (Controls.trim + 0.1f).coerceAtMost(1f); haptic() }
+                    hit(trimDown(), x, y) -> { Controls.trim = (Controls.trim - 0.1f).coerceAtLeast(-1f); haptic() }
                     camId < 0 -> { camId = id; camLx = x; camLy = y }
                 }
                 invalidate()
             }
             MotionEvent.ACTION_MOVE -> for (i in 0 until e.pointerCount) {
                 val id = e.getPointerId(i); val x = e.getX(i); val y = e.getY(i)
-                if (id == leverId) setLever(y)
-                else if (id == camId) {
-                    Controls.camYawDelta += -(x - camLx) * 0.006f
-                    Controls.camPitchDelta += (y - camLy) * 0.004f
-                    camLx = x; camLy = y
-                } else if (id == leftId && !leftArrow().contains(x, y)) { leftId = -1; Controls.leftHeld = false }
-                else if (id == rightId && !rightArrow().contains(x, y)) { rightId = -1; Controls.rightHeld = false }
+                when (id) {
+                    leverId -> setLever(y)
+                    padId -> setPad(x)
+                    camId -> {
+                        Controls.camYawDelta += -(x - camLx) * 0.006f
+                        Controls.camPitchDelta += (y - camLy) * 0.004f
+                        camLx = x; camLy = y
+                    }
+                    leftId -> if (!leftArrow().contains(x, y)) { leftId = -1; Controls.leftHeld = false }
+                    rightId -> if (!rightArrow().contains(x, y)) { rightId = -1; Controls.rightHeld = false }
+                }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
                 val id = e.getPointerId(idx)
@@ -106,8 +101,6 @@ class HudView(ctx: Context) : View(ctx) {
         return true
     }
 
-    private fun hit(c: PointF, x: Float, y: Float) = hypot(x - c.x, y - c.y) < 24 * dp
-
     /** lever travel: top = full ahead, a neutral notch, bottom fifth = reverse */
     private fun setLever(y: Float) {
         if (!Controls.engineOn) return
@@ -115,8 +108,16 @@ class HudView(ctx: Context) : View(ctx) {
         val t = ((r.bottom - y) / r.height()).coerceIn(0f, 1f)      // 0 bottom .. 1 top
         val n = 0.2f                                                   // neutral position
         var v = if (t >= n) (t - n) / (1f - n) else -(n - t) / n * 0.6f
-        if (abs(t - n) < 0.025f) v = 0f
+        if (abs(t - n) < 0.03f) v = 0f
+        val neutral = v == 0f
+        if (neutral && !lastNeutral) haptic()                          // a click in the neutral notch
+        lastNeutral = neutral
         Controls.lever = v.coerceIn(-0.6f, 1f)
+    }
+
+    private fun setPad(x: Float) {
+        val r = padRect()
+        Controls.steerAnalog = ((x - r.centerX()) / (r.width() / 2 - 20 * s)).coerceIn(-1f, 1f)
     }
 
     private fun release(id: Int) {
@@ -124,237 +125,242 @@ class HudView(ctx: Context) : View(ctx) {
         if (id == rightId || id == -2) { rightId = -1; Controls.rightHeld = false }
         if (id == leverId || id == -2) leverId = -1
         if (id == camId || id == -2) camId = -1
-    }
-
-    private fun pauseTap(x: Float, y: Float) {
-        for ((r, k) in pauseItems()) if (r.contains(x, y)) {
-            when {
-                k == "resume" -> Controls.paused = false
-                k.startsWith("q") -> Settings.quality = k[1].digitToInt()
-                k.startsWith("f") && k != "fps" -> Settings.fpsTarget = k.substring(1).toInt()
-                k == "fps" -> Settings.showFps = !Settings.showFps
-            }
-            Settings.save(context)
-            return
-        }
+        if (id == padId || id == -2) { padId = -1; Controls.steerAnalog = Float.NaN }
     }
 
     // ---------------------------------------------------------------- drawing
-    private fun panel(r: RectF, radius: Float) {
-        fill.color = PANEL; fill.style = Paint.Style.FILL; c.drawRoundRect(r, radius, radius, fill)
-        stroke.color = PANEL_EDGE; stroke.strokeWidth = 1.2f * dp; c.drawRoundRect(r, radius, radius, stroke)
-    }
-    private lateinit var c: Canvas
-
     override fun onDraw(canvas: Canvas) {
-        c = canvas
+        if (Controls.screen == Screen.MENU) return
+        c = canvas; ink.c = canvas; ink.dp = s
+        drawSpeedStreaks()
         drawSpeedo()
         drawMinimap()
         drawTopCentre()
-        drawDistance()
+        drawTopRight()
         drawRightColumn()
-        drawArrows()
-        small.textAlign = Paint.Align.CENTER
-        c.drawText("Map data © OpenStreetMap contributors (ODbL) · Regione del Veneto – L.R. n. 28/76 · Copernicus Land Monitoring Service", width / 2f, height - 5 * dp, small)
-        if (Settings.showFps) {
-            small.textAlign = Paint.Align.LEFT
-            c.drawText("${GameState.fps.roundToInt()} fps · ${(GameState.renderScale * 100).roundToInt()}%", margin + 4 * dp, margin + 108 * dp, small)
+        if (Settings.analogSteering) drawPad() else drawArrows()
+        if (GameState.porpoising > 0.3f) chip("ASSETTO TROPPO ALTO · ABBASSA IL TRIM", width / 2f, margin + 74 * s, Theme.RED)
+        if (Settings.showFps) ink.label("${GameState.fps.roundToInt()} FPS · ${(GameState.renderScale * 100).roundToInt()}% · ${GameState.tilesLoaded} chunk", margin + 2 * s, margin + 118 * s, 10f, Theme.TEXT_DIM, face = Theme.condensed)
+        if (GameState.loading) drawLoading()
+        ink.dp = base
+    }
+
+    private fun chip(t: String, cx: Float, cy: Float, col: Int) {
+        val w = ink.width(t, 11f, spacing = 0.06f) + 24 * s
+        val r = RectF(cx - w / 2, cy - 12 * s, cx + w / 2, cy + 12 * s)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = col; c.drawRoundRect(r, 12 * s, 12 * s, ink.fill)
+        ink.label(t, cx, cy + 4 * s, 11f, Theme.INK, Paint.Align.CENTER, spacing = 0.06f)
+    }
+
+    /** Faint white streaks rushing past the screen edges above ~70 km/h. */
+    private val streakSeed = FloatArray(24) { (it * 0.6180339f) % 1f }
+    private fun drawSpeedStreaks() {
+        val k = ((GameState.speedKmh - 70f) / 70f).coerceIn(0f, 1f)
+        if (k <= 0f) return
+        val t = (System.nanoTime() / 1e9).toFloat()
+        val cx = width / 2f; val cy = height * 0.55f
+        ink.stroke.strokeWidth = 1.5f * s
+        for (i in streakSeed.indices) {
+            val a = streakSeed[i] * 6.283f
+            val ph = ((t * (1.6f + streakSeed[(i + 7) % 24] * 1.2f) + streakSeed[(i + 3) % 24]) % 1f)
+            val r0 = 0.55f + ph * 0.6f; val r1 = r0 + 0.08f + 0.12f * k
+            val ex = cos(a) * width * 0.55f; val ey = sin(a) * height * 0.62f
+            ink.stroke.color = Color.argb((90 * k * (1f - ph)).toInt(), 255, 255, 255)
+            c.drawLine(cx + ex * r0, cy + ey * r0, cx + ex * r1, cy + ey * r1, ink.stroke)
         }
-        if (GameState.loading) { text.textSize = 20 * dp; text.textAlign = Paint.Align.CENTER; c.drawText("Caricamento di Venezia…", width / 2f, height / 2f, text) }
-        if (Controls.paused) drawPause()
     }
 
     private fun drawSpeedo() {
-        val ctr = speedoC(); val r = 46 * dp
-        fill.color = PANEL; fill.style = Paint.Style.FILL; c.drawCircle(ctr.x, ctr.y, r, fill)
-        stroke.color = PANEL_EDGE; stroke.strokeWidth = 1.2f * dp; c.drawCircle(ctr.x, ctr.y, r, stroke)
+        val ctr = speedoC(); val r = 48 * s
+        ink.glassCircle(ctr.x, ctr.y, r)
         // dial: 240 degree sweep, ticks every 10 km/h, progress arc
-        val a0 = 150f; val sweep = 240f
-        rect.set(ctr.x - r + 7 * dp, ctr.y - r + 7 * dp, ctr.x + r - 7 * dp, ctr.y + r - 7 * dp)
-        stroke.strokeWidth = 3.5f * dp; stroke.color = Color.argb(60, 255, 255, 255); c.drawArc(rect, a0, sweep, false, stroke)
-        val f = (GameState.speedKmh / 130f).coerceIn(0f, 1f)
-        stroke.color = ACCENT; c.drawArc(rect, a0, sweep * f, false, stroke)
-        stroke.strokeWidth = 1.2f * dp; stroke.color = Color.argb(150, 255, 255, 255)
-        for (k in 0..13) {
-            val a = Math.toRadians((a0 + sweep * k / 13f).toDouble())
-            val r1 = r - 14 * dp; val r2 = r - (if (k % 2 == 0) 19 else 17) * dp
-            c.drawLine(ctr.x + cos(a).toFloat() * r1, ctr.y + sin(a).toFloat() * r1, ctr.x + cos(a).toFloat() * r2, ctr.y + sin(a).toFloat() * r2, stroke)
+        val a0 = 150f; val sweep = 240f; val maxKmh = 150f
+        ink.rect.set(ctr.x - r + 7 * s, ctr.y - r + 7 * s, ctr.x + r - 7 * s, ctr.y + r - 7 * s)
+        ink.stroke.strokeWidth = 4 * s; ink.stroke.color = Color.argb(50, 255, 255, 255); c.drawArc(ink.rect, a0, sweep, false, ink.stroke)
+        val f = (GameState.speedKmh / maxKmh).coerceIn(0f, 1f)
+        ink.stroke.color = if (GameState.speedKmh > 120f) Theme.RED else Theme.YELLOW; c.drawArc(ink.rect, a0, sweep * f, false, ink.stroke)
+        ink.stroke.strokeWidth = 1.2f * s
+        for (k in 0..15) {
+            val a = Math.toRadians((a0 + sweep * k / 15f).toDouble())
+            val r1 = r - 15 * s; val r2 = r - (if (k % 5 == 0) 21 else 18) * s
+            ink.stroke.color = if (k % 5 == 0) Theme.TEXT else Theme.TEXT_FAINT
+            c.drawLine(ctr.x + cos(a).toFloat() * r1, ctr.y + sin(a).toFloat() * r1, ctr.x + cos(a).toFloat() * r2, ctr.y + sin(a).toFloat() * r2, ink.stroke)
         }
-        text.textAlign = Paint.Align.CENTER; text.textSize = 26 * dp
-        c.drawText("${GameState.speedKmh.roundToInt()}", ctr.x, ctr.y + 9 * dp, text)
-        small.textAlign = Paint.Align.CENTER; small.typeface = bold
-        c.drawText("KM/H", ctr.x, ctr.y + 24 * dp, small)
-        small.typeface = Typeface.DEFAULT
+        ink.label("${Settings.speed(GameState.speedKmh).roundToInt()}", ctr.x, ctr.y + 10 * s, 30f, Theme.TEXT, Paint.Align.CENTER, Theme.black)
+        ink.label(Settings.speedLabel(), ctr.x, ctr.y + 25 * s, 9f, Theme.TEXT_DIM, Paint.Align.CENTER, spacing = 0.15f)
     }
 
     private fun drawMinimap() {
-        val r = mapRect(); val rad = 14 * dp
-        panel(r, rad)
-        val bmp = minimap ?: return
+        val r = mapRect(); val rad = 16 * s
+        ink.glass(r, rad)
         val save = c.save()
-        path.reset(); path.addRoundRect(RectF(r.left + 3 * dp, r.top + 3 * dp, r.right - 3 * dp, r.bottom - 3 * dp), rad - 3 * dp, rad - 3 * dp, Path.Direction.CW)
-        c.clipPath(path)
+        ink.path.reset(); ink.path.addRoundRect(RectF(r.left + 3 * s, r.top + 3 * s, r.right - 3 * s, r.bottom - 3 * s), rad - 3 * s, rad - 3 * s, Path.Direction.CW)
+        c.clipPath(ink.path)
         val cx = r.centerX(); val cy = r.centerY()
-        val px = (GameState.x - GameState.minX) / mmMetresPerPx
-        val py = bmp.height - (GameState.y - GameState.minY) / mmMetresPerPx
+        // zoom out as the speed builds up: ~250 m across standing still, ~600 m flat out
+        val across = 250f + 350f * (GameState.speedKmh / 140f).coerceIn(0f, 1f)
+        val pxPerM = r.width() / across
+        val rot = if (Settings.minimapNorthUp) 0f else Math.toDegrees(GameState.heading.toDouble()).toFloat() - 90f
         c.translate(cx, cy)
-        c.rotate(Math.toDegrees(GameState.heading.toDouble()).toFloat() - 90f) // heading-up
-        val s = 0.95f * dp
-        c.scale(s, s)
-        c.drawBitmap(bmp, -px, -py, null)
+        MapLayer.draw(ink, GameState.x, GameState.y, pxPerM, rot, false)
+        // waypoint: line from the boat + pin (clamped to the rim when off-map)
+        if (GameState.hasWaypoint()) {
+            val p = MapLayer.toScreen(GameState.wpX, GameState.wpY, GameState.x, GameState.y, pxPerM, rot)
+            val lim = r.width() / 2 - 12 * s
+            val d = hypot(p.x, p.y); val k = if (d > lim) lim / d else 1f
+            ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 2 * s
+            ink.stroke.pathEffect = DashPathEffect(floatArrayOf(5 * s, 4 * s), 0f)
+            c.drawLine(0f, 0f, p.x * k, p.y * k, ink.stroke); ink.stroke.pathEffect = null
+            ink.icon("pin", p.x * k, p.y * k - 6 * s, Theme.YELLOW, 0.9f)
+        }
         c.restoreToCount(save)
-        // arrow
-        fill.color = Color.rgb(255, 205, 40)
-        path.reset(); path.moveTo(cx, cy - 9 * dp); path.lineTo(cx + 6 * dp, cy + 7 * dp); path.lineTo(cx, cy + 3 * dp); path.lineTo(cx - 6 * dp, cy + 7 * dp); path.close()
-        c.drawPath(path, fill)
-        stroke.color = Color.argb(160, 0, 0, 0); stroke.strokeWidth = 1f * dp; c.drawPath(path, stroke)
+        // boat arrow (heading-up: always pointing up)
+        val ha = if (Settings.minimapNorthUp) -Math.toDegrees(GameState.heading.toDouble()).toFloat() + 90f else 0f
+        val sv = c.save(); c.translate(cx, cy); c.rotate(ha)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW
+        ink.path.reset(); ink.path.moveTo(0f, -9 * s); ink.path.lineTo(6.5f * s, 7 * s); ink.path.lineTo(0f, 3 * s); ink.path.lineTo(-6.5f * s, 7 * s); ink.path.close()
+        c.drawPath(ink.path, ink.fill)
+        ink.stroke.color = Theme.INK; ink.stroke.strokeWidth = 1.2f * s; c.drawPath(ink.path, ink.stroke)
+        c.restoreToCount(sv)
         // north marker on the rim
-        val na = GameState.heading - PI.toFloat()
-        val nx = (cx + cos(na) * 36 * dp).coerceIn(r.left + 9 * dp, r.right - 9 * dp); val ny = (cy + sin(na) * 36 * dp + 4 * dp).coerceIn(r.top + 12 * dp, r.bottom - 4 * dp)
-        text.textSize = 11 * dp; text.textAlign = Paint.Align.CENTER; c.drawText("N", nx, ny, text)
+        val na = if (Settings.minimapNorthUp) -PI.toFloat() / 2 else GameState.heading - PI.toFloat()
+        val nx = (cx + cos(na) * 48 * s).coerceIn(r.left + 10 * s, r.right - 10 * s); val ny = (cy + sin(na) * 48 * s).coerceIn(r.top + 10 * s, r.bottom - 10 * s)
+        ink.glassCircle(nx, ny, 8 * s, Theme.INK)
+        ink.label("N", nx, ny + 3.5f * s, 10f, Theme.YELLOW, Paint.Align.CENTER)
+        // expand hint
+        ink.label("MAPPA", r.right - 8 * s, r.bottom - 7 * s, 8f, Theme.TEXT_DIM, Paint.Align.RIGHT, spacing = 0.1f)
     }
 
     private fun drawTopCentre() {
+        val now = System.currentTimeMillis()
+        if (now - placeAt > 1000) { placeName = Places.nameAt(GameState.x, GameState.y, GameState.lat0, GameState.lon0).uppercase(); placeAt = now }
         val cx = width / 2f
-        val r = RectF(cx - 62 * dp, margin, cx + 62 * dp, margin + 44 * dp)
-        panel(r, 12 * dp)
-        small.textAlign = Paint.Align.CENTER; small.typeface = bold
-        c.drawText("VENEZIA · $tempC°", cx, r.top + 15 * dp, small)
-        small.typeface = Typeface.DEFAULT
+        val w = max(190 * s, ink.width(placeName, 10f, spacing = 0.12f) + 40 * s)
+        val r = RectF(cx - w / 2, margin, cx + w / 2, margin + 48 * s)
+        ink.glass(r, 14 * s)
+        ink.label(placeName, cx, r.top + 16 * s, 10f, Theme.YELLOW, Paint.Align.CENTER, spacing = 0.12f)
         val cal = Calendar.getInstance()
-        text.textAlign = Paint.Align.CENTER; text.textSize = 19 * dp
         val t = String.format("%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
-        c.drawText(t, cx + 8 * dp, r.top + 37 * dp, text)
-        // little sun
-        val sx = cx - 30 * dp; val sy = r.top + 30 * dp
-        fill.color = Color.WHITE; c.drawCircle(sx, sy, 3.5f * dp, fill)
-        stroke.color = Color.WHITE; stroke.strokeWidth = 1.4f * dp
-        for (k in 0 until 8) { val a = k * PI / 4; c.drawLine(sx + cos(a).toFloat() * 5.5f * dp, sy + sin(a).toFloat() * 5.5f * dp, sx + cos(a).toFloat() * 7.5f * dp, sy + sin(a).toFloat() * 7.5f * dp, stroke) }
-        // round buttons: camera, pause
-        for (i in 0..1) {
-            val p = roundBtn(i)
-            fill.color = PANEL; c.drawCircle(p.x, p.y, 20 * dp, fill)
-            stroke.color = PANEL_EDGE; stroke.strokeWidth = 1.2f * dp; c.drawCircle(p.x, p.y, 20 * dp, stroke)
-            stroke.color = Color.WHITE; stroke.strokeWidth = 2f * dp
-            if (i == 0) {   // camera
-                rect.set(p.x - 9 * dp, p.y - 5 * dp, p.x + 9 * dp, p.y + 7 * dp); c.drawRoundRect(rect, 2.5f * dp, 2.5f * dp, stroke)
-                c.drawLine(p.x - 4 * dp, p.y - 5 * dp, p.x - 2 * dp, p.y - 8 * dp, stroke); c.drawLine(p.x - 2 * dp, p.y - 8 * dp, p.x + 3 * dp, p.y - 8 * dp, stroke); c.drawLine(p.x + 3 * dp, p.y - 8 * dp, p.x + 5 * dp, p.y - 5 * dp, stroke)
-                c.drawCircle(p.x, p.y + 1 * dp, 3.2f * dp, stroke)
-            } else {        // pause
-                fill.color = Color.WHITE
-                c.drawRect(p.x - 6 * dp, p.y - 7 * dp, p.x - 2 * dp, p.y + 7 * dp, fill); c.drawRect(p.x + 2 * dp, p.y - 7 * dp, p.x + 6 * dp, p.y + 7 * dp, fill)
-            }
+        val temp = "${Weather.temperature.roundToInt()}°"
+        ink.weatherIcon(Weather.icon(), cx - 52 * s, r.top + 32 * s, Theme.TEXT, 0.85f)
+        ink.label(temp, cx - 38 * s, r.top + 38 * s, 17f, Theme.TEXT)
+        ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1 * s; c.drawLine(cx + 2 * s, r.top + 25 * s, cx + 2 * s, r.top + 41 * s, ink.stroke)
+        ink.label(t, cx + 12 * s, r.top + 39 * s, 19f, Theme.TEXT, face = Theme.black)
+    }
+
+    private fun drawTopRight() {
+        for ((p, ic) in listOf(pauseBtn() to "pause", camBtn() to "camera")) { ink.glassCircle(p.x, p.y, 22 * s); ink.icon(ic, p.x, p.y) }
+        val r = RectF(width - margin - 150 * s, margin + 54 * s, width - margin, margin + 100 * s)
+        ink.glass(r, 14 * s)
+        if (GameState.hasWaypoint()) {
+            // arrow towards the waypoint, relative to the boat's heading
+            val bearing = atan2(GameState.wpY - GameState.y, GameState.wpX - GameState.x)
+            val rel = Math.toDegrees((GameState.heading - bearing).toDouble()).toFloat()
+            val ax = r.left + 22 * s; val ay = r.centerY()
+            val sv = c.save(); c.translate(ax, ay); c.rotate(rel)
+            ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW
+            ink.path.reset(); ink.path.moveTo(0f, -10 * s); ink.path.lineTo(7 * s, 8 * s); ink.path.lineTo(0f, 4 * s); ink.path.lineTo(-7 * s, 8 * s); ink.path.close(); c.drawPath(ink.path, ink.fill)
+            c.restoreToCount(sv)
+            val name = GameState.wpName.ifEmpty { "WAYPOINT" }.uppercase()
+            ink.label(if (name.length > 18) name.take(17) + "…" else name, r.left + 40 * s, r.top + 17 * s, 9.5f, Theme.YELLOW, spacing = 0.08f)
+            ink.label(dist(GameState.waypointDistance()), r.left + 40 * s, r.top + 38 * s, 18f, Theme.TEXT, face = Theme.black)
+        } else {
+            ink.label("DISTANZA", r.left + 14 * s, r.top + 17 * s, 9.5f, Theme.TEXT_DIM, spacing = 0.12f)
+            ink.label(dist(GameState.distanceM), r.left + 14 * s, r.top + 38 * s, 18f, Theme.TEXT, face = Theme.black)
+            ink.icon("water", r.right - 22 * s, r.centerY(), Theme.TEXT_FAINT, 0.9f)
         }
     }
 
-    private fun drawDistance() {
-        val r = RectF(width - margin - 120 * dp, margin, width - margin, margin + 44 * dp)
-        panel(r, 12 * dp)
-        small.textAlign = Paint.Align.CENTER; small.typeface = bold
-        c.drawText("DISTANZA", r.centerX(), r.top + 15 * dp, small)
-        small.typeface = Typeface.DEFAULT
-        val d = GameState.distanceM
-        val s = if (d < 1000f) "${d.roundToInt()} m" else String.format("%.1f km", d / 1000f).replace('.', ',')
-        text.textAlign = Paint.Align.CENTER; text.textSize = 19 * dp
-        c.drawText(s, r.centerX(), r.top + 37 * dp, text)
-    }
+    private fun dist(d: Float) = if (d < 1000f) "${d.roundToInt()} m" else String.format("%.1f km", d / 1000f).replace('.', ',')
 
     private fun drawRightColumn() {
-        // buttons: settings, engine power, trim + / -
-        for (i in 0..3) {
-            val p = sideBtn(i)
-            fill.color = PANEL; c.drawCircle(p.x, p.y, 20 * dp, fill)
-            stroke.color = PANEL_EDGE; stroke.strokeWidth = 1.2f * dp; c.drawCircle(p.x, p.y, 20 * dp, stroke)
-            stroke.color = Color.WHITE; stroke.strokeWidth = 2f * dp
-            when (i) {
-                0 -> { // gear
-                    c.drawCircle(p.x, p.y, 4 * dp, stroke)
-                    for (k in 0 until 8) { val a = k * PI / 4; c.drawLine(p.x + cos(a).toFloat() * 6.5f * dp, p.y + sin(a).toFloat() * 6.5f * dp, p.x + cos(a).toFloat() * 9.5f * dp, p.y + sin(a).toFloat() * 9.5f * dp, stroke) }
-                    c.drawCircle(p.x, p.y, 7 * dp, stroke)
-                }
-                1 -> { // power
-                    stroke.color = if (Controls.engineOn) Color.WHITE else Color.rgb(255, 90, 80)
-                    rect.set(p.x - 8 * dp, p.y - 8 * dp, p.x + 8 * dp, p.y + 8 * dp); c.drawArc(rect, -60f, 300f, false, stroke)
-                    c.drawLine(p.x, p.y - 10 * dp, p.x, p.y - 1 * dp, stroke)
-                }
-                2 -> { c.drawLine(p.x - 7 * dp, p.y, p.x + 7 * dp, p.y, stroke); c.drawLine(p.x, p.y - 7 * dp, p.x, p.y + 7 * dp, stroke) }
-                3 -> c.drawLine(p.x - 7 * dp, p.y, p.x + 7 * dp, p.y, stroke)
-            }
+        // engine
+        val e = engineBtn(); ink.glassCircle(e.x, e.y, 22 * s); ink.icon("power", e.x, e.y, if (Controls.engineOn) Theme.TEAL else Theme.RED)
+        // trim: + / - and a gauge showing the motor angle and the boat's attitude between them
+        val up = trimUp(); val dn = trimDown()
+        ink.glassCircle(up.x, up.y, 20 * s); ink.icon("plus", up.x, up.y)
+        ink.glassCircle(dn.x, dn.y, 20 * s); ink.icon("minus", dn.x, dn.y)
+        val gTop = up.y + 28 * s; val gBot = dn.y - 28 * s
+        if (gBot - gTop > 40 * s) {
+            val gr = RectF(e.x - 16 * s, gTop, e.x + 16 * s, gBot)
+            ink.glass(gr, 10 * s)
+            val tr = Controls.trim
+            val mid = gr.centerY(); val half = gr.height() / 2 - 10 * s
+            // sweet spot band (best top speed)
+            val opt = mid - 0.3f * half
+            ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(70, 46, 196, 182)
+            c.drawRoundRect(gr.left + 5 * s, opt - 7 * s, gr.right - 5 * s, opt + 7 * s, 4 * s, 4 * s, ink.fill)
+            ink.stroke.color = Theme.TEXT_FAINT; ink.stroke.strokeWidth = 1 * s
+            c.drawLine(gr.left + 7 * s, mid, gr.right - 7 * s, mid, ink.stroke)
+            val y = mid - tr * half
+            ink.fill.color = if (tr > 0.55f) Theme.RED else Theme.YELLOW
+            c.drawRoundRect(gr.left + 4 * s, y - 3 * s, gr.right - 4 * s, y + 3 * s, 3 * s, 3 * s, ink.fill)
         }
-        val t2 = sideBtn(2); val t3 = sideBtn(3)
-        small.textAlign = Paint.Align.CENTER; small.typeface = bold
-        c.drawText("TRIM", t2.x, (t2.y + t3.y) / 2f - 1 * dp, small)
-        c.drawText("${(Controls.trim * 100).roundToInt()}%", t2.x, (t2.y + t3.y) / 2f + 10 * dp, small)
+        ink.label("TRIM", e.x, dn.y + 34 * s, 9f, Theme.TEXT_DIM, Paint.Align.CENTER, spacing = 0.12f)
+        val tv = (Controls.trim * 100).roundToInt()
+        ink.label(if (tv > 0) "+$tv" else "$tv", e.x, dn.y + 46 * s, 11f, Theme.TEXT, Paint.Align.CENTER)
+
         // throttle lever
         val r = leverRect()
-        c.drawText("MANETTA", r.centerX(), r.top - 8 * dp, small)
-        small.typeface = Typeface.DEFAULT
-        panel(r, 14 * dp)
+        ink.label("MANETTA", r.centerX(), r.top - 9 * s, 9f, Theme.TEXT_DIM, Paint.Align.CENTER, spacing = 0.12f)
+        ink.glass(r, 16 * s)
         val trackX = r.centerX()
-        stroke.color = Color.argb(90, 255, 255, 255); stroke.strokeWidth = 5 * dp
-        c.drawLine(trackX, r.top + 14 * dp, trackX, r.bottom - 14 * dp, stroke)
+        ink.stroke.color = Color.argb(70, 255, 255, 255); ink.stroke.strokeWidth = 5 * s
+        c.drawLine(trackX, r.top + 14 * s, trackX, r.bottom - 14 * s, ink.stroke)
         val n = 0.2f
-        val inner = RectF(r.left, r.top + 14 * dp, r.right, r.bottom - 14 * dp)
+        val inner = RectF(r.left, r.top + 14 * s, r.right, r.bottom - 14 * s)
         val yNeutral = inner.bottom - inner.height() * n
-        stroke.strokeWidth = 1.5f * dp; stroke.color = Color.argb(160, 255, 255, 255)
-        for (k in 0..10) { val y = yNeutral - (yNeutral - inner.top) * k / 10f; c.drawLine(r.left + 9 * dp, y, r.left + (if (k % 5 == 0) 17 else 13) * dp, y, stroke) }
-        small.textAlign = Paint.Align.LEFT; c.drawText("R", r.left + 8 * dp, inner.bottom - 4 * dp, small)
+        ink.stroke.strokeWidth = 1.5f * s
+        for (k in 0..10) { val y = yNeutral - (yNeutral - inner.top) * k / 10f; ink.stroke.color = if (k % 5 == 0) Theme.TEXT_DIM else Theme.TEXT_FAINT; c.drawLine(r.left + 9 * s, y, r.left + (if (k % 5 == 0) 18 else 13) * s, y, ink.stroke) }
+        ink.label("N", r.right - 9 * s, yNeutral + 4 * s, 9f, Theme.TEXT_DIM, Paint.Align.RIGHT)
+        ink.label("R", r.left + 9 * s, inner.bottom - 2 * s, 9f, Theme.RED)
         val v = Controls.lever
         val hy = if (v >= 0) yNeutral - (yNeutral - inner.top) * v else yNeutral + (inner.bottom - yNeutral) * (-v / 0.6f)
-        stroke.color = if (v >= 0) ACCENT else Color.rgb(255, 120, 90); stroke.strokeWidth = 5 * dp
-        c.drawLine(trackX, yNeutral, trackX, hy, stroke)
-        fill.color = Color.rgb(230, 235, 240)
-        rect.set(r.left + 6 * dp, hy - 9 * dp, r.right - 6 * dp, hy + 9 * dp); c.drawRoundRect(rect, 5 * dp, 5 * dp, fill)
-        fill.color = Color.rgb(200, 40, 40); c.drawCircle(trackX, hy, 3 * dp, fill)
+        ink.stroke.color = if (v >= 0) Theme.YELLOW else Theme.RED; ink.stroke.strokeWidth = 5 * s
+        c.drawLine(trackX, yNeutral, trackX, hy, ink.stroke)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.TEXT
+        ink.rect.set(r.left + 6 * s, hy - 10 * s, r.right - 6 * s, hy + 10 * s); c.drawRoundRect(ink.rect, 6 * s, 6 * s, ink.fill)
+        ink.fill.color = Theme.INK; for (k in -1..1) c.drawRect(r.left + 14 * s, hy + k * 4 * s - 0.6f * s, r.right - 14 * s, hy + k * 4 * s + 0.6f * s, ink.fill)
         // value badge
-        val badge = RectF(r.left - 2 * dp, r.bottom + 6 * dp, r.right + 2 * dp, r.bottom + 26 * dp)
-        fill.color = Color.WHITE; c.drawRoundRect(badge, 10 * dp, 10 * dp, fill)
-        text.textSize = 11 * dp; text.textAlign = Paint.Align.CENTER; text.color = Color.rgb(20, 30, 58)
-        val lbl = if (v < 0) "R ${(-v / 0.6f * 100).roundToInt()}%" else "${(v * 100).roundToInt()}%"
-        c.drawText(lbl, badge.centerX(), badge.centerY() + 4 * dp, text)
-        text.color = Color.WHITE
+        val badge = RectF(r.left - 4 * s, r.bottom + 8 * s, r.right + 4 * s, r.bottom + 30 * s)
+        ink.fill.color = if (v < 0) Theme.RED else Theme.YELLOW; c.drawRoundRect(badge, 11 * s, 11 * s, ink.fill)
+        val lbl = if (!Controls.engineOn) "OFF" else if (v < 0) "R ${(-v / 0.6f * 100).roundToInt()}%" else "${(v * 100).roundToInt()}%"
+        ink.label(lbl, badge.centerX(), badge.centerY() + 4.5f * s, 12f, Theme.INK, Paint.Align.CENTER)
+    }
+
+    private fun drawPad() {
+        val r = padRect()
+        ink.glass(r, r.height() / 2)
+        val a = Controls.steerAnalog
+        ink.stroke.color = Theme.TEXT_FAINT; ink.stroke.strokeWidth = 1.5f * s
+        c.drawLine(r.centerX(), r.top + 18 * s, r.centerX(), r.bottom - 18 * s, ink.stroke)
+        ink.icon("back", r.left + 26 * s, r.centerY(), Theme.TEXT_DIM); ink.icon("next", r.right - 26 * s, r.centerY(), Theme.TEXT_DIM)
+        val travel = r.width() / 2 - 20 * s - 10 * s
+        val kx = r.centerX() + (if (a.isNaN()) 0f else a) * travel
+        if (!a.isNaN()) { ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW_DIM; c.drawRoundRect(min(kx, r.centerX()), r.centerY() - 4 * s, max(kx, r.centerX()), r.centerY() + 4 * s, 4 * s, 4 * s, ink.fill) }
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = if (a.isNaN()) Theme.TEXT else Theme.YELLOW
+        c.drawCircle(kx, r.centerY(), 24 * s, ink.fill)
+        ink.label("TIMONE", kx, r.centerY() + 3.5f * s, 9f, Theme.INK, Paint.Align.CENTER, spacing = 0.1f)
     }
 
     private fun drawArrows() {
         for ((i, r) in listOf(leftArrow(), rightArrow()).withIndex()) {
             val held = if (i == 0) Controls.leftHeld else Controls.rightHeld
-            fill.color = if (held) Color.argb(230, 40, 70, 120) else PANEL
-            c.drawRoundRect(r, 18 * dp, 18 * dp, fill)
-            stroke.color = PANEL_EDGE; stroke.strokeWidth = 1.2f * dp; c.drawRoundRect(r, 18 * dp, 18 * dp, stroke)
-            fill.color = Color.WHITE
-            val cx = r.centerX(); val cy = r.centerY(); val s = if (i == 0) -1f else 1f
-            path.reset(); path.moveTo(cx + s * 14 * dp, cy); path.lineTo(cx - s * 9 * dp, cy - 15 * dp); path.lineTo(cx - s * 9 * dp, cy + 15 * dp); path.close()
-            c.drawPath(path, fill)
+            ink.glass(r, 20 * s, if (held) Theme.GLASS_HI else Theme.GLASS)
+            ink.fill.style = Paint.Style.FILL; ink.fill.color = if (held) Theme.YELLOW else Theme.TEXT
+            val cx = r.centerX(); val cy = r.centerY(); val sg = if (i == 0) -1f else 1f
+            ink.path.reset(); ink.path.moveTo(cx + sg * 14 * s, cy); ink.path.lineTo(cx - sg * 9 * s, cy - 15 * s); ink.path.lineTo(cx - sg * 9 * s, cy + 15 * s); ink.path.close()
+            c.drawPath(ink.path, ink.fill)
         }
     }
 
-    private fun drawPause() {
-        fill.color = Color.argb(150, 0, 0, 0); c.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
-        val items = pauseItems()
-        val top = items[0].first.top
-        panel(RectF(width / 2f - 166 * dp, top - 46 * dp, width / 2f + 166 * dp, top + 266 * dp), 18 * dp)
-        text.textAlign = Paint.Align.CENTER; text.textSize = 20 * dp
-        c.drawText("PAUSA", width / 2f, top - 16 * dp, text)
-        small.textAlign = Paint.Align.CENTER
-        c.drawText("GRAFICA", width / 2f, top + 74 * dp, small)
-        c.drawText("FREQUENZA FOTOGRAMMI", width / 2f, top + 152 * dp, small)
-        for ((r, k) in items) {
-            val on = when {
-                k == "resume" -> true
-                k.startsWith("q") -> Settings.quality == k[1].digitToInt()
-                k == "fps" -> Settings.showFps
-                k.startsWith("f") -> Settings.fpsTarget == k.substring(1).toInt()
-                else -> false
-            }
-            fill.color = if (on) ACCENT else Color.argb(70, 255, 255, 255)
-            c.drawRoundRect(r, 10 * dp, 10 * dp, fill)
-            val label = when {
-                k == "resume" -> "RIPRENDI"
-                k.startsWith("q") -> k.substringAfter(":")
-                k == "fps" -> if (Settings.showFps) "Mostra FPS: sì" else "Mostra FPS: no"
-                else -> "${k.substring(1)} FPS"
-            }
-            text.textSize = 14 * dp; c.drawText(label, r.centerX(), r.centerY() + 5 * dp, text)
-        }
+    private fun drawLoading() {
+        val w = 260 * s; val r = RectF(width / 2f - w / 2, height * 0.42f, width / 2f + w / 2, height * 0.42f + 56 * s)
+        ink.glass(r, 14 * s)
+        ink.label("CARICAMENTO DI VENEZIA…", r.centerX(), r.top + 22 * s, 12f, Theme.TEXT, Paint.Align.CENTER, spacing = 0.08f)
+        val f = (GameState.tilesLoaded.toFloat() / max(1, min(4, GameState.tilesWanted))).coerceIn(0f, 1f)
+        val bar = RectF(r.left + 18 * s, r.bottom - 18 * s, r.right - 18 * s, r.bottom - 12 * s)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(60, 255, 255, 255); c.drawRoundRect(bar, 3 * s, 3 * s, ink.fill)
+        ink.stripes(RectF(bar.left, bar.top, bar.left + bar.width() * f, bar.bottom), 4f)
     }
 }

@@ -8,6 +8,7 @@ object Shaders {
     private val COMMON = """
 uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec3 uSkyAmb; uniform vec3 uGroundAmb; uniform vec3 uFogCol; uniform vec3 uSkyZenith;
 uniform float uFogDens; uniform vec3 uCam; uniform float uTime;
+uniform float uFogStart; uniform float uFogEnd;     // render distance: fog is total at uFogEnd, where chunks unload
 uniform highp sampler2DShadow uShadow; uniform mat4 uLightVP; uniform float uShadowOn;
 uniform highp sampler2DShadow uShadowB; uniform mat4 uLightVPB;      // boat-only shadow, re-rendered every frame
 uniform float uClipZ;
@@ -82,6 +83,14 @@ vec3 fog(vec3 c, vec3 wpos) {
     float d = length(wpos - uCam);
     float f = 1.0 - exp(-pow(d * uFogDens, 1.4));
     f = max(f, (1.0 - exp(-d * 0.00035)) * 0.35);   // light lagoon haze
+    // caligo: the low mist that sits on the lagoon - thicker near the water, thinning out over the rooftops
+    float low = exp(-max(wpos.z, 0.0) / 16.0);
+    f = max(f, (1.0 - exp(-d * uFogDens * 1.35)) * (0.55 + 0.45 * low));
+    // render distance: everything is fully inside the fog before the edge where chunks are unloaded
+    if (uFogEnd > 1.0) {
+        float e = smoothstep(uFogStart, uFogEnd, d);
+        f = max(f, e * e * (3.0 - 2.0 * e) * (0.6 + 0.4 * low) + e * 0.4 * (1.0 - low));
+    }
     return mix(c, uFogCol * 1.15, clamp(f, 0.0, 1.0));
 }
 """
@@ -102,9 +111,14 @@ precision highp float;
 $COMMON
 in vec3 vW; in vec3 vN; in vec2 vUv; in vec4 vA;
 uniform sampler2D uAtlas; uniform sampler2D uSign; uniform vec4 uSignRect;
+uniform float uFadeDist;     // > 0: dissolve out (dithered) towards this distance - vegetation and close-up detail
 out vec4 o;
 void main() {
     if (vW.z < uClipZ) discard;
+    if (uFadeDist > 0.0) {
+        float a = 1.0 - smoothstep(uFadeDist * 0.78, uFadeDist, length(vW.xy - uCam.xy));
+        if (hash21(floor(gl_FragCoord.xy)) > a) discard;
+    }
     vec3 n = normalize(vN);
     if (!gl_FrontFacing) n = -n;
     float m = vA.x;
@@ -775,7 +789,7 @@ void main() { vP = aPos; gl_Position = vec4(aPos, 0.9999, 1.0); }
 precision highp float;
 in vec2 vP;
 uniform mat4 uInvVP; uniform vec3 uSunDir; uniform vec3 uFogCol; uniform vec3 uSkyZenith; uniform vec3 uSunCol; uniform float uMirrorSky;
-uniform float uTime; uniform float uCloudCover;
+uniform float uTime; uniform float uCloudCover; uniform float uHazeH; uniform vec2 uWind;
 out vec4 o;
 float h21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -799,7 +813,7 @@ void main() {
     if (d.z > 0.015) {
         // cloud layer ~1.5 km up, drifting with the wind
         vec2 P = d.xy / d.z * 1.5;                      // km on the cloud deck
-        vec2 wind = vec2(uTime * 0.004, uTime * 0.0015);
+        vec2 wind = uWind * uTime * 0.004;
         vec2 q = P * 1.1 + wind;
         float den = cumulus(q);
         // thin cirrus higher up
@@ -818,7 +832,10 @@ void main() {
             col = mix(col, uSunCol * 0.28 + uSkyZenith * 0.5, ci * far * (1.0 - den));
         }
     }
-    col = mix(col, uFogCol * 0.9, smoothstep(0.02, -0.15, d.z));
+    // haze band on the horizon, as tall as the fogged skyline at the render distance: the fogged buildings at the
+    // edge melt into it instead of standing out as flat grey cut-outs against the blue
+    col = mix(col, uFogCol * 1.15, (1.0 - smoothstep(0.0, max(uHazeH, 0.005), h)) * 0.95);
+    col = mix(col, uFogCol * 1.15, smoothstep(0.02, -0.15, d.z));
     o = vec4(col, 1.0);
 }
 """
@@ -855,6 +872,7 @@ void main() {
     const val COMPOSITE_FS = """#version 300 es
 precision highp float;
 in vec2 vUv; uniform sampler2D uScene; uniform sampler2D uBloom; uniform vec2 uTexel; uniform float uExposure;
+uniform float uSharpen; uniform float uBloomK;
 out vec4 o;
 vec3 aces(vec3 x) { const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14; return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0); }
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -869,7 +887,13 @@ void main() {
         vec2 dir = normalize(vec2(-((lN + lS) - (lE + lW)), (lN - lS) + (lE - lW) + 1e-4)) * uTexel;
         col = (texture(uScene, vUv + dir * 0.5).rgb + texture(uScene, vUv - dir * 0.5).rgb + cM) / 3.0;
     }
-    col += texture(uBloom, vUv).rgb * 0.35;
+    // contrast-adaptive sharpening: restores the crispness lost to the internal resolution and FXAA
+    if (uSharpen > 0.0) {
+        vec3 avg = (cN + cS + cE + cW) * 0.25;
+        float amt = uSharpen * (1.0 - smoothstep(0.15, 0.6, range));     // less on hard edges (no halos)
+        col = max(col + (col - avg) * amt * 1.6, vec3(0.0));
+    }
+    col += texture(uBloom, vUv).rgb * 0.35 * uBloomK;
     col = aces(col * uExposure);
     col = mix(vec3(luma(col)), col, 1.08);
     col *= vec3(1.02, 1.0, 0.97);

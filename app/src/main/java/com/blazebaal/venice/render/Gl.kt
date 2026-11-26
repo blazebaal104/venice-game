@@ -80,6 +80,25 @@ object Tex {
     fun release(id: Int) = glDeleteTextures(1, intArrayOf(id), 0)
 }
 
+/** Anisotropic filtering (GL_EXT_texture_filter_anisotropic, on practically every phone GPU): keeps pavement, quays and
+ *  facades sharp when seen at a grazing angle instead of smearing them into blur (a big part of the "low-res" look). */
+object Aniso {
+    private const val MAX_ANISOTROPY = 0x84FE
+    private const val MAX_MAX_ANISOTROPY = 0x84FF
+    private var max = -1f
+    fun apply(target: Int, wanted: Float = 8f) {
+        if (max < 0f) {
+            max = 0f
+            try {
+                if ((glGetString(GL_EXTENSIONS) ?: "").contains("texture_filter_anisotropic")) {
+                    val v = FloatArray(1); glGetFloatv(MAX_MAX_ANISOTROPY, v, 0); max = v[0]
+                }
+            } catch (_: Exception) { }
+        }
+        if (max >= 2f) glTexParameterf(target, MAX_ANISOTROPY, minOf(wanted, max))
+    }
+}
+
 /** Texture arrays for the photo materials: albedo (RGBA, non-premultiplied) and normal/roughness. */
 object TexArrays {
     fun load(ctx: android.content.Context, count: Int): IntArray {
@@ -100,6 +119,7 @@ object TexArrays {
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT); glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT)
+            Aniso.apply(GL_TEXTURE_2D_ARRAY, 8f)
         }
         return ids
     }

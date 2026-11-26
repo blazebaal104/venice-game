@@ -11,7 +11,7 @@ object Z {
 
 object Kind { const val WALL = 0f; const val ROOF = 1f; const val QUAY = 2f; const val CORNICE = 3f; const val TOWER = 4f }
 
-class TileMeshes(val facade: FloatArray, val generic: FloatArray, val detail: FloatArray, val hasGround: Boolean, val hasMarsh: Boolean)
+class TileMeshes(val facade: FloatArray, val generic: FloatArray, val detail: FloatArray, val vegetation: FloatArray, val hasGround: Boolean, val hasMarsh: Boolean)
 
 object Palette {
     val BRICK = floatArrayOf(1f, 1f, 1f, 100f + L.BRICK0)
@@ -45,12 +45,16 @@ private class Bay(val c: Float, val w: Float, val kind: Int, val ground: Int, va
 
 class CityMesher {
     private val fac = FacadeBuilder(32768)
-    private val gen = MeshBuilder(32768)
+    private val genMain = MeshBuilder(32768)
+    /** trees and bushes go in their own mesh so they can have a shorter render distance than the buildings */
+    private val veg = MeshBuilder(16384)
+    private var gen = genMain
     private val det = MeshBuilder(32768)
     private val occ = ShortArray(TILE_SIZE * TILE_SIZE)
 
     fun build(t: TileData): TileMeshes {
-        fac.clear(); gen.clear(); det.clear()
+        gen = genMain
+        fac.clear(); genMain.clear(); veg.clear(); det.clear()
         rasterOccupancy(t)
         for ((i, b) in t.buildings.withIndex()) building(b, i, t)
         fac.style(0f, 0f, 0f, 0f)
@@ -61,7 +65,7 @@ class CityMesher {
         for (p in t.points) prop(p, t)
         parkTrees(t)
         val hasMarsh = t.marsh?.any { it != 0.toByte() } ?: false
-        return TileMeshes(fac.floats(), gen.floats(), det.floats(), t.hard != null, hasMarsh)
+        return TileMeshes(fac.floats(), genMain.floats(), det.floats(), veg.floats(), t.hard != null, hasMarsh)
     }
 
     private fun rnd(seed: Int, k: Int): Float { var h = seed * 374761393 + k * 668265263; h = (h xor (h ushr 13)) * 1274126177; return ((h xor (h ushr 16)) and 0xffff) / 65535f }
@@ -791,6 +795,11 @@ class CityMesher {
     }
 
     private fun tree(x: Float, y: Float, gz: Float, kind: Int, s: Int) {
+        val saved = gen; gen = veg
+        try { treeBody(x, y, gz, kind, s) } finally { gen = saved }
+    }
+
+    private fun treeBody(x: Float, y: Float, gz: Float, kind: Int, s: Int) {
         val r = { k: Int -> rnd(s, 200 + k) }
         when (kind) {
             1 -> {
@@ -850,6 +859,8 @@ class CityMesher {
         val dir = if (p.dir >= 0) Math.toRadians(90.0 - p.dir).toFloat() else rnd(s, 7) * PI.toFloat()
         when (p.type) {
             Feature.BRICOLA -> {
+                // OSM sometimes puts mooring piles a metre inland (by Rialto they stood in the pavement): only in water
+                if (t.solidAt(p.x, p.y) > 0.25f) return
                 // three tarred oak piles leaning together, lashed at the top
                 val lean = 0.06f
                 val baseR = 0.35f

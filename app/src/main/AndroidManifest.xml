@@ -2,9 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <!-- live Venice weather (Open-Meteo); the game works fully offline without it -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="Venezia"
+        android:label="GTACTV"
         android:icon="@mipmap/ic_launcher"
         android:hardwareAccelerated="true"
         android:largeHeap="true"

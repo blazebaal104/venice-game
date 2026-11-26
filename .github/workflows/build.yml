@@ -3,6 +3,7 @@ name: Build APK
 on:
   push:
     branches: [ main ]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -26,15 +27,17 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug
           cp app/build/outputs/apk/debug/app-debug.apk Venezia.apk
+          cp Venezia.apk GTACTV.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Venezia-apk
-          path: Venezia.apk
+          name: GTACTV-apk
+          path: GTACTV.apk
 
       - name: Publish "latest" release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest Venezia.apk --title "Venezia – build ${{ github.run_number }}" --notes "Automatic build of ${{ github.sha }}. Download Venezia.apk and install it on your phone." --latest
+          gh release create latest Venezia.apk GTACTV.apk --title "GTACTV – build ${{ github.run_number }}" --notes "Automatic build of ${{ github.sha }}. Download Venezia.apk and install it on your phone." --latest

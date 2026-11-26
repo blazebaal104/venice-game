@@ -9,21 +9,29 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.FrameLayout
+import com.blazebaal.venice.live.Weather
 import com.blazebaal.venice.render.GameRenderer
 import com.blazebaal.venice.ui.Controls
+import com.blazebaal.venice.ui.GameActions
+import com.blazebaal.venice.ui.GameState
 import com.blazebaal.venice.ui.HudView
+import com.blazebaal.venice.ui.Screen
+import com.blazebaal.venice.ui.ScreenView
 import com.blazebaal.venice.ui.Settings
 import android.view.Surface
 import android.view.SurfaceHolder
 
-class MainActivity : Activity() {
+class MainActivity : Activity(), GameActions {
     private lateinit var glView: GLSurfaceView
     private lateinit var renderer: GameRenderer
+    private lateinit var screens: ScreenView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Settings.load(this)
+        Controls.screen = Screen.MENU
+        if (Settings.liveWeather) Weather.start() else Weather.climateFallback()
         requestHighRefreshRate()
         renderer = GameRenderer(this)
         glView = GLSurfaceView(this).apply {
@@ -44,6 +52,8 @@ class MainActivity : Activity() {
         val root = FrameLayout(this)
         root.addView(glView)
         root.addView(HudView(this))
+        screens = ScreenView(this, this)
+        root.addView(screens)
         setContentView(root)
         hideSystemUi()
     }
@@ -61,7 +71,20 @@ class MainActivity : Activity() {
     }
 
     @Deprecated("Deprecated in Java")
-    override fun onBackPressed() { Controls.paused = !Controls.paused }
+    override fun onBackPressed() {
+        if (!screens.back()) { Settings.save(this); @Suppress("DEPRECATION") super.onBackPressed() }
+    }
+
+    // ---- GameActions (settings page)
+    override fun prebuildCity() {
+        if (!renderer.ready) return
+        GameState.prebuild = 0f
+        renderer.streamer.prebuildAll { p -> GameState.prebuild = p }
+    }
+    override fun clearCache() { if (renderer.ready) glView.queueEvent { renderer.streamer.clearCache() } }
+    override fun cachedTiles() = if (renderer.ready) renderer.streamer.cachedCount() else 0
+    override fun totalTiles() = if (renderer.ready) renderer.streamer.totalTiles() else 0
+    override fun quit() { finish() }
 
     private fun hideSystemUi() {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
@@ -77,8 +100,12 @@ class MainActivity : Activity() {
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) hideSystemUi() }
-    override fun onResume() { super.onResume(); glView.onResume() }
-    override fun onPause() { super.onPause(); glView.onPause() }
+    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start() }
+    override fun onPause() {
+        super.onPause(); glView.onPause(); Settings.save(this); Weather.stop()
+        // leaving the app mid-run opens the pause menu, so you don't come back to a boat already moving
+        if (Controls.screen == Screen.NONE) Controls.screen = Screen.PAUSE
+    }
     override fun onDestroy() { renderer.shutdown(); super.onDestroy() }
 
     // keyboard (W/A/S/D or arrows) for playing with a keyboard connected to the phone

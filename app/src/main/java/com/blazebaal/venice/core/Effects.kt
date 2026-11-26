@@ -27,13 +27,18 @@ class Effects {
         val spd = abs(b.surge)
         val vx = b.surge * c - b.sway * s; val vy = b.surge * s + b.sway * c
         val thr = abs(throttle)
+        // 0 = trimmed fully in (bow down), 1 = trimmed fully out (bow up)
+        val tOut = ((b.trim + 1f) * 0.5f).coerceIn(0f, 1f)
         if (!b.airborne && spd > 3f) {
-            // bow spray: water peels off both chines in the forward third, thrown out, up and back in thin sheets
-            sprayAcc += dt * min(spd * 24f + abs(b.vz) * 60f, 700f)
+            // bow spray: water peels off both chines, thrown out, up and back in thin sheets. Trimmed in, the bow is
+            // buried and throws a lot of spray far forward; trimmed out, only the aft part of the hull is wet.
+            sprayAcc += dt * min(spd * 24f + abs(b.vz) * 60f, 700f) * (1.35f - 0.7f * tOut)
+            // porpoising: every time the bow slams back down it throws a burst of white water
+            if (b.porpoise > 0.25f && b.pitchRate < -0.25f) sprayAcc += dt * 900f * b.porpoise
             while (sprayAcc > 1f) {
                 sprayAcc -= 1f
                 val side = if (rnd.nextBoolean()) 1f else -1f
-                val lx = Boat.HALF_LEN * (0.05f + r() * 0.5f); val ly = side * Boat.HALF_BEAM * (0.9f + r() * 0.15f)
+                val lx = Boat.HALF_LEN * (0.15f - 0.45f * tOut + r() * 0.5f); val ly = side * Boat.HALF_BEAM * (0.9f + r() * 0.15f)
                 val wx = b.x + lx * c - ly * s; val wy = b.y + lx * s + ly * c
                 val nx = -s * side; val ny = c * side
                 val outV = 1.0f + min(spd, 22f) * (0.12f + 0.16f * r())
@@ -44,20 +49,24 @@ class Effects {
             }
         }
         // rooster tail: the outboard's lower unit throws a column of water up and back; it arcs over and falls into
-        // the wash behind the boat. Taller, longer and denser the faster you go (and the harder the throttle).
+        // the wash behind the boat. Taller, longer and denser the faster you go (and the harder the throttle), and
+        // shaped by the trim: trimmed in it is a low, wide, flat fan of white water; trimmed out the prop runs close
+        // to the surface and throws a tall, narrow column (the "big rooster tail" of a boat trimmed too high).
         if (!b.airborne && spd > 5f && thr > 0.2f) {
-            val k = ((spd - 5f) / 31f).coerceIn(0f, 1f)           // 0 at 18 km/h .. 1 at 130 km/h
+            val k = ((spd - 5f) / 34f).coerceIn(0f, 1f)           // 0 at 18 km/h .. 1 at 140 km/h
+            val tall = 0.5f + 1.0f * tOut * tOut + 0.25f * tOut    // 0.5x trimmed in .. 1.75x trimmed out
+            val wide = 1.45f - 0.85f * tOut
             val lx = -Boat.HALF_LEN - 0.35f * Boat.SCALE
             val bx = b.x + lx * c; val by = b.y + lx * s
-            roosterAcc += dt * (110f + 520f * k) * (0.5f + 0.5f * thr)
+            roosterAcc += dt * (110f + 520f * k) * (0.5f + 0.5f * thr) * (0.65f + 0.6f * tOut)
             while (roosterAcc > 1f) {
                 roosterAcc -= 1f
-                val lat = (r() - 0.5f) * (0.25f + 0.35f * k)
+                val lat = (r() - 0.5f) * (0.25f + 0.35f * k) * wide
                 // the jet leaves the lower unit backwards relative to the boat, so in the world it keeps most of the
                 // boat's speed: the arc trails 3..9 m behind the motor and falls back into the wash
                 val keep = 0.93f - 0.13f * k - 0.05f * r()
-                val vz = (1.2f + 5.0f * k) * (0.7f + 0.45f * r()) * (0.6f + 0.4f * thr)
-                val side = (r() - 0.5f) * (0.5f + 1.2f * k)
+                val vz = (1.2f + 5.0f * k) * (0.7f + 0.45f * r()) * (0.6f + 0.4f * thr) * tall
+                val side = (r() - 0.5f) * (0.5f + 1.2f * k) * wide
                 emit(bx - s * lat, by + c * lat, b.z - 0.05f,
                     vx * keep - s * side, vy * keep + c * side, vz,
                     0.45f + 0.5f * r() * (0.5f + k), 0.04f + r() * (0.06f + 0.08f * k))
@@ -67,8 +76,8 @@ class Effects {
             while (mistAcc > 1f) {
                 mistAcc -= 1f
                 val keep = 0.85f - 0.1f * k
-                emit(bx + (r() - 0.5f) * 0.4f, by + (r() - 0.5f) * 0.4f, b.z + 0.1f,
-                    vx * keep, vy * keep, (0.8f + 3.5f * k) * (0.6f + 0.6f * r()),
+                emit(bx + (r() - 0.5f) * 0.4f * wide, by + (r() - 0.5f) * 0.4f * wide, b.z + 0.1f,
+                    vx * keep, vy * keep, (0.8f + 3.5f * k) * (0.6f + 0.6f * r()) * (0.6f + 0.4f * tall),
                     0.7f + r() * 0.6f, 0.32f + r() * (0.25f + 0.3f * k))
             }
         }

@@ -1,35 +1,124 @@
-// Builds tile meshes on a background thread and uploads them on the GL thread.
+// Streams the city in chunks (one chunk = one 256 m map tile) around the camera, like Minecraft's render distance:
+// tiles inside `radius` are meshed on background threads and uploaded on the GL thread, tiles outside it are
+// released from the GPU and from RAM. Built meshes are cached on the phone's storage, so the expensive meshing only
+// ever happens once per tile; afterwards a tile is a straight file read (and the whole city can be pre-built
+// from the settings page).
 package com.blazebaal.venice.render
 
 import android.opengl.GLES30.*
 import com.blazebaal.venice.core.*
+import java.io.File
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import kotlin.math.*
 
 class GpuTile(
     val tx: Int, val ty: Int, val ox: Float, val oy: Float,
-    val facade: Mesh?, val generic: Mesh?, val detail: Mesh?,
+    val facade: Mesh?, val generic: Mesh?, val detail: Mesh?, val vegetation: Mesh?,
     val maskTex: Int, val classTex: Int, val hasMarsh: Boolean,
 ) {
     val model = Mat4.translation(ox, oy, 0f)
+    val cx = ox + TILE_SIZE / 2f; val cy = oy + TILE_SIZE / 2f
     fun release() {
-        facade?.release(); generic?.release(); detail?.release()
+        facade?.release(); generic?.release(); detail?.release(); vegetation?.release()
         if (maskTex != 0) Tex.release(maskTex); if (classTex != 0) Tex.release(classTex)
     }
 }
 
-private class Built(val t: TileData, val m: TileMeshes, val fac: java.nio.FloatBuffer?, val gen: java.nio.FloatBuffer?, val det: java.nio.FloatBuffer?)
+private class Built(val t: TileData, val hasMarsh: Boolean, val fac: FloatBuffer?, val gen: FloatBuffer?, val det: FloatBuffer?, val veg: FloatBuffer?)
 
-class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
+/** On-disk cache of meshed tiles. Invalidated automatically when the map or the mesher version changes. */
+class TileCache(root: File, key: String) {
+    private val dir = File(root, "tiles-$key")
+    init {
+        try {
+            dir.mkdirs()
+            root.listFiles()?.forEach { if (it.isDirectory && it.name.startsWith("tiles-") && it.name != dir.name) it.deleteRecursively() }
+        } catch (_: Exception) { }
+    }
+    private fun file(tx: Int, ty: Int) = File(dir, "${tx}_$ty.bin")
+    fun has(tx: Int, ty: Int) = file(tx, ty).exists()
+
+    /** Returns (hasMarsh, facade, generic, detail, vegetation) or null. Buffers are direct, native order. */
+    fun read(tx: Int, ty: Int): Array<Any?>? {
+        val f = file(tx, ty)
+        if (!f.exists()) return null
+        return try {
+            RandomAccessFile(f, "r").use { raf ->
+                val ch = raf.channel
+                val buf = ByteBuffer.allocateDirect(ch.size().toInt()).order(ByteOrder.nativeOrder())
+                while (buf.hasRemaining()) if (ch.read(buf) < 0) break
+                buf.flip()
+                if (buf.int != MAGIC) return null
+                val hasMarsh = buf.int == 1
+                val n = IntArray(4) { buf.int }
+                var pos = buf.position()
+                val out = arrayOfNulls<Any>(5); out[0] = hasMarsh
+                for (i in 0 until 4) {
+                    if (n[i] == 0) { out[i + 1] = null; continue }
+                    buf.position(pos); buf.limit(pos + n[i] * 4)
+                    out[i + 1] = buf.slice().order(ByteOrder.nativeOrder()).asFloatBuffer()
+                    buf.limit(buf.capacity()); pos += n[i] * 4
+                }
+                out
+            }
+        } catch (e: Exception) { f.delete(); null }
+    }
+
+    fun write(tx: Int, ty: Int, m: TileMeshes) {
+        try {
+            val arrays = arrayOf(m.facade, m.generic, m.detail, m.vegetation)
+            val bytes = 4 * 6 + arrays.sumOf { it.size } * 4
+            val buf = ByteBuffer.allocate(bytes).order(ByteOrder.nativeOrder())
+            buf.putInt(MAGIC); buf.putInt(if (m.hasMarsh) 1 else 0)
+            for (a in arrays) buf.putInt(a.size)
+            for (a in arrays) buf.asFloatBuffer().put(a).also { buf.position(buf.position() + a.size * 4) }
+            val tmp = File(dir, "${tx}_$ty.tmp")
+            tmp.writeBytes(buf.array())
+            tmp.renameTo(file(tx, ty))
+        } catch (_: Exception) { }
+    }
+
+    fun clear() { try { dir.listFiles()?.forEach { it.delete() } } catch (_: Exception) { } }
+    private var counted = 0; private var countedAt = 0L
+    fun count(): Int {
+        val now = System.currentTimeMillis()
+        if (now - countedAt > 1000) { counted = dir.list()?.count { it.endsWith(".bin") } ?: 0; countedAt = now }
+        return counted
+    }
+
+    companion object { const val MAGIC = 0x47544331 }  // "GTC1"
+}
+
+class TileStreamer(private val world: WorldMap, var radius: Float = 640f, private val cache: TileCache? = null) {
     val tiles = HashMap<Int, GpuTile>()
     /** bumped whenever a tile is added or removed (the cached city shadow map uses it) */
     @Volatile var version = 0
+    /** how many tiles the current radius wants (for the loading bar) */
+    var wanted = 1; private set
     private val pending = HashSet<Int>()
     private val ready = ConcurrentLinkedQueue<Built>()
     private val pool = Executors.newFixedThreadPool(2) { r -> Thread(r, "tile-builder").apply { priority = Thread.MIN_PRIORITY + 1 } }
     private val meshers = ThreadLocal.withInitial { CityMesher() }
     private val map = world.map
+    @Volatile private var prebuildThread: Thread? = null
+
+    private fun direct(a: FloatArray) = if (a.isEmpty()) null else floatBuffer(a)
+
+    private fun buildTile(tx: Int, ty: Int): Built? {
+        val t = world.tile(tx, ty) ?: return null
+        cache?.read(tx, ty)?.let { c ->
+            return Built(t, c[0] as Boolean, c[1] as FloatBuffer?, c[2] as FloatBuffer?, c[3] as FloatBuffer?, c[4] as FloatBuffer?)
+        }
+        val m = meshers.get()!!.build(t)
+        cache?.write(tx, ty, m)
+        // vertex data copied into direct buffers here, off the GL thread
+        return Built(t, m.hasMarsh, direct(m.facade), direct(m.generic), direct(m.detail), direct(m.vegetation))
+    }
 
     /** Call on the GL thread each frame. */
     fun update(cx: Float, cy: Float, fx: Float, fy: Float, maxUploads: Int = 2) {
@@ -37,32 +126,29 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
         val rt = ceil(radius / TILE_SIZE).toInt() + 1
         // request nearest first (and a bit ahead of the camera)
         val want = ArrayList<Pair<Int, Float>>()
+        var total = 0
         for (dy in -rt..rt) for (dx in -rt..rt) {
             val tx = ctx + dx; val ty = cty + dy
             if (!map.hasTile(tx, ty)) continue
-            val k = ty * map.tilesX + tx
-            if (tiles.containsKey(k) || pending.contains(k)) continue
             val (ox, oy) = map.tileOrigin(tx, ty)
             val mx = ox + TILE_SIZE / 2f - cx; val my = oy + TILE_SIZE / 2f - cy
             val d = hypot(mx, my)
-            if (d > radius + TILE_SIZE) continue
+            // a tile is wanted when any part of it is inside the radius (its centre within radius + half diagonal)
+            if (d > radius + TILE_SIZE * 0.71f) continue
+            total++
+            val k = ty * map.tilesX + tx
+            if (tiles.containsKey(k) || pending.contains(k)) continue
             val ahead = (mx * fx + my * fy) / max(d, 1f)
             want.add(Pair(k, d - ahead * 120f))
         }
+        wanted = max(1, total)
         want.sortBy { it.second }
         for ((k, _) in want.take(6)) {
             pending.add(k)
             val tx = k % map.tilesX; val ty = k / map.tilesX
             pool.execute {
-                try {
-                    val t = world.tile(tx, ty)
-                    if (t != null) {
-                        val m = meshers.get()!!.build(t)
-                        // vertex data copied into direct buffers here, off the GL thread
-                        fun fb(a: FloatArray) = if (a.isEmpty()) null else floatBuffer(a)
-                        ready.add(Built(t, m, fb(m.facade), fb(m.generic), fb(m.detail)))
-                    }
-                } catch (e: Throwable) { android.util.Log.e("Venice", "tile $tx,$ty failed", e) }
+                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) }
+                catch (e: Throwable) { android.util.Log.e("Venice", "tile $tx,$ty failed", e) }
             }
         }
         // uploads
@@ -76,17 +162,17 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
             version++
             n++
         }
-        // unload far tiles
+        // unload tiles that left the render distance (with a little hysteresis so they don't flicker at the edge)
         val it = tiles.entries.iterator()
         while (it.hasNext()) {
             val e = it.next(); val t = e.value
-            if (hypot(t.ox + TILE_SIZE / 2f - cx, t.oy + TILE_SIZE / 2f - cy) > radius + TILE_SIZE * 2.2f) { t.release(); it.remove(); version++ }
+            if (hypot(t.cx - cx, t.cy - cy) > radius + TILE_SIZE * 1.1f) { t.release(); it.remove(); version++ }
         }
-        world.evictFar(cx, cy, rt + 3)
+        world.evictFar(cx, cy, rt + 2)
     }
 
     private fun upload(b: Built): GpuTile {
-        val t = b.t; val m = b.m
+        val t = b.t
         var mask = 0; var cls = 0
         if (t.hard != null) {
             val n = MASK_N
@@ -100,10 +186,32 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 950f) {
             b.fac?.let { Mesh(it, it.capacity() / FSTRIDE, FSTRIDE, intArrayOf(3, 3, 2, 4, 4)) },
             b.gen?.let { Mesh(it, it.capacity() / STRIDE) },
             b.det?.let { Mesh(it, it.capacity() / STRIDE) },
-            mask, cls, m.hasMarsh,
+            b.veg?.let { Mesh(it, it.capacity() / STRIDE) },
+            mask, cls, b.hasMarsh,
         )
     }
 
+    /** Mesh every tile of the map into the storage cache on a background thread (progress 0..1 via callback). */
+    fun prebuildAll(progress: (Float) -> Unit) {
+        val c = cache ?: return
+        if (prebuildThread != null) return
+        prebuildThread = Thread({
+            val keys = map.tileKeys().toList()
+            val mesher = CityMesher()
+            for ((i, k) in keys.withIndex()) {
+                if (Thread.currentThread().isInterrupted) break
+                val tx = k % map.tilesX; val ty = k / map.tilesX
+                if (!c.has(tx, ty)) try { map.load(tx, ty)?.let { c.write(tx, ty, mesher.build(it)) } } catch (_: Throwable) { }
+                progress((i + 1f) / keys.size)
+            }
+            progress(-1f)
+            prebuildThread = null
+        }, "prebuild").apply { priority = Thread.MIN_PRIORITY; isDaemon = true; start() }
+    }
+
+    fun cachedCount() = cache?.count() ?: 0
+    fun clearCache() { cache?.clear() }
+    fun totalTiles() = map.tileKeys().size
     fun pendingCount() = pending.size
-    fun shutdown() { pool.shutdownNow() }
+    fun shutdown() { pool.shutdownNow(); prebuildThread?.interrupt() }
 }
