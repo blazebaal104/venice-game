@@ -102,6 +102,7 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
     var wanted = 1; private set
     private val pending = HashSet<Int>()
     private val ready = ConcurrentLinkedQueue<Built>()
+    private val retry = ConcurrentLinkedQueue<Int>()
     private val pool = Executors.newFixedThreadPool(2) { r -> Thread(r, "tile-builder").apply { priority = Thread.MIN_PRIORITY + 1 } }
     private val meshers = ThreadLocal.withInitial { CityMesher() }
     private val map = world.map
@@ -109,13 +110,17 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
 
     private fun direct(a: FloatArray) = if (a.isEmpty()) null else floatBuffer(a)
 
+    private val failures = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+
     private fun buildTile(tx: Int, ty: Int): Built? {
         val t = world.tile(tx, ty) ?: return null
-        cache?.read(tx, ty)?.let { c ->
+        val k = ty * map.tilesX + tx
+        val minimal = (failures[k] ?: 0) >= 2
+        if (!minimal) cache?.read(tx, ty)?.let { c ->
             return Built(t, c[0] as Boolean, c[1] as FloatBuffer?, c[2] as FloatBuffer?, c[3] as FloatBuffer?, c[4] as FloatBuffer?)
         }
-        val m = meshers.get()!!.build(t)
-        cache?.write(tx, ty, m)
+        val m = meshers.get()!!.build(t, minimal)
+        if (!minimal) cache?.write(tx, ty, m)
         // vertex data copied into direct buffers here, off the GL thread
         return Built(t, m.hasMarsh, direct(m.facade), direct(m.generic), direct(m.detail), direct(m.vegetation))
     }
@@ -147,10 +152,17 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
             pending.add(k)
             val tx = k % map.tilesX; val ty = k / map.tilesX
             pool.execute {
-                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) }
-                catch (e: Throwable) { android.util.Log.e("Venice", "tile $tx,$ty failed", e) }
+                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) else retry.add(k) }
+                catch (e: Throwable) {
+                    // never leave a hole: retry, and after two failures build it with ground and quays only
+                    android.util.Log.e("Venice", "tile $tx,$ty failed", e)
+                    failures[k] = (failures[k] ?: 0) + 1
+                    retry.add(k)
+                }
             }
         }
+        // failed builds go back in the queue
+        while (true) { val k = retry.poll() ?: break; pending.remove(k) }
         // uploads
         var n = 0
         while (n < maxUploads) {

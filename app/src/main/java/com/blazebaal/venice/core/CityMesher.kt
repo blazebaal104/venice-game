@@ -52,19 +52,26 @@ class CityMesher {
     private val det = MeshBuilder(32768)
     private val occ = ShortArray(TILE_SIZE * TILE_SIZE)
 
-    fun build(t: TileData): TileMeshes {
+    /** Every item is built on its own: if one building, boat or prop fails (bad data, a bug), only that item is
+     *  skipped - never the whole tile (a failed tile used to leave a hole in the city until the app restarted).
+     *  minimal = quays and ground only, the last-resort build for a tile that keeps failing. */
+    fun build(t: TileData, minimal: Boolean = false): TileMeshes {
         gen = genMain
         fac.clear(); genMain.clear(); veg.clear(); det.clear()
-        rasterOccupancy(t)
-        for ((i, b) in t.buildings.withIndex()) building(b, i, t)
+        fun safe(what: String, f: () -> Unit) { try { f() } catch (e: Throwable) { gen = genMain; android.util.Log.w("Venice", "tile ${t.tx},${t.ty}: $what failed", e) } }
+        safe("occupancy") { rasterOccupancy(t) }
+        if (!minimal) for ((i, b) in t.buildings.withIndex()) safe("building $i") { building(b, i, t) }
         fac.style(0f, 0f, 0f, 0f)
-        for (w in t.walls) quay(w)
-        for (w in t.walls) mooredBoats(w, t)
-        // bridges are hand-built models placed by GameRenderer.loadBridges (assets/bridges), nothing generic is meshed here
-        for (p in t.piers) linePier(p)
-        for (p in t.pierPolys) polyPier(p)
-        for (p in t.points) prop(p, t)
-        parkTrees(t)
+        for (w in t.walls) safe("quay") { quay(w) }
+        if (!minimal) {
+            for (w in t.walls) safe("moorings") { mooredBoats(w, t) }
+            // bridges are hand-built models placed by GameRenderer.loadBridges (assets/bridges), nothing generic is meshed here
+            for (p in t.piers) safe("pier") { linePier(p) }
+            for (p in t.pierPolys) safe("pier polygon") { polyPier(p) }
+            for (p in t.points) safe("prop") { prop(p, t) }
+            safe("parks") { parkTrees(t) }
+            safe("courtyards") { courtyardTrees(t) }
+        }
         val hasMarsh = t.marsh?.any { it != 0.toByte() } ?: false
         return TileMeshes(fac.floats(), genMain.floats(), det.floats(), veg.floats(), t.hard != null, hasMarsh)
     }
@@ -315,6 +322,31 @@ class CityMesher {
         for (bay in bays) {
             if (bay.kind == 2) continue
             // ---- ground floor: paline in front of water doors, awnings over shops
+            if (bay.ground == 1 && !water && rnd(es + bay.jseed, 13) < 0.22f) {
+                // potted shrubs either side of a front door (vegetation mesh: shorter draw distance, dither fade)
+                val saved = gen; gen = veg
+                for (side in intArrayOf(-1, 1)) {
+                    val u = bay.c + side * (min(bay.w, 1.6f) / 2 + 0.3f)
+                    gen.color(0.50f, 0.28f, 0.18f, 0.05f); gen.frustum(wx(u, 0.35f), wy(u, 0.35f), Z.GROUND, 0.2f, 0.26f, 0.5f, 6)
+                    gen.color(0.18f, 0.34f + rnd(es, 14) * 0.08f, 0.13f, 0f)
+                    gen.frustum(wx(u, 0.35f), wy(u, 0.35f), Z.GROUND + 0.5f, 0.32f, 0.12f, 0.9f + rnd(es + bay.jseed, 15) * 0.6f, 7)
+                }
+                gen = saved
+            }
+            if (bay.ground != 3 && st.type == 0 && rnd(es + bay.jseed, 16) < 0.04f) {
+                // ivy climbing the wall from the ground
+                val saved = gen; gen = veg
+                val hgt = 2.5f + rnd(es + bay.jseed, 17) * 4f
+                for (k in 0 until 9) {
+                    val u = bay.c + (rnd(es + k, 18) - 0.5f) * bay.w * 0.9f
+                    val z0 = Z.GROUND + rnd(es + k, 19) * hgt * 0.7f
+                    val sz = 0.5f + rnd(es + k, 20) * 0.7f
+                    gen.color(0.16f + rnd(es + k, 21) * 0.06f, 0.30f + rnd(es + k, 22) * 0.1f, 0.12f, 0.05f)
+                    gen.quad(Vec3(wx(u - sz, 0.06f), wy(u - sz, 0.06f), z0), Vec3(wx(u + sz, 0.06f), wy(u + sz, 0.06f), z0),
+                        Vec3(wx(u + sz * 0.7f, 0.1f), wy(u + sz * 0.7f, 0.1f), z0 + sz * 1.6f), Vec3(wx(u - sz * 0.7f, 0.1f), wy(u - sz * 0.7f, 0.1f), z0 + sz * 1.6f))
+                }
+                gen = saved
+            }
             if (bay.ground == 3) {
                 val cols = Palette.PALINA[(rnd(es, 7) * 4).toInt().coerceAtMost(3)]
                 for (side in intArrayOf(-1, 1)) palina(wx(bay.c + side * (min(bay.w - 0.5f, 2.4f) / 2 + 0.5f), 1.3f), wy(bay.c + side * (min(bay.w - 0.5f, 2.4f) / 2 + 0.5f), 1.3f), cols)
@@ -969,6 +1001,35 @@ class CityMesher {
     }
 
     /** Parks: planted on a jittered grid over the grass (dense in the Giardini, tall stone pines at Sant'Elena). */
+    /** Trees in the private courtyards and gardens enclosed by buildings (the holes of building outlines): from the
+     *  canals you see their crowns over the walls, a very Venetian sight. */
+    private fun courtyardTrees(t: TileData) {
+        for ((bi, b) in t.buildings.withIndex()) {
+            if (b.ringSizes.size < 2) continue
+            var start = b.ringSizes[0]
+            for (ri in 1 until b.ringSizes.size) {
+                val n = b.ringSizes[ri]
+                var area = 0f; var cx = 0f; var cy = 0f
+                for (i in 0 until n) {
+                    val ax = b.xy[(start + i) * 2]; val ay = b.xy[(start + i) * 2 + 1]
+                    val bx = b.xy[(start + (i + 1) % n) * 2]; val by = b.xy[(start + (i + 1) % n) * 2 + 1]
+                    area += ax * by - bx * ay; cx += ax; cy += ay
+                }
+                area = abs(area) / 2; cx /= n; cy /= n
+                start += n
+                val s = b.seed * 31 + ri
+                if (area < 35f || rnd(s, 1) < 0.35f) continue
+                if (cx < 1f || cy < 1f || cx > TILE_SIZE - 1f || cy > TILE_SIZE - 1f) continue
+                val wx = t.ox + cx; val wy = t.oy + cy
+                tree(cx, cy, Z.GROUND, treeKind(wx, wy, s), s)
+                if (area > 160f) {
+                    val ang = rnd(s, 2) * 6.28f; val d = sqrt(area) * 0.25f
+                    tree(cx + cos(ang) * d, cy + sin(ang) * d, Z.GROUND, treeKind(wx, wy, s + 7), s + 7)
+                }
+            }
+        }
+    }
+
     private fun parkTrees(t: TileData) {
         val cls = t.cls ?: return
         val cxw = t.ox + 128f; val cyw = t.oy + 128f

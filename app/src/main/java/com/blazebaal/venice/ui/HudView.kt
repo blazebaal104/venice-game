@@ -318,17 +318,17 @@ class HudView(ctx: Context) : View(ctx) {
     private fun drawEvents() {
         val ev = Events.live(); if (ev.isEmpty()) return
         val now = System.currentTimeMillis()
-        var y = height * 0.34f
+        var y = height * 0.30f
         for (e in ev.reversed()) {
             val t = (now - e.t0).toFloat()
             val a = when { t < 180f -> t / 180f; t > Events.LIFE_MS - 450f -> ((Events.LIFE_MS - t) / 450f).coerceAtLeast(0f); else -> 1f }
             val slide = (1f - min(1f, t / 220f)) * 14 * s
             val alpha = (a * 255).toInt()
             ink.text.setShadowLayer(6 * s, 0f, 2 * s, Color.argb((a * 200).toInt(), 0, 0, 0))
-            ink.label(e.text, width / 2f, y + slide, 26f, Color.argb(alpha, Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.04f)
-            if (e.sub.isNotEmpty()) ink.label(e.sub, width / 2f, y + slide + 18 * s, 11f, Color.argb((alpha * 0.85f).toInt(), 255, 255, 255), Paint.Align.CENTER, spacing = 0.1f)
+            ink.label(e.text, width / 2f, y + slide, 16f, Color.argb(alpha, Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.05f)
+            if (e.sub.isNotEmpty()) ink.label(e.sub, width / 2f, y + slide + 13 * s, 9f, Color.argb((alpha * 0.7f).toInt(), 235, 238, 242), Paint.Align.CENTER, Theme.condensed, 0.04f)
             ink.text.clearShadowLayer()
-            y -= (if (e.sub.isNotEmpty()) 52 else 38) * s
+            y -= (if (e.sub.isNotEmpty()) 34 else 24) * s
         }
     }
 
