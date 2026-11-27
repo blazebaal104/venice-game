@@ -326,6 +326,11 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     /** the height the camera must be at, at x, y, so it isn't inside a bridge: over the deck or under the arch,
      *  whichever it is nearer (decided once per bridge, so it doesn't flip-flop) */
     private fun bridgeClear(x: Float, y: Float, z: Float, floor: Float): Float {
+        fun under(b: BridgeInst): Boolean {
+            val dx = boat.x - b.x; val dy = boat.y - b.y
+            val lx = (dx * b.c + dy * b.s) / b.sx; val ly = (-dx * b.s + dy * b.c) / b.sy
+            return lx > b.shape.minX && lx < b.shape.maxX && abs(ly) < b.shape.halfW + 1f / b.sy
+        }
         for ((i, b) in bridgeCol.withIndex()) {
             val dx = x - b.x; val dy = y - b.y
             if (abs(dx) > b.r || abs(dy) > b.r) continue
@@ -338,7 +343,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val hi = b.z0 + b.sz * (sh.hi[k] + (sh.hi[k + 1] - sh.hi[k]) * t)
             val m = 0.6f
             if (z <= lo - m || z >= hi + m) continue
-            if (camBridge != i) { camBridge = i; camBridgeUp = z > (lo + hi) * 0.5f }
+            if (camBridge != i) { camBridge = i; camBridgeUp = if (under(b) && lo - m > floor + 0.4f) false else z > (lo + hi) * 0.5f }
             camBridgeT = 1.2f
             return if (camBridgeUp || lo - m < floor + 0.2f) hi + m else lo - m
         }
@@ -376,6 +381,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val n = max(2, (len / 0.3f).toInt())
         for (k in 1..n) {
             val f = k / n.toFloat()
+            if (f * len < 1.8f) continue                  // the boat's own footprint: it may be touching a wall
             val x = px + (qx - px) * f; val y = py + (qy - py) * f; val z = pz + (qz - pz) * f
             if (z < obstacleTop(x, y)) return max(0f, (k - 1) / n.toFloat() - 0.35f / max(len, 0.1f))
         }
@@ -814,13 +820,18 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val hardZ = bridgeClear(camSX, camSY, ez, floor); if (hardZ != ez) ez = hardZ     // never inside a deck
             // buildings: the camera can't go inside one - it stops at the wall (the boat keeps going) and comes back
             // out gently when there's room again
-            val pz = 1.6f + boat.z * 0.6f
+            val pz = 2.6f + boat.z * 0.6f                   // above the fondamenta: only buildings stop the camera
             val free = armFree(boat.x, boat.y, pz, camSX, camSY, ez)
             camArm = if (free < camArm) free else camArm + (free - camArm) * (1f - exp(-dt * 2.5f))
+            val armLen = hypot(camSX - boat.x, camSY - boat.y) * camArm
             camX = boat.x + (camSX - boat.x) * camArm; camY = boat.y + (camSY - boat.y) * camArm
-            camZ = max(pz + (ez - pz) * camArm + (1f - camArm) * 1.2f, floor)
+            var cz = pz + (ez - pz) * camArm
+            // boxed in against a wall: rise and look down at the boat instead of ending up inside it
+            if (armLen < 3f) cz += (1f - armLen / 3f) * 3.5f
+            camZ = max(bridgeClear(camX, camY, cz, floor), floor)
             val shake = boat.bump * 0.05f + spS * spS * 0.028f + boat.porpoise * 0.06f
-            val ahead = 3f * max(0f, cos(camYawOff))                  // swung round to the bow: look at the boat itself
+            // swung round to the bow: look at the boat itself; straight above it: a point ahead (never a degenerate view)
+            val ahead = max(3f * max(0f, cos(camYawOff)), (1f - armLen / 3f).coerceIn(0f, 1f) * 2.5f)
             view = Mat4.lookAt(camX + sin(time * 40) * shake, camY, camZ + cos(time * 37) * shake, boat.x + cos(boat.heading) * ahead, boat.y + sin(boat.heading) * ahead, 1.2f + boat.z * 0.7f, 0f, 0f, 1f)
         }
         val sc = scene!!
