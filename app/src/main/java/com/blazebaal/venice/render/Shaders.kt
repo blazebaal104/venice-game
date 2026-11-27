@@ -67,23 +67,23 @@ vec3 light(vec3 alb, vec3 n, vec3 wpos, float rough, float ao, float f0) {
     float nl = max(dot(n, l), 0.0), nv = max(dot(n, v), 1e-3), nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
     float sh = nl > 0.0 ? sunShadow(wpos, n) : 0.0;
     float a = max(rough * rough, 0.02); float a2 = a * a;
-    float d = nh * nh * (a2 - 1.0) + 1.0; float D = a2 / (PI * d * d);
+    float d = max(nh * nh * (a2 - 1.0) + 1.0, 1e-3); float D = a2 / (PI * d * d);
     float k = (rough + 1.0) * (rough + 1.0) / 8.0;
     float G = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
-    float F = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
-    vec3 spec = uSunCol * (D * G * F / max(4.0 * nl * nv, 1e-3)) * nl * sh;
+    float fx = clamp(1.0 - vh, 0.0, 1.0); float F = f0 + (1.0 - f0) * fx * fx * fx * fx * fx;
+    vec3 spec = nl > 0.0 ? uSunCol * min(D * G * F / max(4.0 * nl * nv, 1e-3), 200.0) * nl * sh : vec3(0.0);
     vec3 hemi = mix(uGroundAmb, uSkyAmb, n.z * 0.5 + 0.5);
     vec3 diff = alb * (uSunCol * nl * sh + hemi * ao) * (1.0 - F * 0.5);
     vec3 r = reflect(-v, n);
     // reflected environment: sky above the horizon, the dark canal/paving below it (soffits mirror water, not sky)
     vec3 env = r.z >= 0.0 ? mix(uFogCol, uSkyZenith, clamp(r.z * 1.5, 0.0, 1.0)) : mix(uFogCol * 0.5, uFogCol * 0.18, clamp(-r.z * 3.0, 0.0, 1.0));
-    float Fa = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
-    return diff + spec + env * Fa * (1.0 - rough) * ao * 0.9;
+    float ax = clamp(1.0 - nv, 0.0, 1.0); float Fa = f0 + (1.0 - f0) * ax * ax * ax * ax * ax;
+    return clamp(diff + spec + env * Fa * clamp(1.0 - rough, 0.0, 1.0) * ao * 0.9, vec3(0.0), vec3(500.0));
 }
 vec3 fog(vec3 c, vec3 wpos) {
     c *= 1.0 - 0.22 * uWet * step(0.05, wpos.z);
     float d = length(wpos - uCam);
-    float f = 1.0 - exp(-pow(d * uFogDens, 1.4));
+    float f = 1.0 - exp(-pow(max(d * uFogDens, 1e-6), 1.4));
     f = max(f, (1.0 - exp(-d * 0.00035)) * 0.35);   // light lagoon haze
     // caligo: the low mist that sits on the lagoon - thicker near the water, thinning out over the rooftops
     float low = exp(-max(wpos.z, 0.0) / 16.0);
@@ -397,7 +397,7 @@ void main() {
             } else {
                 vec3 r = reflect(-vdir, n);
                 vec3 env = mix(uFogCol, uSkyZenith, clamp(r.z * 1.4 + 0.2, 0.0, 1.0));
-                float fres = 0.08 + 0.92 * pow(1.0 - max(dot(n, vdir), 0.0), 4.0);
+                float gx = clamp(1.0 - dot(n, vdir), 0.0, 1.0); float fres = 0.08 + 0.92 * gx * gx * gx * gx;
                 float wid = float(jseed) + float(fl) * 3.1 + seed * 17.0;
                 vec3 interior = lin(vec3(0.05, 0.045, 0.04)) * (0.6 + 0.8 * noise(vec2(wid, 1.0)));
                 if (hash11(wid) > 0.72) interior = lin(vec3(0.55, 0.50, 0.42)) * 0.35;
@@ -589,7 +589,7 @@ void main() {
     vec3 n = normalize(vec3(-g, 1.0));
     vec3 v = normalize(uCam - vW);
     float nv = max(dot(n, v), 0.0);
-    float fres = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
+    float wx5 = clamp(1.0 - nv, 0.0, 1.0); float fres = 0.02 + 0.98 * wx5 * wx5 * wx5 * wx5 * wx5;
     vec2 roff = clamp(n.xy * 0.05 * wakeE * 2.5 + wakeSlope * 0.12, -0.03, 0.03)
               * (1.0 - clamp(foam, 0.0, 1.0)) * (1.0 - smoothstep(60.0, 200.0, length(uCam - vW)));
     vec2 suv = gl_FragCoord.xy / uScreen + n.xy * 0.035 + roff;
@@ -996,15 +996,15 @@ void main() {
     vec3 n = normalize(vec3(-r * 0.22, 1.0));
     vec3 v = normalize(uCam - vW);
     float nv = clamp(dot(n, v), 0.0, 1.0);
-    float fres = 0.03 + 0.97 * pow(1.0 - nv, 5.0);
+    float fx5 = clamp(1.0 - nv, 0.0, 1.0); float fres = 0.03 + 0.97 * fx5 * fx5 * fx5 * fx5 * fx5;
     vec3 rd = reflect(-v, n);
     vec3 sky = mix(uFogCol, uSkyZenith, clamp(rd.z * 1.6, 0.0, 1.0));
     // Venetian canal water: green-teal, a little milky
     vec3 deep = vec3(0.045, 0.115, 0.095) * (uSkyAmb * 1.5 + uSunCol * 0.32);
     vec3 col = mix(deep, sky * 0.9, clamp(fres, 0.0, 1.0) * 0.8);
     // sun glint, widened where the ripples are finer than a pixel (no sparkle)
-    vec3 dn = fwidth(n); float sk = 1.0 / (1.0 + 900.0 * dot(dn, dn));
-    float pw = max(260.0 * sk, 24.0);
+    // glint widens with distance instead of with screen derivatives (no fwidth: undefined at triangle edges on some GPUs)
+    float pw = mix(260.0, 40.0, clamp(length(uCam - vW) / 150.0, 0.0, 1.0));
     vec3 h = normalize(uSunDir + v);
     col += uSunCol * pow(clamp(dot(n, h), 0.0, 1.0), pw) * 1.5 * (pw / 260.0);
     o = vec4(fog(clamp(col, vec3(0.0), vec3(30.0)), vW), 1.0);
@@ -1152,12 +1152,13 @@ void main() {
     if (uBloomK > 0.0) { vec3 bl = texture(uBloom, vUv).rgb; if (!any(isnan(bl)) && !any(isinf(bl))) col += bl * 0.35 * uBloomK; }
     // last line of defence: a NaN pixel (it would be black) takes its neighbours' colour
     if (any(isnan(col)) || any(isinf(col))) { vec3 nb = (cN + cS + cE + cW) * 0.25; col = (any(isnan(nb)) || any(isinf(nb))) ? vec3(0.3, 0.32, 0.34) : nb; }
+    col = clamp(col, vec3(0.0), vec3(64.0));
     col = aces(col * uExposure);
     col = mix(vec3(luma(col)), col, 1.08);
     col *= vec3(1.02, 1.0, 0.97);
     vec2 vc = vUv - 0.5;
     col *= 1.0 - dot(vc, vc) * 0.35;
-    o = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+    o = vec4(pow(clamp(col, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2)), 1.0);
 }
 """
 }

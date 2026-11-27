@@ -53,6 +53,42 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private val visible = ArrayList<GpuTile>(128)
 
     private var lastNs = 0L; private var time = 0f; private var glErr = 0
+    // ---- on-device probe: the real HDR values of three pixels after each stage of the frame (once a second, FPS
+    // overlay on): which stage turns them black. Points: water right of the boat, right bank, left bank.
+    private var probeT = 0f; private var probing = false
+    private val probeOut = StringBuilder()
+    private val probeBuf = java.nio.ByteBuffer.allocateDirect(16).order(java.nio.ByteOrder.nativeOrder())
+    private val PROBE = floatArrayOf(0.68f, 0.42f, 0.78f, 0.78f, 0.13f, 0.72f)
+    private fun half(h: Int): Float {
+        val s = (h shr 15) and 1; val e = (h shr 10) and 0x1f; val m = h and 0x3ff
+        val v = when (e) { 0 -> m / 1024f * 6.1035156e-5f; 31 -> if (m == 0) Float.POSITIVE_INFINITY else Float.NaN; else -> (1f + m / 1024f) * 2f.pow(e - 15) }
+        return if (s == 1) -v else v
+    }
+    private fun fmt(v: Float) = when { v.isNaN() -> "NaN"; v.isInfinite() -> "inf"; abs(v) >= 100f -> String.format(java.util.Locale.US, "%.0f", v); else -> String.format(java.util.Locale.US, "%.2f", v) }
+    private fun probe(tag: String, sc: Target) {
+        if (!probing) return
+        while (glGetError() != GL_NO_ERROR) { }
+        probeOut.append(tag).append(' ')
+        for (k in 0 until 3) {
+            val x = (sc.w * PROBE[k * 2]).toInt(); val y = (sc.h * PROBE[k * 2 + 1]).toInt()
+            probeBuf.clear()
+            var r: Float; var g: Float; var b: Float
+            if (!sc.isHdr) {
+                glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, probeBuf)
+                r = (probeBuf.get(0).toInt() and 255) / 255f; g = (probeBuf.get(1).toInt() and 255) / 255f; b = (probeBuf.get(2).toInt() and 255) / 255f
+            } else {
+                glReadPixels(x, y, 1, 1, GL_RGBA, GL_FLOAT, probeBuf)
+                if (glGetError() == GL_NO_ERROR) { r = probeBuf.getFloat(0); g = probeBuf.getFloat(4); b = probeBuf.getFloat(8) }
+                else {
+                    probeBuf.clear(); glReadPixels(x, y, 1, 1, GL_RGBA, GL_HALF_FLOAT, probeBuf)
+                    if (glGetError() == GL_NO_ERROR) { r = half(probeBuf.getShort(0).toInt() and 0xffff); g = half(probeBuf.getShort(2).toInt() and 0xffff); b = half(probeBuf.getShort(4).toInt() and 0xffff) }
+                    else { r = -9f; g = -9f; b = -9f }
+                }
+            }
+            probeOut.append(fmt(r)).append('/').append(fmt(g)).append('/').append(fmt(b)).append(if (k < 2) "  " else "")
+        }
+        probeOut.append(" | ")
+    }
     private var fpsAcc = 0f; private var fpsN = 0
     private var frameEma = 1f / 60f; private var badT = 0f; private var goodT = 0f; private var lastDrop = -100f
     private var camX = 0f; private var camY = 0f; private var camZ = 3f
@@ -878,15 +914,21 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // ---- main HDR scene: opaque first, then the sky only where nothing covers it (early depth rejection)
         sc.bind()
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+        probeT += dt; probing = Settings.showFps && probeT > 1f; if (probing) { probeT = 0f; probeOut.setLength(0) }
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
+        probe("O", sc)
         drawGrass(vp)
         drawGulls(vp)
         drawSky(vp, false)
+        probe("C", sc)
         drawWater(vp, r)
+        probe("A", sc)
         drawTrails(vp)
         drawSpray(vp)
         drawSmoke(vp)
         if (Settings.liveWeather || Weather.override > 0) { val w = Weather.windVec(); rain.draw(vp, camX, camY, camZ, boat.time, Weather.rainIntensity(), w[0] * 0.6f, w[1] * 0.6f, fogCol) }
+        probe("T", sc)
+        if (probing) GameState.diag2 = probeOut.toString()
 
         // ---- post
         glDisable(GL_DEPTH_TEST)

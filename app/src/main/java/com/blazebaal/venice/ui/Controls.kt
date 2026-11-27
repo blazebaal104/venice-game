@@ -78,6 +78,7 @@ object GameState {
     @Volatile var tripSeconds = 0f
     @Volatile var fps = 0f
     @Volatile var diag = ""
+    @Volatile var diag2 = ""
     @Volatile var renderScale = 1f
     @Volatile var tilesLoaded = 0
     @Volatile var tilesWanted = 1
