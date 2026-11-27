@@ -77,7 +77,6 @@ object GameState {
     @Volatile var topSpeedKmh = 0f
     @Volatile var tripSeconds = 0f
     @Volatile var fps = 0f
-    @Volatile var diag = ""
     @Volatile var diag2 = ""
     @Volatile var renderScale = 1f
     @Volatile var tilesLoaded = 0
@@ -183,7 +182,7 @@ object Settings {
         fpsTarget = if (p.getInt("settingsVersion", 1) < 2) 60 else p.getInt("fps", 60)
         shadows = p.getBoolean("shadows", true); reflections = p.getBoolean("reflections", true); bloom = p.getBoolean("bloom", true)
         sharpen = if (p.getInt("settingsVersion", 1) < 3) 0.5f else p.getFloat("sharpen", 0.5f); fogDensity = p.getInt("fog", 1)
-        showFps = if (p.getInt("settingsVersion", 1) < 2) false else p.getBoolean("showFps", false)
+        showFps = if (p.getInt("settingsVersion", 1) < 4) false else p.getBoolean("showFps", false)
         analogSteering = p.getBoolean("analog", true); steerMode = p.getInt("steerMode", if (analogSteering) 0 else 1); steerSensitivity = p.getFloat("steerSens", 1f); cameraSensitivity = p.getFloat("camSens", 1f)
         vibration = p.getBoolean("vibration", true); speedUnit = p.getInt("speedUnit", 0); hudScale = p.getFloat("hudScale", 1f)
         minimapNorthUp = p.getBoolean("northUp", false)
@@ -194,7 +193,7 @@ object Settings {
     }
     fun save(ctx: Context) {
         ctx.getSharedPreferences("venice", Context.MODE_PRIVATE).edit()
-            .putInt("settingsVersion", 3)
+            .putInt("settingsVersion", 4)
             .putInt("quality", quality).putFloat("renderDistance", renderDistance).putFloat("vegDistance", vegetationDistance).putFloat("detailDistance", detailDistance)
             .putInt("resolution", resolution).putInt("fps", fpsTarget)
             .putBoolean("shadows", shadows).putBoolean("reflections", reflections).putBoolean("bloom", bloom)

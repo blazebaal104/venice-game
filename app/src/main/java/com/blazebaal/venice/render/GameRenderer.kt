@@ -52,7 +52,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private val ident = Mat4.identity()
     private val visible = ArrayList<GpuTile>(128)
 
-    private var lastNs = 0L; private var time = 0f; private var glErr = 0
+    private var lastNs = 0L; private var time = 0f
     private var fpsAcc = 0f; private var fpsN = 0
     private var frameEma = 1f / 60f; private var badT = 0f; private var goodT = 0f; private var lastDrop = -100f
     private var camX = 0f; private var camY = 0f; private var camZ = 3f
@@ -732,12 +732,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         fpsAcc += rawDt; fpsN++
         if (fpsAcc > 0.5f) {
             GameState.fps = fpsN / fpsAcc; fpsAcc = 0f; fpsN = 0
-            // diagnostics (shown under the FPS line): the inputs the picture depends on
-            GameState.diag = String.format(java.util.Locale.US, "meteo %s c%d vis%.0f nuv%.0f%% · nebbia %.0f-%.0fm d%.2f · sole %.1f,%.1f,%.1f · wet %.2f · GL %s · cam %.1f,%.1f,%.1f",
-                if (Weather.live) "live" else "off", Weather.code, Weather.visibilityM, Weather.cloudCover * 100f, fogStart, fogEnd, fogDens * 1000f,
-                sunCol[0], sunCol[1], sunCol[2], wet, if (glErr == 0) "ok" else "0x" + Integer.toHexString(glErr), camX - boat.x, camY - boat.y, camZ)
         }
-        run { var e = glGetError(); while (e != GL_NO_ERROR) { glErr = e; e = glGetError() } }
         // bad weather: the fog closes in and the render distance drops with it (fewer chunks = steady FPS)
         drawDist = if (Settings.liveWeather || Weather.override > 0) min(Settings.renderDistance, Weather.renderCap()) else Settings.renderDistance
         streamer.radius = drawDist
