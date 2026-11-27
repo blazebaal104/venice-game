@@ -113,6 +113,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             loadShown += dt
             c = canvas; ink.c = canvas
             val glReady = GameState.bootProgress >= 1f
+            if (!glReady && loadFade > 0f) { loadFade = 0f; loadShown = 0f }      // GL context rebuilt after a resume: show it again
             val tiles = if (glReady) (GameState.tilesLoaded.toFloat() / max(1, min(4, GameState.tilesWanted))).coerceIn(0f, 1f) else 0f
             val p = 0.85f * GameState.bootProgress + 0.15f * tiles
             if (glReady && !GameState.loading && loadShown > 2.2f) loadFade += dt
