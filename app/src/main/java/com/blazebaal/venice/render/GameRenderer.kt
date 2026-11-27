@@ -7,6 +7,7 @@ package com.blazebaal.venice.render
 import android.content.Context
 import android.opengl.GLES30.*
 import android.opengl.GLSurfaceView
+import com.blazebaal.venice.audio.Audio
 import com.blazebaal.venice.core.*
 import com.blazebaal.venice.live.Weather
 import com.blazebaal.venice.ui.Screen
@@ -232,6 +233,22 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     // ---------------------------------------------------------------- what's happening, as HUD texts
+    private var scrapeSnd = 0f
+    private fun feedAudio(paused: Boolean) {
+        Audio.paused = paused
+        Audio.master = Settings.volMaster; Audio.engineVol = Settings.volEngine; Audio.ambienceVol = Settings.volAmbience
+        Audio.engineOn = Controls.engineOn; Audio.throttle = Controls.throttle(); Audio.speed = abs(boat.surge)
+        Audio.trim = Controls.trim; Audio.airborne = boat.airborne
+        Audio.nearLand = ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f)
+        Audio.rain = if (Settings.liveWeather && Weather.live && Weather.isRain()) (0.35f + Weather.precipitationMm / 3f).coerceIn(0f, 1f) else 0f
+        Audio.wind = if (Settings.liveWeather && Weather.live) (Weather.windKmh / 45f).coerceIn(0f, 1f) else 0.1f
+        Audio.lx = camX; Audio.ly = camY; Audio.lyaw = boat.heading + camYawOff
+        Audio.boats = LiveBoats.audio
+        while (true) {
+            val c = LiveBoats.cues.poll() ?: break
+            Audio.event(if (c[0] == LiveBoats.CUE_DOCK) Audio.EV_DOCK else Audio.EV_DEPART, 1f, c[1], c[2])
+        }
+    }
     private var planArmed = true; private var trimCat = -1; private var airT = 0f; private var lastEngine = true; private var lastLever = 0f
     private fun watchEvents(dt: Float) {
         val kmh = boat.speedKmh()
@@ -257,9 +274,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
                 2 -> Events.post("URTO CONTRO IL PONTILE", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 else -> Events.post("URTO", Events.WARN, "contro la fondamenta · ${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
             }
+            Audio.event(Audio.EV_IMPACT, boat.impact)
             boat.impact = 0f
         }
         if (boat.scrape > 0.25f) Events.post("STRISCIATA", Events.WARN, "sul marmo della fondamenta", cooldownMs = 2500)
+        scrapeSnd -= dt
+        if (boat.scrape > 0.1f && scrapeSnd <= 0f) { Audio.event(Audio.EV_SCRAPE, 1f); scrapeSnd = 0.45f }
         if (boat.airborne) airT += dt else { if (airT > 0.45f) Events.post("SALTO", Events.GOOD, String.format("%.1f s in aria", airT).replace('.', ',')); airT = 0f }
         if (kmh > 138f) Events.post("VELOCITÀ MASSIMA", Events.GOOD, "140 km/h", cooldownMs = 20000)
         if (Controls.engineOn != lastEngine) { Events.post(if (Controls.engineOn) "MOTORE ACCESO" else "MOTORE SPENTO", Events.INFO, key = "engine", cooldownMs = 300); lastEngine = Controls.engineOn }
@@ -367,12 +387,14 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             tripTime += sdt
             val ox = boat.x; val oy = boat.y
             for (k in 0 until 3) boat.update(sdt / 3, if (Controls.engineOn) thr else 0f, st, world)
+            if (boat.splash > 1.5f) Audio.event(Audio.EV_SPLASH, boat.splash)
             distance += hypot(boat.x - ox, boat.y - oy)
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
             wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
         live.update(dt)
         if (!paused) watchEvents(sdt)
+        feedAudio(paused)
         GameState.x = boat.x; GameState.y = boat.y; GameState.heading = boat.heading; GameState.speedKmh = boat.speedKmh()
         GameState.distanceM = distance.toFloat()
         topKmh = max(topKmh, boat.speedKmh()); GameState.topSpeedKmh = topKmh; GameState.tripSeconds = tripTime

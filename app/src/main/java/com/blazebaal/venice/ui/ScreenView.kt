@@ -399,7 +399,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         Settings.volMaster = gui.slider("vm", row(x, y, w, "Generale", "${(Settings.volMaster * 100).roundToInt()}%"), Settings.volMaster, 0f, 1f, 0.05f); y += 56 * dp
         Settings.volEngine = gui.slider("ve", row(x, y, w, "Motore", "${(Settings.volEngine * 100).roundToInt()}%"), Settings.volEngine, 0f, 1f, 0.05f); y += 56 * dp
         Settings.volAmbience = gui.slider("va", row(x, y, w, "Ambiente", "Acqua, gabbiani, campane · ${(Settings.volAmbience * 100).roundToInt()}%"), Settings.volAmbience, 0f, 1f, 0.05f); y += 56 * dp
-        ink.label("L'audio arriva con un prossimo aggiornamento: i livelli vengono già salvati.", x, y + 22 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
+        ink.label("Tutti i suoni sono generati in tempo reale: motore, acqua, vaporetti, gabbiani, campane, pioggia.", x, y + 22 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
         return y + 34 * dp
     }
 

@@ -286,7 +286,7 @@ class LiveBoats(private val world: WorldMap) {
                 if (idx.isNotEmpty() && idx.last() == bi) continue
                 idx.add(bi); arr.add(s.arr); dep.add(max(s.dep, s.arr + 20))
             }
-            if (idx.size >= 2) out.add(SimRoute(r.line, r.head, idx.toIntArray(), arr.toIntArray(), dep.toIntArray(), r.starts))
+            if (idx.size >= 2) out.add(SimRoute(r.line, r.headsign, idx.toIntArray(), arr.toIntArray(), dep.toIntArray(), r.starts))
         }
         if (out.isNotEmpty()) return out
         // never online: lines 1 and 2 down the Grand Canal, both ways, every 12 / 15 minutes from 6:00 to midnight
