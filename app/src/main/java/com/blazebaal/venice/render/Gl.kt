@@ -192,6 +192,8 @@ class Target(val w: Int, val h: Int, hdr: Boolean, depth: Boolean) {
         }
         if (hdr) { alloc(GL_RGBA16F, GL_HALF_FLOAT); isHdr = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE }
         if (!isHdr) alloc(GL_RGBA8, GL_UNSIGNED_BYTE)
+        // never leave fresh video memory uninitialised (it can hold NaNs that leak into later passes)
+        glViewport(0, 0, w, h); glClearColor(0f, 0f, 0f, 1f); glClear(GL_COLOR_BUFFER_BIT or (if (depth) GL_DEPTH_BUFFER_BIT else 0))
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
     }
     fun bind() { glBindFramebuffer(GL_FRAMEBUFFER, fbo); glViewport(0, 0, w, h) }

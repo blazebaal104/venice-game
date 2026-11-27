@@ -50,6 +50,8 @@ class LiveBoats(private val world: WorldMap) {
         // where ACTV says it is along the leg (live) / should be (timetable): sFix at fixT, moving at vEst
         var sFix = 0f; var fixT = 0f; var vEst = 0f; var hasFix = false
         var simGoal = -1f
+        // schedule following: the boat's "effective timetable time" (seconds since midnight) and how late it runs
+        var tEff = Float.NaN; var delay = 0f; var delayKnown = false; var fixTime = 0L; var matricola = ""
         // engine
         var cmd = 0f; var rpm = 0f; var rpmRise = 0f
         var seen = 0L; var fresh = true; var sim = false
@@ -92,16 +94,19 @@ class LiveBoats(private val world: WorldMap) {
     fun update(dt: Float, camX: Float, camY: Float) {
         time += dt
         if (!blockersSet && Obstacles.stops.isNotEmpty()) { blockersSet = true; val st = Obstacles.stops; worker.execute { nav.setBlockers(st) } }
-        val live = Vaporetti.isLive()
-        if (live) {
-            if (Vaporetti.updatedAt != lastFeed) { lastFeed = Vaporetti.updatedAt; applyFeed() }
-            boats.values.removeAll { it.sim }
-        } else {
-            boats.values.removeAll { !it.sim }
-            simClock -= dt
-            if (!Vaporetti.enabled) boats.clear()
-            else if (simClock <= 0f) { simClock = 0.5f; simulate() }
+        // every boat is a trip of today's timetable; ACTV's live positions say which boat is which and how late
+        // it runs (see schedule()). Its effective timetable time only ever moves forward: a late boat waits at the
+        // pontoon or runs a little faster, it never turns round because of one odd report.
+        boats.values.removeAll { !it.sim }
+        val now = secsNow()
+        for (b in boats.values) {
+            if (b.tEff.isNaN()) continue
+            val target = now - b.delay
+            b.tEff += dt * (1f + (target - b.tEff) / 25f).coerceIn(0f, 2f)
         }
+        simClock -= dt
+        if (!Vaporetti.enabled) boats.clear()
+        else if (simClock <= 0f) { simClock = 0.5f; if (Vaporetti.today.isNotEmpty()) schedule() else simulate() }
         while (true) {
             val r = results.poll() ?: break
             val b = boats[r.id] ?: continue
@@ -418,6 +423,123 @@ class LiveBoats(private val world: WorldMap) {
     private class SimRoute(val line: String, val head: String, val berth: IntArray, val arr: IntArray, val dep: IntArray, val starts: IntArray)
     private var simRoutes: List<SimRoute>? = null; private var simFrom: Any? = null
 
+    private fun secsNow(): Float {
+        val c = Calendar.getInstance()
+        return c.get(Calendar.HOUR_OF_DAY) * 3600 + c.get(Calendar.MINUTE) * 60 + c.get(Calendar.SECOND) + c.get(Calendar.MILLISECOND) / 1000f
+    }
+
+    /** a timetable trip reduced to the pontoons that exist on the map (index into berths), absolute times */
+    private class Run(val s: Vaporetti.Sched, val berth: IntArray, val arr: IntArray, val dep: IntArray) {
+        val sim = SimRoute(s.line, s.headsign, berth, IntArray(arr.size) { arr[it] - dep[0] }, IntArray(dep.size) { dep[it] - dep[0] }, intArrayOf(dep[0]))
+    }
+    private var runs: List<Run> = emptyList(); private var runsFrom: Any? = null
+    private var runById: Map<String, Run> = emptyMap()
+    private var matchedAt = -1L
+    private val liveOf = HashMap<String, Vaporetti.Vessel>()
+
+    private fun buildRuns() {
+        val out = ArrayList<Run>()
+        for (s in Vaporetti.today) {
+            val bi = ArrayList<Int>(); val a = ArrayList<Int>(); val d = ArrayList<Int>()
+            for ((i, st) in s.stops.withIndex()) {
+                val be = berthAt(st.lat, st.lon) ?: continue
+                val idx = berths.indexOf(be)
+                if (bi.isNotEmpty() && bi.last() == idx) continue
+                bi.add(idx); a.add(s.arr[i]); d.add(max(s.dep[i], s.arr[i] + 20))
+            }
+            if (bi.size >= 2) out.add(Run(s, bi.toIntArray(), a.toIntArray(), d.toIntArray()))
+        }
+        runs = out; runById = out.associateBy { it.s.id }
+    }
+
+    /** where the timetable puts a run at time t (straight between pontoons: good enough to compare with a GPS fix) */
+    private fun schedPos(r: Run, t: Float, out: FloatArray) {
+        val n = r.berth.size
+        var i = 0
+        while (i < n - 1 && t >= r.arr[i + 1]) i++
+        val a = berths[r.berth[i]]
+        if (t <= r.dep[i] || i == n - 1) { out[0] = a.x; out[1] = a.y; return }
+        val b = berths[r.berth[i + 1]]
+        val f = ((t - r.dep[i]) / max(1, r.arr[i + 1] - r.dep[i]).toFloat()).coerceIn(0f, 1f)
+        out[0] = a.x + (b.x - a.x) * f; out[1] = a.y + (b.y - a.y) * f
+    }
+
+    /** the timetable time between t0 and t1 whose position best matches (x, y), preferring the one closest to `near`;
+     *  NaN if nothing on the run comes within maxD */
+    private fun bestTime(r: Run, x: Float, y: Float, t0: Float, t1: Float, near: Float, maxD: Float): Float {
+        var best = Float.NaN; var bd = maxD; var t = t0
+        val p = tmp2
+        while (t <= t1) {
+            schedPos(r, t, p)
+            val d = hypot(p[0] - x, p[1] - y)
+            // ties (the dwell at a pontoon, where every second of the stop matches): the one nearest `near`
+            if (d < bd - 6f || (d < bd + 6f && !best.isNaN() && abs(t - near) < abs(best - near))) { bd = min(bd, d); best = t }
+            t += 10f
+        }
+        return best
+    }
+
+    private fun schedule() {
+        if (berths.isEmpty()) return
+        if (runsFrom !== Vaporetti.today) { buildRuns(); runsFrom = Vaporetti.today; boats.clear() }
+        val now = secsNow()
+        val live = Vaporetti.isLive() && Vaporetti.vessels.size >= 3
+        val lat0 = GameState.lat0; val lon0 = GameState.lon0
+        // ---- a new ACTV report: which run is each vessel, and how late is it
+        if (live && Vaporetti.updatedAt != matchedAt) {
+            matchedAt = Vaporetti.updatedAt
+            liveOf.clear()
+            val unknown = ArrayList<Vaporetti.Vessel>()
+            for (v in Vaporetti.vessels) {
+                val r = runById[v.tripId]
+                if (r != null && now >= r.dep[0] - 1800 && now <= r.arr.last() + 3600) liveOf[r.s.id] = v else unknown.add(v)
+            }
+            // vessels with no trip in the report: the timetable knows which boat should be there at this hour
+            for (v in unknown) {
+                val p = Places.project(v.lat, v.lon, lat0, lon0)
+                var best: Run? = null; var bd = 300f
+                for (r in runs) {
+                    if (liveOf.containsKey(r.s.id) || now < r.dep[0] - 600 || now > r.arr.last() + 1800) continue
+                    val t = bestTime(r, p[0], p[1], now - 900f, now + 300f, now, bd)
+                    if (!t.isNaN()) { schedPos(r, t, tmp2); val d = hypot(tmp2[0] - p[0], tmp2[1] - p[1]); if (d < bd) { bd = d; best = r } }
+                }
+                best?.let { liveOf[it.s.id] = v }
+            }
+        }
+        // ---- the boats: runs under way now (when live, only the ones ACTV reports)
+        val alive = HashSet<String>()
+        for (r in runs) {
+            val v = if (live) liveOf[r.s.id] else null
+            val id = "t:" + r.s.id
+            val existing = boats[id]
+            // a boat missing from one report keeps going on its timetable for a while (reports drop boats now and then)
+            if (live && v == null && (existing == null || System.currentTimeMillis() - existing.seen > 90_000)) continue
+            val tGuess = existing?.tEff ?: (now - (existing?.delay ?: 0f))
+            if (tGuess < r.dep[0] - 60 || tGuess > r.arr.last() + 120) continue
+            alive.add(id)
+            val b = existing ?: Boat(id).also { it.sim = true; it.kind = kindFor(r.s.line); it.line = r.s.line; it.head = r.s.headsign; boats[id] = it }
+            if (v != null) {
+                b.matricola = v.id; b.seen = System.currentTimeMillis()
+                if (v.time != b.fixTime) {
+                    b.fixTime = v.time
+                    val p = Places.project(v.lat, v.lon, lat0, lon0)
+                    val fixAge = ((System.currentTimeMillis() - v.time) / 1000f).coerceIn(0f, 120f)
+                    // never look back more than 2 minutes from where the boat already is: no U-turns on one odd fix
+                    val from = if (b.tEff.isNaN()) now - 1800f else b.tEff - 120f
+                    val t = bestTime(r, p[0], p[1], from, now + 600f, if (b.tEff.isNaN()) now else b.tEff, 220f)
+                    if (!t.isNaN()) {
+                        val d = now - (t + fixAge)
+                        b.delay = if (!b.delayKnown) d else b.delay * 0.4f + d * 0.6f
+                        b.delayKnown = true
+                    }
+                }
+            }
+            if (b.tEff.isNaN()) b.tEff = now - b.delay
+            follow(b, r.sim, b.tEff - r.dep[0])
+        }
+        boats.values.removeAll { it.sim && it.id.startsWith("t:") && it.id !in alive }
+    }
+
     private fun simulate() {
         if (berths.isEmpty()) return
         val src = Vaporetti.routes
@@ -710,7 +832,7 @@ class LiveBoats(private val world: WorldMap) {
     /** after a pause: every boat is placed again from the latest ACTV report (or the timetable), as a real
      *  boat would have moved on meanwhile; nothing is extrapolated from the moment the game froze */
     fun resync() {
-        for (b in boats.values) { b.fresh = true; b.leg = null; b.planning = false; b.reqId++; b.hasFix = false; b.simStop = -1 }
+        for (b in boats.values) { b.fresh = true; b.leg = null; b.planning = false; b.reqId++; b.hasFix = false; b.simStop = -1; b.tEff = Float.NaN }
         lastFeed = -1L; simClock = 0f
         smokeN = 0
         for (b in boats.values) b.trailCount = 0

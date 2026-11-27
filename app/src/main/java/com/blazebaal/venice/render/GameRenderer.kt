@@ -458,7 +458,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND)
         ba.bind(); copyP.use(); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, frzTex); copyP.i("uTex", 0); copyP.vec3("uTint", 1f, 1f, 1f); skyTri?.draw()
         blurP.use(); blurP.i("uTex", 0)
-        for (r in floatArrayOf(1.2f, 2.4f, 4f)) {
+        for (r in floatArrayOf(1.2f, 2.4f, 4f, 6.5f, 9f)) {
             bb.bind(); glBindTexture(GL_TEXTURE_2D, ba.tex); glUniform2f(blurP.loc("uDir"), r / ba.w, 0f); skyTri?.draw()
             ba.bind(); glBindTexture(GL_TEXTURE_2D, bb.tex); glUniform2f(blurP.loc("uDir"), 0f, r / ba.h); skyTri?.draw()
         }

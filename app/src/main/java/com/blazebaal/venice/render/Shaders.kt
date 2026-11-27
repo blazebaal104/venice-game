@@ -1055,7 +1055,8 @@ void main() {
         float amt = uSharpen * (1.0 - smoothstep(0.15, 0.6, range));     // less on hard edges (no halos)
         col = max(col + (col - avg) * amt * 1.6, vec3(0.0));
     }
-    col += texture(uBloom, vUv).rgb * 0.35 * uBloomK;
+    // a branch, not a multiply: with bloom off the bloom buffer may hold garbage, and NaN * 0 is still NaN
+    if (uBloomK > 0.0) col += texture(uBloom, vUv).rgb * 0.35 * uBloomK;
     col = aces(col * uExposure);
     col = mix(vec3(luma(col)), col, 1.08);
     col *= vec3(1.02, 1.0, 0.97);

@@ -67,7 +67,7 @@ class MainActivity : Activity(), GameActions {
         })
         val root = FrameLayout(this)
         root.addView(glView)
-        root.addView(HudView(this))
+        val hud = HudView(this); root.addView(hud)
         screens = ScreenView(this, this)
         root.addView(screens)
         setContentView(root)
@@ -75,10 +75,12 @@ class MainActivity : Activity(), GameActions {
         // while a page is open and the renderer has frozen on its blurred frame, stop the GL loop entirely (no GPU,
         // no CPU in the background); restart it the moment the page closes
         val h = android.os.Handler(mainLooper)
+        var lastOverlay = false
         h.post(object : Runnable {
             override fun run() {
                 val overlay = Controls.screen == Screen.PAUSE || Controls.screen == Screen.SETTINGS || Controls.screen == Screen.CREDITS || Controls.screen == Screen.MAP
                 val want = if (overlay && GameState.frozen) GLSurfaceView.RENDERMODE_WHEN_DIRTY else GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                if (overlay != lastOverlay) { lastOverlay = overlay; hud.invalidate() }      // blur / un-blur the HUD
                 if (glView.renderMode != want) glView.renderMode = want
                 h.postDelayed(this, 50)
             }

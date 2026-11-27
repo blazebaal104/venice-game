@@ -180,8 +180,18 @@ class HudView(ctx: Context) : View(ctx) {
     }
 
     // ---------------------------------------------------------------- drawing
+    private var hudBlurred = false
     override fun onDraw(canvas: Canvas) {
         if (Controls.screen == Screen.MENU) return
+        // a page is open over the game: the HUD is blurred with everything else (dimmed too), not drawn sharp on top
+        val overlay = Controls.screen != Screen.NONE
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            if (overlay != hudBlurred) {
+                hudBlurred = overlay
+                setRenderEffect(if (overlay) android.graphics.RenderEffect.createBlurEffect(22 * s, 22 * s, android.graphics.Shader.TileMode.CLAMP) else null)
+                alpha = if (overlay) 0.55f else 1f
+            }
+        } else if (overlay) return
         c = canvas; ink.c = canvas; ink.dp = s
         drawSpeedStreaks()
         drawSpeedo()
