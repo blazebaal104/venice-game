@@ -514,6 +514,10 @@ void main() {
         float e = 1.0 / float(textureSize(uWake, 0).x); float cellM = uWakeO.z * e;
         vec2 gr = vec2(textureLod(uWake, wuv + vec2(e, 0.0), 0.0).r - textureLod(uWake, wuv - vec2(e, 0.0), 0.0).r,
                        textureLod(uWake, wuv + vec2(0.0, e), 0.0).r - textureLod(uWake, wuv - vec2(0.0, e), 0.0).r) / (2.0 * cellM);
+        // a bad value from the simulation must never move the mesh (NaN/inf would throw it up into walls)
+        if (isnan(wk) || isinf(wk)) wk = 0.0;
+        if (any(isnan(gr)) || any(isinf(gr))) gr = vec2(0.0);
+        wk = clamp(wk, -0.8, 0.8);
         w.xy -= clamp(gr, -0.4, 0.4) * 0.5;        // choppy: crests pinch, troughs widen
     }
     w.z = waveH(w.xy, uTime, uWaveAmp) * vFade + wk;
@@ -545,6 +549,9 @@ void main() {
         float hN = texture(uWake, wuv + vec2(0.0, e)).r, hS = texture(uWake, wuv - vec2(0.0, e)).r;
         float border = smoothstep(0.0, 0.06, min(min(wuv.x, wuv.y), min(1.0 - wuv.x, 1.0 - wuv.y)));
         vec2 wg = vec2(hE - hW, hN - hS) / (2.0 * cellM) * border;
+        if (any(isnan(wt)) || any(isinf(wt))) wt = vec4(0.0);
+        if (isnan(hE + hW + hN + hS) || isinf(hE + hW + hN + hS)) { hE = 0.0; hW = 0.0; hN = 0.0; hS = 0.0; }
+        hE = clamp(hE, -0.8, 0.8); hW = clamp(hW, -0.8, 0.8); hN = clamp(hN, -0.8, 0.8); hS = clamp(hS, -0.8, 0.8); wt.r = clamp(wt.r, -0.8, 0.8);
         float hc = wt.r; hcF = hc;
         float lapW = (hE + hW + hN + hS - 4.0 * hc) / (cellM * cellM);
         wakeE = clamp((abs(hc) * 2.5 + length(wg) * 3.0 + clamp(-lapW * 8.0, 0.0, 1.0)) * border, 0.0, 1.5);   // capillary chop on crests
@@ -658,7 +665,8 @@ float occH(vec4 B, vec4 Bb, vec2 p, vec2 hull) {
     if (lx < -hl) {
         // behind the transom: the outboard throws water up into a mound, then it falls into a hollow
         float bk = -hl - lx;
-        float latM = max(0.0, 1.0 - pow(ly / (hb * 0.45), 2.0)), latH = max(0.0, 1.0 - pow(ly / (hb * 0.95), 2.0));
+        float qm = ly / (hb * 0.45), qh = ly / (hb * 0.95);
+        float latM = max(0.0, 1.0 - qm * qm), latH = max(0.0, 1.0 - qh * qh);
         if (latH <= 0.0 || bk > 6.5) return 0.0;
         float thr = abs(Bb.x), pl = Bb.y;
         float mound = (0.05 + 0.10 * pl) * thr * (bk < 2.0 ? sin(PI * bk / 2.0) : 0.0) * latM;
@@ -670,7 +678,8 @@ float occH(vec4 B, vec4 Bb, vec2 p, vec2 hull) {
     float outD = max(abs(lx) - hl, abs(ly) - beam);
     if (outD > 0.4) return 0.0;
     float aft = 1.0 - Bb.y * 0.6 * max(0.0, t);
-    float inside = max(0.0, 1.0 - pow(ly / (beam + 0.8), 2.0)) * (1.0 - t * t * 0.3);
+    float qi = ly / (beam + 0.8);
+    float inside = max(0.0, 1.0 - qi * qi) * (1.0 - t * t * 0.3);
     float soft = outD > 0.0 ? pow(1.0 - outD / 0.4, 2.0) : 1.0;
     return B.w * inside * aft * soft;
 }
@@ -718,7 +727,12 @@ void main() {
         if (dd < 1.0) { float w = sp.w * (1.0 - dd * dd); f += w; a = min(1.0, a + w * 0.5); }
     }
     if (solid) { v = 0.0; f = 0.0; a = 0.0; }
-    o = vec4(v, uc, min(f, 1.0), min(a, 1.0));
+    // never let a bad value live on: one NaN or runaway cell spreads over the whole grid in a second, and the water
+    // mesh displaced by it shoots up into black walls. Reset it, and keep heights physical (a wake is centimetres)
+    if (isnan(v) || isinf(v) || isnan(uc) || isinf(uc)) { v = 0.0; uc = 0.0; }
+    if (isnan(f) || isinf(f)) f = 0.0;
+    if (isnan(a) || isinf(a)) a = 0.0;
+    o = vec4(clamp(v, -1.0, 1.0), clamp(uc, -1.0, 1.0), clamp(f, 0.0, 1.0), clamp(a, 0.0, 1.0));
 }
 """
 

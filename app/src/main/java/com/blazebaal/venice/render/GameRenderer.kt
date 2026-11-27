@@ -743,7 +743,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ba.tex); compP.i("uBloom", 1)
         glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", (if (sc.isHdr) 0.85f else 1.45f) * (1f + flash * 1.6f))
         // sharpen more when the internal resolution is lower
-        compP.f("uSharpen", Settings.sharpen * 0.5f * (1f + (1f - scale) * 1.5f));      // gentler: sharpening amplified shimmer compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
+        compP.f("uSharpen", Settings.sharpen * 0.5f * (1f + (1f - scale) * 1.5f))       // gentler: sharpening amplified shimmer
+        compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
         skyTri?.draw()
         glEnable(GL_DEPTH_TEST)
     }
