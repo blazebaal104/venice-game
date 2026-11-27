@@ -60,6 +60,11 @@ object Controls {
 object GameState {
     /** the previous session's crash, shown once on the menu (empty: none) */
     @Volatile var lastCrash = ""
+    // boot: the loading screen shows these until everything is ready
+    @Volatile var bootProgress = 0f
+    @Volatile var bootStage = ""
+    @Volatile var bootError = ""
+    @Volatile var booted = false
     @Volatile var x = 0f
     @Volatile var y = 0f
     @Volatile var heading = 0f

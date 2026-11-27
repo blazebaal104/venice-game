@@ -78,55 +78,98 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private var drawDist = 640f
     private var tripTime = 0f; private var topKmh = 0f
 
+    // ================================================================ boot: one step per frame, with progress
+    // Everything is loaded in small steps spread over frames (the loading screen animates meanwhile and memory never
+    // peaks with several big things decoded at once). Effects that fail to build are switched off, never fatal.
+    private var bootStep = 0
+    private var mapBytes: ByteArray? = null
+    private val boot: List<Pair<String, () -> Unit>> = listOf(
+        "Leggo la mappa di Venezia" to {
+            val bytes = ctx.assets.open("venice.map").use { it.readBytes() }
+            world = WorldMap(MapData(java.io.ByteArrayInputStream(bytes)))
+            val map = world.map
+            GameState.minX = map.minX; GameState.minY = map.minY; GameState.lat0 = map.lat0; GameState.lon0 = map.lon0
+            mapBytes = bytes
+        },
+        "Preparo la cache dei quartieri" to {
+            // meshed tiles are cached on the phone; the key changes with the map data and with every app build
+            val crc = java.util.zip.CRC32().apply { update(mapBytes!!) }.value; mapBytes = null
+            val build = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).let { if (android.os.Build.VERSION.SDK_INT >= 28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong() } } catch (_: Exception) { 0L }
+            streamer = TileStreamer(world, Settings.renderDistance, TileCache(ctx.filesDir, "${java.lang.Long.toHexString(crc)}-$build-m$MESHER_VERSION"))
+        },
+        "Compilo gli shader della città" to {
+            generic = Program(Shaders.STD_VS, Shaders.GENERIC_FS, "generic")
+            facade = Program(Shaders.FACADE_VS, Shaders.FACADE_FS, "facade")
+            ground = Program(Shaders.GROUND_VS, Shaders.GROUND_FS, "ground")
+        },
+        "Compilo acqua e cielo" to {
+            water = Program(Shaders.WATER_VS, Shaders.WATER_FS, "water")
+            sky = Program(Shaders.SKY_VS, Shaders.SKY_FS, "sky")
+            depth = Program(Shaders.DEPTH_VS, Shaders.DEPTH_FS, "depth")
+        },
+        "Compilo luce ed effetti" to {
+            sprayP = Program(Shaders.SPRAY_VS, Shaders.SPRAY_FS, "spray")
+            brightP = Program(Shaders.POST_VS, Shaders.BRIGHT_FS, "bright")
+            blurP = Program(Shaders.POST_VS, Shaders.BLUR_FS, "blur")
+            compP = Program(Shaders.POST_VS, Shaders.COMPOSITE_FS, "composite")
+            dimP = Program(Shaders.POST_VS, Shaders.DIM_FS, "dim")
+            smokeP = try { Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke") } catch (e: Throwable) { android.util.Log.e("Venice", "smoke off", e); null }
+            trailP = try { Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail") } catch (e: Throwable) { android.util.Log.e("Venice", "trails off", e); null }
+        },
+        "Carico pietra, intonaco e legno" to { texArr = TexArrays.load(ctx, L.COUNT) },
+        "Preparo ombre e acqua" to {
+            cityShadow = ShadowMap(2048); boatShadow = ShadowMap(1024)
+            groundQuad = Mesh(floatArrayOf(0f, 0f, 0f, 256f, 0f, 0f, 256f, 256f, 0f, 0f, 0f, 0f, 256f, 256f, 0f, 0f, 256f, 0f), 3, intArrayOf(3))
+            skyTri = Mesh(floatArrayOf(-1f, -1f, 3f, -1f, -1f, 3f), 2, intArrayOf(2))
+            // fine grid around the camera so the wake's mound, hollow and V crests are real geometry, coarser rings outside
+            waterNear = Mesh(waterGrid(56f, 0.5f, 0f), 3, intArrayOf(3))
+            waterMid = Mesh(waterGrid(160f, 2f, 56f), 3, intArrayOf(3))
+            waterFar = Mesh(waterGrid(1000f, 40f, 160f), 3, intArrayOf(3))
+            sprayMesh = InstMesh(8, intArrayOf(3, 3, 2), Effects.MAX_P)
+            wake = WakeGpu(skyTri!!)
+            waterN = WaterNormals.create()
+            foamT = loadData("water/foam.png")
+        },
+        "Varo la tua barca" to { boatMesh = loadMesh("boat.mesh") },
+        "San Marco, Rialto e i monumenti" to { loadLandmarks() },
+        "I ponti" to { loadBridges() },
+        "Gli imbarcaderi ACTV" to { loadStops() },
+        "La flotta ACTV" to {
+            live = LiveBoats(world); live.setStops(stopList)
+            for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) { fleetMeshes[i] = loadMesh("live/$n.mesh"); fleetLod[i] = loadMesh("live/${n}_lod.mesh") }
+            wake.fleet = live
+            smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 9000 * 5)
+        },
+        "Metto in acqua" to {
+            boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
+            Obstacles.stops = stopBoxes
+            findWater()
+            camX = boat.x - 9f; camY = boat.y; camZ = 3.2f
+        },
+    )
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        val bytes = ctx.assets.open("venice.map").use { it.readBytes() }
-        val map = MapData(java.io.ByteArrayInputStream(bytes))
-        world = WorldMap(map)
-        GameState.minX = map.minX; GameState.minY = map.minY; GameState.lat0 = map.lat0; GameState.lon0 = map.lon0
-        // meshed tiles are cached on the phone; the key changes with the map data and with every app build
-        val crc = java.util.zip.CRC32().apply { update(bytes) }.value
-        val build = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).let { if (android.os.Build.VERSION.SDK_INT >= 28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong() } } catch (_: Exception) { 0L }
-        streamer = TileStreamer(world, Settings.renderDistance, TileCache(ctx.filesDir, "${java.lang.Long.toHexString(crc)}-$build-m$MESHER_VERSION"))
-        generic = Program(Shaders.STD_VS, Shaders.GENERIC_FS, "generic")
-        facade = Program(Shaders.FACADE_VS, Shaders.FACADE_FS, "facade")
-        ground = Program(Shaders.GROUND_VS, Shaders.GROUND_FS, "ground")
-        water = Program(Shaders.WATER_VS, Shaders.WATER_FS, "water")
-        sky = Program(Shaders.SKY_VS, Shaders.SKY_FS, "sky")
-        depth = Program(Shaders.DEPTH_VS, Shaders.DEPTH_FS, "depth")
-        sprayP = Program(Shaders.SPRAY_VS, Shaders.SPRAY_FS, "spray")
-        brightP = Program(Shaders.POST_VS, Shaders.BRIGHT_FS, "bright")
-        blurP = Program(Shaders.POST_VS, Shaders.BLUR_FS, "blur")
-        compP = Program(Shaders.POST_VS, Shaders.COMPOSITE_FS, "composite")
-        texArr = TexArrays.load(ctx, L.COUNT)
-        cityShadow = ShadowMap(2048); boatShadow = ShadowMap(1024)
-        groundQuad = Mesh(floatArrayOf(0f, 0f, 0f, 256f, 0f, 0f, 256f, 256f, 0f, 0f, 0f, 0f, 256f, 256f, 0f, 0f, 256f, 0f), 3, intArrayOf(3))
-        skyTri = Mesh(floatArrayOf(-1f, -1f, 3f, -1f, -1f, 3f), 2, intArrayOf(2))
-        dimP = Program(Shaders.POST_VS, Shaders.DIM_FS, "dim")
-        // fine grid around the camera so the wake's mound, hollow and V crests are real geometry, coarser rings outside
-        waterNear = Mesh(waterGrid(56f, 0.5f, 0f), 3, intArrayOf(3))
-        waterMid = Mesh(waterGrid(160f, 2f, 56f), 3, intArrayOf(3))
-        waterFar = Mesh(waterGrid(1000f, 40f, 160f), 3, intArrayOf(3))
-        sprayMesh = InstMesh(8, intArrayOf(3, 3, 2), Effects.MAX_P)
-        wake = WakeGpu(skyTri!!)
-        waterN = WaterNormals.create()
-        foamT = loadData("water/foam.png")
-        boatMesh = loadMesh("boat.mesh")
-        loadLandmarks()
-        loadBridges()
-        loadStops()
-        live = LiveBoats(world); live.setStops(stopList)
-        for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) { fleetMeshes[i] = loadMesh("live/$n.mesh"); fleetLod[i] = loadMesh("live/${n}_lod.mesh") }
-        wake.fleet = live
-        smokeP = Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke"); trailP = Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail")
-        smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 9000 * 5)
-        boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
-        Obstacles.stops = stopBoxes
-        findWater()
-        camX = boat.x - 9f; camY = boat.y; camZ = 3.2f
+        // a new GL context (first start, or the old one was lost): everything is rebuilt, step by step
+        ready = false; bootStep = 0
+        GameState.bootProgress = 0f; GameState.bootStage = boot[0].first; GameState.booted = false
         glEnable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE)
-        lastNs = System.nanoTime()
-        scale = Settings.maxScale()
-        ready = true
+    }
+
+    /** runs one boot step; true when everything is loaded */
+    private fun bootFrame(): Boolean {
+        if (bootStep < boot.size) {
+            val (label, step) = boot[bootStep]
+            GameState.bootStage = label
+            step()
+            bootStep++
+            GameState.bootProgress = bootStep.toFloat() / boot.size
+            if (bootStep < boot.size) GameState.bootStage = boot[bootStep].first
+            if (bootStep == boot.size) {
+                lastNs = System.nanoTime(); scale = Settings.maxScale()
+                ready = true
+            }
+        }
+        return ready
     }
 
     companion object {
@@ -154,7 +197,13 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         t[0]
     } catch (e: Exception) { 0 }
 
-    private fun loadAtlas(asset: String): Int = try {
+    private fun loadAtlas(asset: String): Int {
+        // pre-compressed copy first (8x less GPU memory, no Bitmap decode), the JPEG/PNG only as a fallback
+        if (asset.endsWith(".jpg")) Etc.load2D(ctx, asset.removeSuffix(".jpg") + ".etc").let { if (it != 0) return it }
+        return loadAtlasBitmap(asset)
+    }
+
+    private fun loadAtlasBitmap(asset: String): Int = try {
         val bmp = ctx.assets.open(asset).use { android.graphics.BitmapFactory.decodeStream(it)!! }
         val t = IntArray(1); glGenTextures(1, t, 0)
         glBindTexture(GL_TEXTURE_2D, t[0])
@@ -170,7 +219,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private lateinit var live: LiveBoats
     private val fleetMeshes = arrayOfNulls<Mesh>(4); private val fleetLod = arrayOfNulls<Mesh>(4)
     private val boatModel = FloatArray(16)
-    private lateinit var smokeP: Program; private lateinit var trailP: Program
+    private var smokeP: Program? = null; private var trailP: Program? = null
     private lateinit var smokeMesh: InstMesh; private lateinit var trailMesh: DynMesh
     private val smokeData = FloatArray(LiveBoats.MAX_SMOKE * 6); private val trailData = FloatArray(9000 * 5)
     private val stopBoxes = ArrayList<FloatArray>()
@@ -470,6 +519,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        if (!ready) {
+            // loading: the loading screen (ScreenView) covers this; one step per frame
+            glClearColor(0.05f, 0.03f, 0.08f, 1f); glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+            try { bootFrame() } catch (e: Throwable) { GameState.bootError = "${e.javaClass.simpleName}: ${e.message}"; throw e }
+            return
+        }
         val now = System.nanoTime()
         val rawDt = (now - lastNs) / 1e9f
         val dt = rawDt.coerceIn(0.001f, 0.05f)
@@ -715,7 +770,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (n == 0) return
         trailMesh.upload(trailData, n * 5)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
-        trailP.use(); common(trailP, vp, ident, -1000f, false); foam(trailP)
+        val tp = trailP ?: return
+        tp.use(); common(tp, vp, ident, -1000f, false); foam(tp)
         trailMesh.draw(GL_TRIANGLES)
         glDepthMask(true); glDisable(GL_BLEND)
     }
@@ -736,7 +792,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (n == 0) return
         smokeMesh.upload(smokeData, n)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
-        smokeP.use(); common(smokeP, vp, ident, -1000f, false); foam(smokeP)
+        val sp = smokeP ?: return
+        sp.use(); common(sp, vp, ident, -1000f, false); foam(sp)
         smokeMesh.draw()
         glDepthMask(true); glDisable(GL_BLEND)
     }

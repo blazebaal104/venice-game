@@ -47,14 +47,17 @@ class MenuScene(ctx: Context) {
             glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, false, 16, 0)
             glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, false, 16, 12)
             glBindVertexArray(0)
-            val bmp = ctx.assets.open("menu/ground.jpg").use { android.graphics.BitmapFactory.decodeStream(it)!! }
-            val t = IntArray(1); glGenTextures(1, t, 0); groundTex = t[0]
-            glBindTexture(GL_TEXTURE_2D, groundTex)
-            android.opengl.GLUtils.texImage2D(GL_TEXTURE_2D, 0, bmp, 0); bmp.recycle()
-            glGenerateMipmap(GL_TEXTURE_2D)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-            Aniso.apply(GL_TEXTURE_2D, 8f)
+            groundTex = Etc.load2D(ctx, "menu/ground.etc", aniso = 8f)
+            if (groundTex == 0) {
+                val bmp = ctx.assets.open("menu/ground.jpg").use { android.graphics.BitmapFactory.decodeStream(it)!! }
+                val t = IntArray(1); glGenTextures(1, t, 0); groundTex = t[0]
+                glBindTexture(GL_TEXTURE_2D, groundTex)
+                android.opengl.GLUtils.texImage2D(GL_TEXTURE_2D, 0, bmp, 0); bmp.recycle()
+                glGenerateMipmap(GL_TEXTURE_2D)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+                Aniso.apply(GL_TEXTURE_2D, 8f)
+            }
             good = true
         } catch (e: Exception) { android.util.Log.e("Venice", "menu scene", e) }
         ok = good

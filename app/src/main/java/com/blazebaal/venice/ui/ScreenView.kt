@@ -83,6 +83,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!GameState.booted) return true
         if (Controls.screen == Screen.NONE) return false
         if (Controls.screen == Screen.MAP) {
             scaleDet.onTouchEvent(e)
@@ -102,7 +103,27 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     }
 
     // ---------------------------------------------------------------- drawing
+    private val loadingScreen by lazy { LoadingScreen(dp) }
+    private var loadLastNs = 0L; private var loadFade = 0f; private var loadShown = 0f
+
     override fun onDraw(canvas: Canvas) {
+        if (!GameState.booted) {
+            // the animated loading screen over everything; the menu fades in underneath once Venice is ready
+            val now = System.nanoTime(); val dt = if (loadLastNs == 0L) 0.016f else ((now - loadLastNs) / 1e9f).coerceIn(0f, 0.1f); loadLastNs = now
+            loadShown += dt
+            c = canvas; ink.c = canvas
+            val glReady = GameState.bootProgress >= 1f
+            val tiles = if (glReady) (GameState.tilesLoaded.toFloat() / max(1, min(4, GameState.tilesWanted))).coerceIn(0f, 1f) else 0f
+            val p = 0.85f * GameState.bootProgress + 0.15f * tiles
+            if (glReady && !GameState.loading && loadShown > 2.2f) loadFade += dt
+            val a = (1f - loadFade / 0.8f).coerceIn(0f, 1f)
+            if (glReady && loadFade > 0f) { drawMenu(); gui.endFrame() }
+            val stage = if (glReady) (if (GameState.loading) "Costruisco i quartieri intorno a te" else "Venezia è pronta") else GameState.bootStage
+            loadingScreen.draw(canvas, W, H, dt, p, stage, a, GameState.bootError)
+            if (a <= 0f) GameState.booted = true
+            postInvalidateOnAnimation()
+            return
+        }
         val sc = Controls.screen
         if (sc != lastScreen) {
             // pages opened straight from the HUD (minimap tap, pause button) return to the game

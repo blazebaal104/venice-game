@@ -804,7 +804,7 @@ void main() {
 }
 """
     val SMOKE_FS = """#version 300 es
-precision mediump float;
+precision highp float;
 $COMMON
 uniform sampler2D uFoamT;
 in vec3 vW; in vec2 vC; in float vA; in float vDark; in vec2 vT;
