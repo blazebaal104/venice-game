@@ -21,17 +21,23 @@ fun main(args: Array<String>) {
     val meshers = ThreadLocal.withInitial { CityMesher() }
     val tiles = AtomicInteger(); val raw = AtomicLong(); val packed = AtomicLong()
     val t0 = System.currentTimeMillis()
+    // the historic centre, the Giudecca and San Giorgio: where the game is played. Everything else is meshed on the
+    // phone the first time it's seen and kept in its cache (which now survives app updates)
+    val x0 = -2900f; val x1 = 2300f; val y0 = -1500f; val y1 = 1900f
     for (ty in 0 until map.tilesY) for (tx in 0 until map.tilesX) {
         if (!map.hasTile(tx, ty)) continue
+        val cx = map.minX + (tx + 0.5f) * 256f; val cy = map.minY + (ty + 0.5f) * 256f
+        if (cx < x0 || cx > x1 || cy < y0 || cy > y1) continue
         pool.execute {
             val t = world.tile(tx, ty) ?: return@execute
             val m = meshers.get().build(t)
             val arrays = arrayOf(m.facade, m.generic, m.detail, m.vegetation)
             val bytes = 4 * 6 + arrays.sumOf { it.size } * 4
             val buf = ByteBuffer.allocate(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            buf.putInt(0x47544331); buf.putInt(if (m.hasMarsh) 1 else 0)
+            buf.putInt(0x47544332); buf.putInt(if (m.hasMarsh) 1 else 0)          // "GTC2": byte-shuffled floats
             for (a in arrays) buf.putInt(a.size)
-            for (a in arrays) for (v in a) buf.putFloat(v)
+            // byte planes per array (all the low bytes, then the next...): floats of a mesh compress far better
+            for (a in arrays) for (plane in 0 until 4) for (v in a) buf.put(((java.lang.Float.floatToRawIntBits(v) ushr (plane * 8)) and 0xff).toByte())
             val d = Deflater(6); d.setInput(buf.array()); d.finish()
             val o = java.io.ByteArrayOutputStream(bytes / 3); val chunk = ByteArray(1 shl 16)
             while (!d.finished()) { val k = d.deflate(chunk); o.write(chunk, 0, k) }

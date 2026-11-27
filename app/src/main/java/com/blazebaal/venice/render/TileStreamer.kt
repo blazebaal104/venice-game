@@ -51,7 +51,19 @@ class TileCache(root: File, key: String, private val assets: android.content.res
         return try {
             val bytes = java.util.zip.InflaterInputStream(am.open("tiles/${tx}_$ty.gtc"), java.util.zip.Inflater(), 1 shl 16).use { it.readBytes() }
             val buf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.LITTLE_ENDIAN)
-            buf.put(bytes); buf.flip()
+            val head = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            if (head.getInt(0) == MAGIC2) {
+                // un-shuffle the byte planes back into little-endian floats
+                buf.put(bytes, 0, 24)
+                var src = 24
+                for (i in 0 until 4) {
+                    val n = head.getInt(8 + i * 4)
+                    val tmp = ByteArray(n * 4)
+                    for (k in 0 until n) { tmp[k * 4] = bytes[src + k]; tmp[k * 4 + 1] = bytes[src + n + k]; tmp[k * 4 + 2] = bytes[src + 2 * n + k]; tmp[k * 4 + 3] = bytes[src + 3 * n + k] }
+                    buf.put(tmp); src += n * 4
+                }
+                buf.flip(); buf.putInt(0, MAGIC)
+            } else { buf.put(bytes); buf.flip() }
             parse(buf, ByteOrder.LITTLE_ENDIAN)
         } catch (e: java.io.IOException) { null }
     }
@@ -122,7 +134,7 @@ class TileCache(root: File, key: String, private val assets: android.content.res
         return counted
     }
 
-    companion object { const val MAGIC = 0x47544331 }  // "GTC1"
+    companion object { const val MAGIC = 0x47544331; const val MAGIC2 = 0x47544332 }  // "GTC1", "GTC2" (shuffled)
 }
 
 class TileStreamer(private val world: WorldMap, var radius: Float = 640f, private val cache: TileCache? = null) {
