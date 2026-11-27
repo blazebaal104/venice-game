@@ -313,7 +313,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     // ---------------------------------------------------------------- what's happening, as HUD texts
-    private var scrapeSnd = 0f
+    private var scrapeSnd = 0f; private var vzMin = 0f; private var slapCd = 0f
     private fun feedAudio(paused: Boolean) {
         Audio.paused = paused
         Audio.master = Settings.volMaster; Audio.engineVol = Settings.volEngine; Audio.ambienceVol = Settings.volAmbience
@@ -322,6 +322,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // rising off a wave the prop comes up (load drops), slamming down it bites hard again
         Audio.propLoad = if (boat.airborne) 0f else (1f - ((boat.vz - 0.25f) * 0.7f).coerceIn(0f, 0.85f)) * (if (boat.vz < -0.8f) 1f else 1f)
         Audio.nearLand = ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f)
+        Audio.waveAmp = boat.waveAmp
         val wx = (Settings.liveWeather && Weather.live) || Weather.override > 0
         Audio.rain = if (wx) Weather.rainIntensity() else 0f
         Audio.wind = if (wx) (hypot(Weather.windVec()[0], Weather.windVec()[1]) * 3.6f / 45f).coerceIn(0f, 1f) else 0.1f
@@ -329,7 +330,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         Audio.boats = LiveBoats.audio
         while (true) {
             val c = LiveBoats.cues.poll() ?: break
-            Audio.event(if (c[0] == LiveBoats.CUE_DOCK) Audio.EV_DOCK else Audio.EV_DEPART, 1f, c[1], c[2])
+            when (c[0]) {
+                LiveBoats.CUE_DOCK -> Audio.event(Audio.EV_DOCK, 1f, c[1], c[2])
+                LiveBoats.CUE_DEPART -> Audio.event(Audio.EV_DEPART, 1f, c[1], c[2])
+                LiveBoats.CUE_HORN -> Audio.event(Audio.EV_HORN, c[3], c[1], c[2], c[4])
+                LiveBoats.CUE_WAKE -> Audio.event(Audio.EV_WAKE, c[3])
+            }
         }
     }
     private var planArmed = true; private var trimCat = -1; private var airT = 0f; private var lastEngine = true; private var lastLever = 0f
@@ -358,12 +364,21 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
                 4 -> Events.post("URTO CONTRO UNA BRICOLA", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 else -> Events.post("URTO", Events.WARN, "contro la fondamenta · ${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
             }
-            Audio.event(Audio.EV_IMPACT, boat.impact)
+            Audio.event(Audio.EV_IMPACT, boat.impact, kind = boat.impactKind.toFloat())
             boat.impact = 0f
         }
         if (boat.scrape > 0.25f) Events.post("STRISCIATA", Events.WARN, "sul marmo della fondamenta", cooldownMs = 2500)
         scrapeSnd -= dt
         if (boat.scrape > 0.1f && scrapeSnd <= 0f) { Audio.event(Audio.EV_SCRAPE, 1f); scrapeSnd = 0.45f }
+        // the hull meeting a wave: at the bottom of each drop, a slap as loud as the drop was fast
+        slapCd -= dt
+        if (!boat.airborne) {
+            if (boat.vz < vzMin) vzMin = boat.vz
+            if (boat.vz > -0.02f && vzMin < -0.08f) {
+                if (slapCd <= 0f && abs(boat.surge) < 12f) { Audio.event(Audio.EV_SLAP, -vzMin); slapCd = 0.2f }
+                vzMin = 0f
+            }
+        } else vzMin = 0f
         if (boat.airborne) airT += dt else { if (airT > 0.45f) Events.post("SALTO", Events.GOOD, String.format("%.1f s in aria", airT).replace('.', ',')); airT = 0f }
         if (kmh > 138f) Events.post("VELOCITÀ MASSIMA", Events.GOOD, "140 km/h", cooldownMs = 20000)
         if (Controls.engineOn != lastEngine) { Events.post(if (Controls.engineOn) "MOTORE ACCESO" else "MOTORE SPENTO", Events.INFO, key = "engine", cooldownMs = 300); lastEngine = Controls.engineOn }
@@ -633,6 +648,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
             if (!Settings.simple) wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
+        LiveBoats.playerX = boat.x; LiveBoats.playerY = boat.y
         live.update(if (paused) 0f else dt, camX, camY)
         if (!paused) watchEvents(sdt)
         feedAudio(paused)

@@ -129,7 +129,7 @@ class MainActivity : Activity(), GameActions {
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) hideSystemUi() }
-    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start(); Vaporetti.start(this); Audio.start() }
+    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start(); Vaporetti.start(this); Audio.start(this) }
     override fun onPause() {
         super.onPause(); glView.onPause(); Settings.save(this); Weather.stop(); Vaporetti.stop(); Audio.stop()
         // leaving the app mid-run opens the pause menu, so you don't come back to a boat already moving

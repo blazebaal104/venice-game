@@ -58,6 +58,8 @@ class LiveBoats(private val world: WorldMap) {
         var simStop = -1
         var smokeAcc = 0f
         var clearT = -1f; var clearAhead = true; var wakePick = false
+        // horn: cooldowns, the smoothed rate of turn; wake reaching the player
+        var hornCd = 0f; var hornTurnCd = 0f; var turnRate = 0f; var lastH = Float.NaN; var wakeCd = 0f
         val trail = FloatArray(TRAIL_N * 4); var trailHead = 0; var trailCount = 0; var trailX = 0f; var trailY = 0f
         val px get() = x + offX
         val py get() = y + offY
@@ -119,7 +121,7 @@ class LiveBoats(private val world: WorldMap) {
             setLeg(b, r.path)
         }
         list.clear(); list.addAll(boats.values)
-        for (b in list) { behave(b, dt); engine(b, dt); trail(b, camX, camY) }
+        for (b in list) { behave(b, dt); engine(b, dt); trail(b, camX, camY); horns(b, dt) }
         separate(dt)
         smoke(dt, camX, camY)
         publishClock -= dt
@@ -824,7 +826,70 @@ class LiveBoats(private val world: WorldMap) {
         Obstacles.boats = list.map { floatArrayOf(it.px, it.py, it.h, it.kind.len / 2f, it.kind.beam / 2f) }
         markers = list.map { Marker(it.px, it.py, it.h, it.line, it.head) }
         // x, y, speed, kind, docked, rpm
-        audio = list.map { floatArrayOf(it.px, it.py, it.speed, it.kind.ordinal.toFloat(), if (it.docked) 1f else 0f, it.rpm) }
+        audio = list.map { floatArrayOf(it.px, it.py, it.speed, it.kind.ordinal.toFloat(), if (it.docked) 1f else 0f, it.rpm, it.h, (it.id.hashCode() and 0xFFFFFF).toFloat()) }
+        wakeHits()
+    }
+
+    /** Vaporetti use the horn like the real ones: one long blast swinging round a bend or a blind corner (once per
+     *  turn), and when you sit in their way they don't stop - two warnings, then an angry burst, again and again
+     *  while you stay there. */
+    private fun horns(b: Boat, dt: Float) {
+        if (dt <= 0f) return
+        if (b.lastH.isNaN()) b.lastH = b.h
+        var dh = b.h - b.lastH
+        while (dh > PI.toFloat()) dh -= 2f * PI.toFloat()
+        while (dh < -PI.toFloat()) dh += 2f * PI.toFloat()
+        b.lastH = b.h
+        b.turnRate += ((dh / dt).coerceIn(-1f, 1f) - b.turnRate) * min(1f, dt * 1.5f)
+        b.hornCd -= dt; b.hornTurnCd -= dt
+        val px = playerX; val py = playerY
+        if (px.isNaN() || b.docked || b.speed < 1.2f || b.hornCd > 0f) return
+        val dx = px - b.px; val dy = py - b.py
+        val d2 = dx * dx + dy * dy
+        if (d2 > 350f * 350f) return
+        val c = cos(b.h); val s = sin(b.h)
+        val ahead = dx * c + dy * s; val side = -dx * s + dy * c
+        val half = b.kind.len * 0.5f
+        val reach = half + 12f + b.speed * 7f
+        if (ahead > half - 1f && ahead < reach && abs(side) < b.kind.beam * 0.5f + 3.5f + (ahead - half) * 0.06f) {
+            val close = 1f - ((ahead - half) / (reach - half)).coerceIn(0f, 1f)
+            cues.add(floatArrayOf(CUE_HORN, b.px, b.py, if (close > 0.55f) 3f else 2f, b.kind.ordinal.toFloat()))
+            b.hornCd = if (close > 0.55f) 3.8f else 5.5f
+            return
+        }
+        if (abs(b.turnRate) > 0.09f && b.hornTurnCd <= 0f && d2 < 300f * 300f) {
+            cues.add(floatArrayOf(CUE_HORN, b.px, b.py, 1f, b.kind.ordinal.toFloat()))
+            b.hornTurnCd = 40f + rnd() * 30f; b.hornCd = 4f
+        }
+    }
+
+    /** a boat's wake reaching the player: the diverging crest (the edge of the foam trail, which widens with age)
+     *  passing under the hull - one cue per boat per crossing, stronger for big boats under power */
+    private fun wakeHits() {
+        val px = playerX; val py = playerY
+        if (px.isNaN()) return
+        for (b in list) {
+            b.wakeCd -= 0.05f
+            if (b.trailCount < 2 || b.wakeCd > 0f) continue
+            if (abs(b.px - px) > 160f || abs(b.py - py) > 160f) continue
+            var prevX = b.px - cos(b.h) * b.kind.len * 0.5f; var prevY = b.py - sin(b.h) * b.kind.len * 0.5f; var prevAge = 0f
+            for (k in 1..b.trailCount) {
+                val o = ((b.trailHead - k + TRAIL_N * 2) % TRAIL_N) * 4
+                val x = b.trail[o]; val y = b.trail[o + 1]; val age = time - b.trail[o + 2]; val str = b.trail[o + 3]
+                if (age > 30f) break
+                val ex = x - prevX; val ey = y - prevY; val l2 = ex * ex + ey * ey
+                val t = if (l2 > 1e-4f) (((px - prevX) * ex + (py - prevY) * ey) / l2).coerceIn(0f, 1f) else 0f
+                val a = prevAge + (age - prevAge) * t
+                val dist = hypot(px - (prevX + ex * t), py - (prevY + ey * t))
+                val crest = b.kind.beam * 0.35f + a * 0.35f
+                if (a > 1.5f && abs(dist - crest) < 1.6f) {
+                    val st = str * (1f - a / 30f) * (b.kind.len / 20f)
+                    if (st > 0.05f) { cues.add(floatArrayOf(CUE_WAKE, px, py, st, 0f)); b.wakeCd = 4f }
+                    break
+                }
+                prevX = x; prevY = y; prevAge = age
+            }
+        }
     }
 
     /** model matrix (translation * rotZ(heading) * rotY(squat)) written into out, no allocation */
@@ -865,13 +930,15 @@ class LiveBoats(private val world: WorldMap) {
 
     class Marker(val x: Float, val y: Float, val h: Float, val line: String, val head: String)
     companion object {
-        const val CUE_DEPART = 1f; const val CUE_DOCK = 2f
+        const val CUE_DEPART = 1f; const val CUE_DOCK = 2f; const val CUE_HORN = 3f; const val CUE_WAKE = 4f
+        /** where the player's boat is (set by the renderer): vaporetti honk at you, their wakes reach you */
+        @Volatile var playerX = Float.NaN; @Volatile var playerY = Float.NaN
         const val MAX_SMOKE = 260
         const val TRAIL_N = 32
         const val TRAIL_LIFE = 45f
         const val LEG_STEP = 2f
         @Volatile var markers: List<Marker> = emptyList()
-        /** x, y, speed, kind, docked, rpm - for the audio engine */
+        /** x, y, speed, kind, docked, rpm, heading, id - for the audio engine */
         @Volatile var audio: List<FloatArray> = emptyList()
         /** one-shot sound cues (type, x, y) for the audio engine */
         val cues = ConcurrentLinkedQueue<FloatArray>()
