@@ -105,7 +105,9 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         },
         "Compilo acqua e cielo" to {
             water = Program(Shaders.WATER_VS, Shaders.WATER_FS, "water")
-            waterSimple = Program(Shaders.WATER_VS, Shaders.WATER_SIMPLE_FS, "water-simple")
+            waterSimple = Program(Shaders.WATER_FLAT_VS, Shaders.WATER_FLAT_FS, "water-flat")
+            // one big flat quad around the camera (the simple water needs no grid: nothing is displaced)
+            flatWater = Mesh(floatArrayOf(-3000f, -3000f, 0f, 3000f, -3000f, 0f, 3000f, 3000f, 0f, -3000f, -3000f, 0f, 3000f, 3000f, 0f, -3000f, 3000f, 0f), 3, intArrayOf(3))
             sky = Program(Shaders.SKY_VS, Shaders.SKY_FS, "sky")
             depth = Program(Shaders.DEPTH_VS, Shaders.DEPTH_FS, "depth")
         },
@@ -412,12 +414,11 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private fun ensureTargets() {
-        if (abs(targetsScale - scale) < 0.001f && targetsSimple == Settings.simple) return
-        targetsSimple = Settings.simple
+        if (abs(targetsScale - scale) < 0.001f) return
         targetsScale = scale
         val w = max(64, (width * scale).toInt()); val h = max(64, (height * scale).toInt())
         scene?.release(); refl?.release(); bloomA?.release(); bloomB?.release()
-        scene = Target(w, h, !Settings.simple, true)      // simple mode: LDR scene, half the bandwidth
+        scene = Target(w, h, true, true)
         refl = Target(max(32, (w * 0.42f).toInt()), max(32, (h * 0.42f).toInt()), true, true); reflValid = false
         bloomA = Target(w / 4, h / 4, true, false); bloomB = Target(w / 4, h / 4, true, false)
         GameState.renderScale = scale
@@ -439,7 +440,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private lateinit var dimP: Program; private lateinit var copyP: Program; private lateinit var waterSimple: Program
     private lateinit var grassP: Program; private lateinit var grass: MarshGrass
     private var towT = 0f; private var weedWarned = false
-    private var targetsSimple = false
+    private var flatWater: Mesh? = null
     // ---- frozen background while a page is open: the last frame, blurred, and no more rendering
     private var frozen = false; private var frzTex = 0; private var frzW = 0; private var frzH = 0
     private fun overlayOpen() = Controls.screen == Screen.PAUSE || Controls.screen == Screen.SETTINGS || Controls.screen == Screen.CREDITS || Controls.screen == Screen.MAP
@@ -575,7 +576,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (frozen && !overlay) {
             frozen = false; GameState.frozen = false
             lastNs = System.nanoTime()
-            live.resync()                     // the real boats kept moving: pick them up where ACTV says they are now
+            // the fleet catches up by itself (LiveBoats measures the real time that went by)
         }
         if (frozen) { drawFrozen(); return }
         frameBody()
@@ -625,6 +626,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             boat.marsh = world.marsh(boat.x, boat.y)
             for (k in 0 until 3) boat.update(sdt / 3, if (Controls.engineOn) thr else 0f, st, world)
             weed(sdt)
+            advanceRipple(sdt)
             navigate(sdt)
             if (boat.splash > 1.5f) Audio.event(Audio.EV_SPLASH, boat.splash)
             distance += hypot(boat.x - ox, boat.y - oy)
@@ -819,12 +821,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             w.use(); common(w, vp, ident, -1000f, false)
             w.vec3("uCenter", floor(camX / 40f) * 40f, floor(camY / 40f) * 40f, 0f); w.f("uWaveAmp", boat.waveAmp)
             glActiveTexture(GL_TEXTURE10); glBindTexture(GL_TEXTURE_2D, waterN); w.i("uWaterN", 10)
-            glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, wake.tex); w.i("uWake", 7)
-            w.vec3("uWakeO", 0f, 0f, 0.001f); w.vec2("uWakeDir", 1f, 0f)
-            glUniform4f(w.loc("uBoat"), boat.x, boat.y, boat.heading, abs(boat.surge)); glUniform2f(w.loc("uHull"), Boat.HALF_LEN, Boat.HALF_BEAM)
-            w.f("uGridHalf", 1e6f); waterNear?.draw()
-            w.f("uGridHalf", 160f); waterMid?.draw()
-            w.f("uGridHalf", 1f); waterFar?.draw()
+            flatWater?.draw()
             return
         }
         water.use(); common(water, vp, ident, -1000f)
@@ -835,6 +832,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glActiveTexture(GL_TEXTURE10); glBindTexture(GL_TEXTURE_2D, waterN); water.i("uWaterN", 10)
         glActiveTexture(GL_TEXTURE11); glBindTexture(GL_TEXTURE_2D, foamT); water.i("uFoamT", 11)
         water.vec3("uWakeO", wake.ox, wake.oy, if (wake.ok) wake.size else 0.001f); water.vec2("uWakeDir", wake.dirX, wake.dirY)
+        water.vec2("uRipOff", ripOffX, ripOffY)
         glUniform4f(water.loc("uBoat"), boat.x, boat.y, boat.heading, abs(boat.surge)); glUniform2f(water.loc("uHull"), Boat.HALF_LEN, Boat.HALF_BEAM)
         glUniform2f(water.loc("uScreen"), scene!!.w.toFloat(), scene!!.h.toFloat())
         water.f("uGridHalf", 1e6f); waterNear?.draw()
@@ -898,6 +896,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         return hypot(ax + (bx - ax) * t - x, ay + (by - ay) * t - y)
     }
     private fun offRoute(r: FloatArray): Float { var m = Float.MAX_VALUE; for (i in max(0, routeSeg - 2) until min(r.size / 2 - 1, routeSeg + 12)) m = min(m, segDist(r, i, boat.x, boat.y)); return m }
+
+    // the boil behind the prop drifts along the boat's track: integrated per frame, never direction * total time
+    private var ripOffX = 0f; private var ripOffY = 0f
+    private fun advanceRipple(dt: Float) {
+        ripOffX = (ripOffX + wake.dirX * dt * 0.25f) % 64f; ripOffY = (ripOffY + wake.dirY * dt * 0.25f) % 64f
+    }
 
     private fun grassRadius() = if (Settings.simple) 32f else 60f
     private fun drawGrass(vp: FloatArray) {

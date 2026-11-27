@@ -91,8 +91,13 @@ class LiveBoats(private val world: WorldMap) {
     // ================================================================ per frame
     /** camX/camY: smoke and trails are only made near the camera */
     private var blockersSet = false
+    private var lastWallNs = 0L
     fun update(dt: Float, camX: Float, camY: Float) {
         time += dt
+        // the app was away (another app, a notification, a page open): the real boats kept going. Put every boat
+        // where its timetable time says it is now, along its own path, keeping its speed - as if you never left
+        val wall = System.nanoTime(); val gap = if (lastWallNs == 0L) 0f else (wall - lastWallNs) / 1e9f; lastWallNs = wall
+        if (gap > 1.5f) catchUp()
         if (!blockersSet && Obstacles.stops.isNotEmpty()) { blockersSet = true; val st = Obstacles.stops; worker.execute { nav.setBlockers(st) } }
         // every boat is a trip of today's timetable; ACTV's live positions say which boat is which and how late
         // it runs (see schedule()). Its effective timetable time only ever moves forward: a late boat waits at the
@@ -584,6 +589,7 @@ class LiveBoats(private val world: WorldMap) {
             return
         }
         val want = if (dwelling) i else i + 1
+        if (b.simStop >= 0 && want - b.simStop >= 2) { b.fresh = true; b.leg = null; b.planning = false; b.reqId++; follow(b, r, t); return }
         if (b.simStop != want) {
             b.simStop = want
             val be = berths[r.berth[want]]
@@ -830,6 +836,20 @@ class LiveBoats(private val world: WorldMap) {
         out[4] = -sh; out[5] = ch; out[6] = 0f; out[7] = 0f
         out[8] = ch * sp; out[9] = sh * sp; out[10] = cp; out[11] = 0f
         out[12] = b.px; out[13] = b.py; out[14] = z; out[15] = 1f
+    }
+
+    private fun catchUp() {
+        val now = secsNow()
+        for (b in boats.values) if (!b.tEff.isNaN()) b.tEff = now - b.delay
+        if (Vaporetti.enabled && Vaporetti.today.isNotEmpty()) schedule()
+        for (b in boats.values) if (b.leg != null && b.simGoal >= 0f && !b.docked) {
+            b.s = min(b.simGoal, b.legLen)
+            pointAt(b.leg!!, b.s, tmp2); b.x = tmp2[0]; b.y = tmp2[1]
+            pointAt(b.leg!!, b.s + 6f, tmp2); b.h = atan2(tmp2[1] - b.y, tmp2[0] - b.x)
+        }
+        smokeN = 0
+        for (b in boats.values) b.trailCount = 0
+        simClock = 0f
     }
 
     /** after a pause: every boat is placed again from the latest ACTV report (or the timetable), as a real

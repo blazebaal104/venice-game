@@ -526,7 +526,7 @@ $COMMON
 ${Waves.glsl()}
 in vec3 vW; in float vFade;
 uniform sampler2D uRefl; uniform vec2 uScreen; uniform float uWaveAmp;
-uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir;   // wake state: r height, g previous height, b foam, a aeration
+uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir; uniform vec2 uRipOff;   // wake state: r height, g previous height, b foam, a aeration
 uniform sampler2D uWaterN;                       // tileable ripple slopes (rg), baked once at start-up
 uniform sampler2D uFoamT;                        // baked foam: r lace, g froth, b blotches (assets/water/foam.png)
 uniform vec4 uBoat; uniform vec2 uHull;          // x, y, heading, speed ; half length, half beam
@@ -561,11 +561,14 @@ void main() {
     }
     // frame aligned with the wash: along / across the boat's track
     vec2 al = uWakeDir, ac = vec2(-uWakeDir.y, uWakeDir.x);
-    vec2 pw = vec2(dot(p, al) * 0.2, dot(p, ac));        // stretched along the track -> long turbulent streaks
+    // measured from the boat (not from the world origin, hundreds of metres away: turning the boat used to swing the
+    // whole pattern round that far point, so it slid across the water like a cloud of particles)
+    vec2 pr = p - uBoat.xy;
+    vec2 pw = vec2(dot(pr, al) * 0.2, dot(pr, ac));      // stretched along the track -> long turbulent streaks
     // the boil: churned, bulging water where the wash is fresh (just behind the outboard)
     if (foam > 0.35) {
         float bs = smoothstep(0.35, 0.9, foam);
-        g += ripple(p * 0.42 + uWakeDir * uTime * 0.25) * 0.55 * bs;
+        g += ripple(p * 0.42 + uRipOff) * 0.55 * bs;      // scroll accumulated frame by frame (was direction * total time)
         wakeE = max(wakeE, bs * 1.5);
     }
     // wake waves carry short, steep wavelets: much rougher surface where the wake energy is
@@ -953,28 +956,38 @@ void main() {
 }
 """
     // ------------------------------------------------------------------ "Semplice" water (low-end phones)
-    // No wave simulation, no second render of the city for reflections: two lookups of the baked ripple map,
-    // the sky projected by the ripple normal (a gradient, not a lit reflection), sun glitter, fog.
-    val WATER_SIMPLE_FS = """#version 300 es
+    // Self-contained on purpose: a flat plane at sea level (no wave displacement, nothing read from the wake
+    // simulation or the reflection pass, which don't run in this mode). Two lookups of the baked ripple map, the sky
+    // projected by the ripple normal (a gradient, not a second render of the city), an anti-aliased sun glint, fog.
+    const val WATER_FLAT_VS = """#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uVP; uniform vec3 uCenter;
+out vec3 vW;
+void main() { vW = vec3(aPos.xy + uCenter.xy, 0.0); gl_Position = uVP * vec4(vW, 1.0); }
+"""
+    val WATER_FLAT_FS = """#version 300 es
 precision highp float;
 $COMMON
-in vec3 vW; in float vFade;
+in vec3 vW;
 uniform sampler2D uWaterN; uniform float uWaveAmp;
 out vec4 o;
 void main() {
     vec2 p = vW.xy;
     vec2 r = (texture(uWaterN, p * 0.045 + uTime * vec2(0.010, 0.006)).rg * 2.0 - 1.0) * 0.6
            + (texture(uWaterN, p * 0.11 - uTime * vec2(0.012, 0.017)).rg * 2.0 - 1.0) * 0.4;
-    vec3 n = normalize(vec3(-r * (0.30 + uWaveAmp * 0.6), 1.0));
+    vec3 n = normalize(vec3(-r * (0.25 + uWaveAmp * 0.5), 1.0));
     vec3 v = normalize(uCam - vW);
-    float fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    float nv = max(dot(n, v), 0.0);
+    float fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
     vec3 rd = reflect(-v, n);
     vec3 sky = mix(uFogCol, uSkyZenith, clamp(rd.z * 1.6, 0.0, 1.0));
     vec3 deep = vec3(0.035, 0.095, 0.088) * (uSkyAmb * 1.4 + uSunCol * 0.3);
-    vec3 col = mix(deep, sky, fres * 0.85);
+    vec3 col = mix(deep, sky, clamp(fres, 0.0, 1.0) * 0.85);
+    vec3 dn = fwidth(n); float sk = 1.0 / (1.0 + 900.0 * dot(dn, dn));
+    float pw = max(280.0 * sk, 24.0);
     vec3 h = normalize(uSunDir + v);
-    col += uSunCol * pow(max(dot(n, h), 0.0), 280.0) * 1.8;
-    o = vec4(fog(col, vW), 1.0);
+    col += uSunCol * pow(max(dot(n, h), 0.0), pw) * 1.8 * (pw / 280.0);
+    o = vec4(fog(max(col, vec3(0.0)), vW), 1.0);
 }
 """
 
