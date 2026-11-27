@@ -21,3 +21,12 @@ val bakeTiles by tasks.registering(JavaExec::class) {
     outputs.dir(out)
     maxHeapSize = "3g"
 }
+
+// diagnostic: fetch and decode ACTV's live vaporetto positions in the build log (never fails the build)
+val feedSample by tasks.registering(JavaExec::class) {
+    group = "verification"
+    mainClass.set("baker.FeedKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    isIgnoreExitValue = true
+    outputs.upToDateWhen { false }
+}
