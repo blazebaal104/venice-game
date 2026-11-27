@@ -32,6 +32,9 @@ object Controls {
     /** title screen: where the boat preview is drawn (screen px: left, top, right, bottom) and how it is turned */
     @Volatile var menuBoatRect = IntArray(4)
     @Volatile var menuBoatYaw = 0f
+    /** rad/s, set by the finger, integrated and damped by the renderer */
+    @Volatile var menuBoatSpin = 0f
+    @Volatile var menuBoatTouchT = 0L
     @Volatile var menuBoatDragging = false
     val paused get() = screen != Screen.NONE
 

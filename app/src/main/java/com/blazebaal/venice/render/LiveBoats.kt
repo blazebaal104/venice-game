@@ -33,7 +33,7 @@ class LiveBoats(private val world: WorldMap) {
         NAVE(27.9f, 4.95f, 7.0f, 0.14f, 0.22f, -6.12f, 0f, 5.04f, 0.70f),
         LANCIONE(17.6f, 3.87f, 6.6f, 0.26f, 0.38f, -2.16f, -0.81f, 2.90f, 0.45f)
     }
-    enum class State { DOCKED, DEPARTING, CRUISING, APPROACHING }
+    enum class State { DOCKED, DEPARTING, UNDERWAY }
 
     class Berth(val x: Float, val y: Float, val axis: Float, val name: String, val key: String, val nx: Float, val ny: Float)
 
@@ -41,18 +41,19 @@ class LiveBoats(private val world: WorldMap) {
         var kind = Kind.BATTELLO; var line = ""; var head = ""
         var x = 0f; var y = 0f; var h = 0f; var speed = 0f
         var offX = 0f; var offY = 0f
-        var path: FloatArray? = null; var seg = 0; var segT = 0f; var pathLen = 0f
-        var state = State.CRUISING; var stateT = 0f
+        var state = State.UNDERWAY; var stateT = 0f
+        /** berth it is docked at / heading for (null: heading for a point) */
         var dock: Berth? = null; var dockSlot = 0
-        /** speed asked for by the feed / timetable (m/s) */
-        var cruise = 3f
+        // the leg it is sailing: a smoothed water path resampled every LEG_STEP m, and how far along it is
+        var leg: FloatArray? = null; var legLen = 0f; var s = 0f; var legTo: Berth? = null
+        var planning = false; var reqId = 0
+        // where ACTV says it is along the leg (live) / should be (timetable): sFix at fixT, moving at vEst
+        var sFix = 0f; var fixT = 0f; var vEst = 0f; var hasFix = false
+        var simGoal = -1f
         // engine
         var cmd = 0f; var rpm = 0f; var rpmRise = 0f
         var seen = 0L; var fresh = true; var sim = false
-        var reqId = 0
-        // simulation: which trip and stop it is on
-        var simRoute = -1; var simStop = -1
-        // smoke + foam trail
+        var simStop = -1
         var smokeAcc = 0f
         val trail = FloatArray(TRAIL_N * 4); var trailHead = 0; var trailCount = 0; var trailX = 0f; var trailY = 0f
         val px get() = x + offX
@@ -65,8 +66,8 @@ class LiveBoats(private val world: WorldMap) {
     private var berths: List<Berth> = emptyList()
     private val nav = Navigator(world)
     private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "fleet-paths").apply { isDaemon = true; priority = Thread.MIN_PRIORITY } }
-    private class PathResult(val id: String, val req: Int, val path: FloatArray)
-    private val results = ConcurrentLinkedQueue<PathResult>()
+    private class LegResult(val id: String, val req: Int, val path: FloatArray)
+    private val results = ConcurrentLinkedQueue<LegResult>()
     private var lastFeed = -1L
     private var simClock = 0f
     private var publishClock = 0f
@@ -74,11 +75,13 @@ class LiveBoats(private val world: WorldMap) {
     private var time = 0f
 
     fun setStops(stops: List<StopLayout.Stop>) {
-        // berth: on the water side of the pontoon (its local -Y), parallel to it
-        berths = stops.map { s ->
-            val nx = sin(s.rot); val ny = -cos(s.rot)
+        // berth: alongside the pontoon on the side that faces open water (tested on the map, both sides)
+        berths = stops.map { st ->
+            var nx = sin(st.rot); var ny = -cos(st.rot)
+            fun water(sx: Float, sy: Float): Int { var n = 0; for (d in floatArrayOf(5f, 8f, 12f, 16f)) if (world.solid(st.x + sx * d, st.y + sy * d) < 0.5f) n++; return n }
+            if (water(-nx, -ny) > water(nx, ny)) { nx = -nx; ny = -ny }
             val off = 2.75f + 2.1f
-            Berth(s.x + nx * off, s.y + ny * off, s.rot, s.name, norm(s.name), nx, ny)
+            Berth(st.x + nx * off, st.y + ny * off, st.rot, st.name, norm(st.name), nx, ny)
         }
     }
 
@@ -100,7 +103,7 @@ class LiveBoats(private val world: WorldMap) {
             val r = results.poll() ?: break
             val b = boats[r.id] ?: continue
             if (r.req != b.reqId) continue
-            setPath(b, r.path)
+            setLeg(b, r.path)
         }
         list.clear(); list.addAll(boats.values)
         for (b in list) { behave(b, dt); engine(b, dt); trail(b, camX, camY) }
@@ -111,7 +114,7 @@ class LiveBoats(private val world: WorldMap) {
         else Obstacles.boats = list.map { floatArrayOf(it.px, it.py, it.h, it.kind.len / 2f, it.kind.beam / 2f) }
     }
 
-    // ================================================================ LIVE feed -> intentions
+    // ================================================================ LIVE: ACTV fixes -> where along its leg it should be
     private fun applyFeed() {
         val lat0 = GameState.lat0; val lon0 = GameState.lon0
         val now = System.currentTimeMillis()
@@ -119,88 +122,161 @@ class LiveBoats(private val world: WorldMap) {
             val p = Places.project(v.lat, v.lon, lat0, lon0)
             val b = boats.getOrPut(v.id) { Boat(v.id) }
             b.kind = kindFor(v.line); b.line = v.line; b.head = v.headsign; b.seen = now
-            val stoppedAt = v.status == 1 || (v.speed in 0f..0.45f)
-            val incoming = v.status == 0
-            val atStop = if (stoppedAt) nearestBerth(p[0], p[1], 70f, v.stopName) else null
-            val nextStop = if (incoming && v.stopName.isNotEmpty()) namedBerth(v.stopName, p[0], p[1], 320f) else null
-            val bearing = if (v.bearing.isNaN()) Float.NaN else Math.toRadians(90.0 - v.bearing).toFloat()
+            val stopped = v.status == 1 || (v.status < 0 && v.speed in 0f..0.3f)
+            // the stop it is at (stopped) or heading for (incoming / in transit: the feed's stop is the next one)
+            var target: Berth? = if (v.stopName.isNotEmpty()) namedBerth(v.stopName, p[0], p[1], if (stopped) 150f else 2500f) else null
+            if (stopped && target == null) target = nearestBerth(p[0], p[1], 70f, "")
+            if (!stopped && target == null) target = nextOnTrip(v.tripStops, p[0], p[1])
+            if (stopped && target != null && hypot(target.x - p[0], target.y - p[1]) > 120f) target = null
             if (b.fresh) {
                 b.fresh = false
-                if (atStop != null) placeDocked(b, atStop)
-                else { val w = nav.nearestWater(p[0], p[1]); b.x = w[0]; b.y = w[1]; b.h = if (bearing.isNaN()) 0f else bearing; b.speed = max(0f, min(v.speed, b.kind.maxSpeed)); b.state = State.CRUISING }
+                if (stopped && target != null) { placeDocked(b, target); continue }
+                val w = nav.nearestWater(p[0], p[1]); b.x = w[0]; b.y = w[1]
+                b.h = if (!v.bearing.isNaN()) Math.toRadians(90.0 - v.bearing).toFloat() else if (target != null) atan2(target.y - b.y, target.x - b.x) else 0f
+                b.speed = if (v.speed > 0f) min(v.speed, b.kind.maxSpeed) else 3f; b.rpm = 0.5f; b.state = State.UNDERWAY
+                if (target != null) planLeg(b, target, null) else planLegTo(b, p[0], p[1])
                 continue
             }
-            val d = hypot(p[0] - b.x, p[1] - b.y)
-            if (d > 900f) { val w = nav.nearestWater(p[0], p[1]); b.x = w[0]; b.y = w[1]; b.path = null; b.dock = null; b.state = State.CRUISING; continue }
-            when {
-                // still at the same stop: stays docked until a fix says otherwise
-                b.docked && atStop != null && (atStop === b.dock || hypot(atStop.x - b.x, atStop.y - b.y) < 45f) -> {}
-                b.docked && d < 25f && !incoming -> {}      // fix jitter around the pontoon: still there
-                atStop != null -> { if (b.dock !== atStop || b.state != State.APPROACHING) goTo(b, atStop, max(1.5f, d / 14f)) }
-                nextStop != null -> { if (b.dock !== nextStop || b.state != State.APPROACHING) goTo(b, nextStop, max(2f, d / 14f)) }
-                else -> {
-                    val ahead = (p[0] - b.x) * cos(b.h) + (p[1] - b.y) * sin(b.h)
-                    if (!b.docked && ahead < 0f && d < 45f) { b.cruise = min(b.cruise, 1.2f); continue }   // GPS jitter behind: never reverse
-                    sailTo(b, p[0], p[1], ((d / 15f) * 1.05f).coerceIn(1.0f, b.kind.maxSpeed), water = true)
-                }
+            if (hypot(p[0] - b.x, p[1] - b.y) > 1200f) { b.fresh = true; continue }        // lost for a long time: start over
+            if (b.docked) {
+                val d = b.dock
+                // stays alongside until ACTV says it has left: a new stop ahead, or a fix clearly away from the pontoon
+                val left = d != null && ((target != null && target !== d && !stopped) || hypot(p[0] - d.x, p[1] - d.y) > 40f)
+                if (!left) continue
+                if (target != null && target !== d) planLeg(b, target, d) else planLegTo(b, p[0], p[1], d)
+                depart(b)
+            } else if (target != null && b.legTo !== target) {
+                planLeg(b, target, null)                       // a new stop to head for: one new leg, not one per fix
+            } else if (target == null && (b.leg == null || b.legTo != null || legEndFar(b, p[0], p[1]))) {
+                planLegTo(b, p[0], p[1])
             }
+            // where the fix puts it along the leg, and how fast it's progressing
+            val leg = b.leg ?: continue
+            if (b.planning) continue
+            val sNew = if (stopped && target != null && target === b.legTo) b.legLen else project(b, leg, p[0], p[1])
+            if (sNew < 0f) { if (!b.planning) { if (b.legTo != null) planLeg(b, b.legTo!!, null) else planLegTo(b, p[0], p[1]) }; continue }  // off the leg: replan
+            if (b.hasFix) {
+                val dtf = max(1f, time - b.fixT)
+                val v1 = ((sNew - b.sFix) / dtf).coerceIn(0f, b.kind.maxSpeed)
+                b.vEst = b.vEst * 0.5f + v1 * 0.5f
+            } else b.vEst = if (v.speed > 0f) v.speed else 3f
+            b.sFix = max(sNew, if (b.hasFix) b.sFix else 0f); b.fixT = time; b.hasFix = true
         }
         boats.values.removeAll { !it.sim && now - it.seen > 90_000 }
     }
 
-    // ================================================================ intentions -> plans
-    /** head for a berth and come alongside */
-    private fun goTo(b: Boat, be: Berth, cruise: Float) {
-        val wasDocked = b.docked
-        val from = b.dock
-        dockAt(b, be)
-        b.cruise = cruise.coerceIn(1.2f, b.kind.maxSpeed)
-        startPlan(b, b.dockX(), b.dockY(), false, if (wasDocked) from else null)
-        if (wasDocked) depart(b) else b.state = State.APPROACHING
+    private fun legEndFar(b: Boat, x: Float, y: Float): Boolean {
+        val l = b.leg ?: return true
+        return hypot(l[l.size - 2] - x, l[l.size - 1] - y) > 30f && project(b, l, x, y) < 0f || project(b, l, x, y) >= b.legLen - 4f && hypot(l[l.size - 2] - x, l[l.size - 1] - y) > 30f
     }
 
-    /** sail to a point (not a stop) */
-    private fun sailTo(b: Boat, tx: Float, ty: Float, cruise: Float, water: Boolean) {
-        val wasDocked = b.docked
-        val from = b.dock
-        b.cruise = cruise
-        if (!wasDocked) b.dock = null
-        startPlan(b, tx, ty, water, if (wasDocked) from else null)
-        if (wasDocked) { depart(b); b.dock = null } else b.state = State.CRUISING
+    /** the next stop on its trip ahead of (x, y): the stop after the one it's nearest to */
+    private fun nextOnTrip(stops: List<String>, x: Float, y: Float): Berth? {
+        if (stops.size < 2) return null
+        val bs = stops.map { namedBerth(it, x, y, 6000f) }
+        var bi = -1; var bd = Float.MAX_VALUE
+        for ((i, be) in bs.withIndex()) if (be != null) { val d = hypot(be.x - x, be.y - y); if (d < bd) { bd = d; bi = i } }
+        if (bi < 0) return null
+        // nearest stop behind or ahead? if moving away from it along the trip, the next one
+        return if (bi + 1 < bs.size && bd < 400f) bs[bi + 1] ?: bs[bi] else bs[bi]
     }
 
+    // ================================================================ legs
     private fun depart(b: Boat) {
         b.state = State.DEPARTING; b.stateT = 0f
         cues.add(floatArrayOf(CUE_DEPART, b.x, b.y))
     }
 
-    /** Plans a path on the worker. Leaving a pontoon, the path first goes out to a point off the pontoon (bow turned
-     *  away from it) so the boat swings out instead of scraping along it. */
-    private fun startPlan(b: Boat, tx: Float, ty: Float, water: Boolean, leaving: Berth?) {
+    /** a leg to a berth: from the boat (or from its berth, swinging out from the pontoon first) */
+    private fun planLeg(b: Boat, to: Berth, leaving: Berth?) {
+        dockSlotFor(b, to)
+        val slot = b.dockSlot
+        val tx = to.x - cos(to.axis) * slot * (b.kind.len + 2f); val ty = to.y - sin(to.axis) * slot * (b.kind.len + 2f)
+        b.legTo = to; b.hasFix = false; b.simGoal = -1f
+        request(b, tx, ty, false, leaving, to)
+    }
+    private fun planLegTo(b: Boat, x: Float, y: Float, leaving: Berth? = null) {
+        b.legTo = null; b.hasFix = false; b.simGoal = -1f
+        request(b, x, y, true, leaving, null)
+    }
+
+    private fun request(b: Boat, tx: Float, ty: Float, water: Boolean, leaving: Berth?, to: Berth?) {
         val id = b.id; val req = ++b.reqId; val sx = b.x; val sy = b.y
+        b.planning = true
         var exX = Float.NaN; var exY = Float.NaN
         if (leaving != null) {
-            // out from the pontoon (its water-side normal) and forward along the way the bow points
+            // out from the pontoon (its water side) and forward the way the bow points
             val fx = cos(b.h); val fy = sin(b.h)
             exX = b.x + leaving.nx * 9f + fx * 16f; exY = b.y + leaving.ny * 9f + fy * 16f
             if (!nav.clearLine(b.x, b.y, exX, exY, 2f)) { exX = b.x + leaving.nx * 7f + fx * 8f; exY = b.y + leaving.ny * 7f + fy * 8f }
             if (!nav.clearLine(b.x, b.y, exX, exY, 1.5f)) exX = Float.NaN
         }
+        // coming into a berth: the last stretch runs parallel to the pontoon, so it comes alongside instead of nosing in
+        var inX = Float.NaN; var inY = Float.NaN
+        if (to != null) {
+            val ax = cos(to.axis); val ay = sin(to.axis)
+            val sgn = if ((tx - b.x) * ax + (ty - b.y) * ay >= 0f) 1f else -1f
+            inX = tx - ax * sgn * 22f + to.nx * 4f; inY = ty - ay * sgn * 22f + to.ny * 4f
+            if (!nav.clearLine(inX, inY, tx, ty, 1.5f)) inX = Float.NaN
+        }
         worker.execute {
             try {
                 val t = if (water) nav.nearestWater(tx, ty) else floatArrayOf(tx, ty)
-                val path = if (!exX.isNaN()) {
-                    val rest = nav.path(exX, exY, t[0], t[1])
-                    FloatArray(rest.size + 2).also { a -> a[0] = sx; a[1] = sy; rest.copyInto(a, 2) }
-                } else nav.path(sx, sy, t[0], t[1])
-                results.add(PathResult(id, req, path))
+                val pts = ArrayList<Float>()
+                pts.add(sx); pts.add(sy)
+                val from = if (!exX.isNaN()) floatArrayOf(exX, exY).also { pts.add(exX); pts.add(exY) } else floatArrayOf(sx, sy)
+                val mid = if (!inX.isNaN()) nav.path(from[0], from[1], inX, inY) else nav.path(from[0], from[1], t[0], t[1])
+                for (i in 2 until mid.size) pts.add(mid[i])
+                if (!inX.isNaN()) { pts.add(t[0]); pts.add(t[1]) }
+                results.add(LegResult(id, req, smooth(pts.toFloatArray())))
             } catch (_: Throwable) { }
         }
     }
 
-    private fun setPath(b: Boat, path: FloatArray) {
-        val p = path.copyOf(); p[0] = b.x; p[1] = b.y
-        b.path = p; b.seg = 0; b.segT = 0f; b.pathLen = pathLength(p)
+    /** Chaikin corner cutting (3 passes, ends kept) then resampling every LEG_STEP m: a curve a hull can follow */
+    private fun smooth(p0: FloatArray): FloatArray {
+        var p = p0
+        repeat(3) {
+            val n = p.size / 2; if (n < 3) return@repeat
+            val o = FloatArray((2 * (n - 1)) * 2 + 4); var k = 0
+            o[k++] = p[0]; o[k++] = p[1]
+            for (i in 0 until n - 1) {
+                val ax = p[i * 2]; val ay = p[i * 2 + 1]; val bx = p[i * 2 + 2]; val by = p[i * 2 + 3]
+                if (i > 0) { o[k++] = ax * 0.75f + bx * 0.25f; o[k++] = ay * 0.75f + by * 0.25f }
+                if (i < n - 2) { o[k++] = ax * 0.25f + bx * 0.75f; o[k++] = ay * 0.25f + by * 0.75f }
+            }
+            o[k++] = p[p.size - 2]; o[k++] = p[p.size - 1]
+            p = o.copyOf(k)
+        }
+        val out = ArrayList<Float>(); out.add(p[0]); out.add(p[1])
+        var carry = 0f
+        for (i in 0 until p.size / 2 - 1) {
+            val ax = p[i * 2]; val ay = p[i * 2 + 1]; val bx = p[i * 2 + 2]; val by = p[i * 2 + 3]
+            val l = hypot(bx - ax, by - ay); var d = LEG_STEP - carry
+            while (d <= l) { out.add(ax + (bx - ax) * d / l); out.add(ay + (by - ay) * d / l); d += LEG_STEP }
+            carry = l - (d - LEG_STEP)
+        }
+        out.add(p[p.size - 2]); out.add(p[p.size - 1])
+        return out.toFloatArray()
+    }
+
+    private fun setLeg(b: Boat, path: FloatArray) {
+        b.planning = false
+        if (path.size < 4) return
+        b.leg = path; b.legLen = (path.size / 2 - 1) * LEG_STEP
+        b.hasFix = false
+        // the boat moved on while the leg was being planned: pick it up where it is now
+        b.s = max(0f, project(b, path, b.x, b.y, 0f, 60f).takeIf { it >= 0f } ?: 0f)
+        if (b.legTo != null) b.dock = b.legTo
+    }
+
+    /** arc length of the leg point nearest to (x, y), searched from sFrom on; -1 if the point is > 70 m off the leg */
+    private fun project(b: Boat, leg: FloatArray, x: Float, y: Float, sFrom: Float = max(0f, b.s - 120f), sTo: Float = Float.MAX_VALUE): Float {
+        val n = leg.size / 2
+        val i0 = (sFrom / LEG_STEP).toInt().coerceIn(0, n - 1); val i1 = min(n - 1, (sTo / LEG_STEP).toInt())
+        var bi = -1; var bd = 70f * 70f
+        for (i in i0..i1) { val dx = leg[i * 2] - x; val dy = leg[i * 2 + 1] - y; val d = dx * dx + dy * dy; if (d < bd) { bd = d; bi = i } }
+        return if (bi < 0) -1f else bi * LEG_STEP
     }
 
     private fun Boat.dockX() = dock!!.x - cos(dock!!.axis) * dockSlot * (kind.len + 2f)
@@ -208,25 +284,23 @@ class LiveBoats(private val world: WorldMap) {
     /** berth heading: along the pontoon, whichever way is closer to the boat's current heading */
     private fun Boat.dockH(cur: Float): Float { val a = dock!!.axis; return if (cos(cur - a) >= 0f) a else a + PI.toFloat() }
 
-    private fun dockAt(b: Boat, berth: Berth) {
-        if (b.dock === berth) return
-        b.dock = berth
+    private fun dockSlotFor(b: Boat, berth: Berth) {
         // a second boat at the same pontoon waits just behind the first
-        b.dockSlot = if (boats.values.any { it !== b && it.dock === berth && it.dockSlot == 0 }) 1 else 0
+        b.dockSlot = if (boats.values.any { it !== b && it.dock === berth && it.dockSlot == 0 && (it.docked || it.legTo === berth) }) 1 else 0
     }
 
     private fun placeDocked(b: Boat, be: Berth) {
-        dockAt(b, be); b.x = b.dockX(); b.y = b.dockY(); b.h = b.dockH(b.h)
-        b.speed = 0f; b.state = State.DOCKED; b.path = null; b.rpm = 0.12f; b.cmd = 0.12f
+        dockSlotFor(b, be); b.dock = be; b.legTo = be
+        b.x = b.dockX(); b.y = b.dockY(); b.h = b.dockH(b.h)
+        b.speed = 0f; b.state = State.DOCKED; b.leg = null; b.rpm = 0.12f; b.cmd = 0.12f
     }
 
-    // ================================================================ behaviour: what speed / heading it wants
+    // ================================================================ behaviour: its own sailing, bound to the reports
     private fun behave(b: Boat, dt: Float) {
         b.stateT += dt
         if (b.state == State.DOCKED) {
             // held against the pontoon with a little ahead throttle; settles onto the exact berth
-            val be = b.dock
-            if (be != null) {
+            if (b.dock != null) {
                 val k = 1f - exp(-dt * 0.6f)
                 b.x += (b.dockX() - b.x) * k; b.y += (b.dockY() - b.y) * k
                 b.h += wrap(b.dockH(b.h) - b.h) * k
@@ -234,52 +308,55 @@ class LiveBoats(private val world: WorldMap) {
             b.speed *= exp(-dt * 2f); b.cmd = 0.12f
             return
         }
-        val p = b.path
-        if (p == null) {
-            // waiting for a plan: carry on gently on the current heading if the water ahead is clear
-            val clear = b.speed > 0.2f && nav.clearLine(b.x, b.y, b.x + cos(b.h) * 14f, b.y + sin(b.h) * 14f, 2f)
-            b.cmd = if (clear) control(b, min(b.speed, b.cruise)) else control(b, 0f)
+        val leg = b.leg
+        if (leg == null && b.state == State.DEPARTING) { b.cmd = 0.15f; b.stateT = 0f; return }   // leg still being planned: wait alongside
+        if (leg == null) {
+            // no leg yet: keep going gently on the current heading while the water ahead is clear (a guess)
+            val clear = nav.clearLine(b.x, b.y, b.x + cos(b.h) * 14f, b.y + sin(b.h) * 14f, 2f)
+            b.cmd = control(b, if (clear) min(max(b.speed, 1.5f), 3f) else 0f)
             b.x += cos(b.h) * b.speed * dt; b.y += sin(b.h) * b.speed * dt
             return
         }
-        val n = p.size / 2
-        val travelled = travelledOn(p, b.seg, b.segT)
-        val remaining = max(0f, b.pathLen - travelled)
-        // ---- the speed it wants
-        var want = b.cruise
+        // where it should be along the leg now: the last fix extrapolated at the speed it's been making (live), or
+        // the timetable's position (offline). Its own speed closes the gap gradually; it never backs up.
+        val goal = when {
+            b.simGoal >= 0f -> b.simGoal
+            b.hasFix -> min(b.legLen, b.sFix + b.vEst * min(time - b.fixT, 25f))
+            else -> b.s + b.speed * 3f
+        }
+        val gap = goal - b.s
+        if (gap > 400f) { b.s = goal - 60f; b.speed = b.kind.maxSpeed * 0.7f }     // far behind (missed fixes): catch up off-screen-ish
+        var want = when {
+            gap < -6f -> b.vEst * 0.5f                                           // ahead of the reports: ease off
+            else -> (b.vEst.coerceAtLeast(if (b.simGoal >= 0f) 0f else 1f) + gap * 0.07f).coerceIn(0f, b.kind.maxSpeed)
+        }
+        if (b.simGoal >= 0f) want = (gap * 0.12f + 0.4f).coerceIn(0f, b.kind.maxSpeed)
+        val remaining = b.legLen - b.s
         if (b.state == State.DEPARTING) {
-            // slow throttle-up while turning out from the pontoon
-            want = min(want, 0.8f + b.stateT * 0.22f)
-            if (b.stateT > 8f && travelled > 20f) b.state = if (b.dock != null) State.APPROACHING else State.CRUISING
+            want = min(want, 0.8f + b.stateT * 0.22f).coerceAtLeast(0.6f)       // slow throttle-up, bow swinging out
+            if (b.stateT > 8f && b.s > 20f) b.state = State.UNDERWAY
         }
-        if (b.dock != null && b.state != State.DEPARTING) {
-            // braking curve into the berth (~0.18 m/s2), dead slow for the last few metres
-            want = min(want, sqrt(2f * 0.18f * max(remaining - 3f, 0f)) + 0.35f)
-        }
+        if (b.legTo != null) want = min(want, sqrt(2f * 0.18f * max(remaining - 2f, 0f)) + 0.3f)   // braking into the stop
+        else if (remaining < 25f) want = min(want, remaining * 0.08f)                               // end of a guessed leg: slow, wait
         b.cmd = control(b, want)
-        // ---- move along the path
-        var move = b.speed * dt
-        while (move > 0f && b.seg < n - 1) {
-            val segLen = hypot(p[b.seg * 2 + 2] - p[b.seg * 2], p[b.seg * 2 + 3] - p[b.seg * 2 + 1])
-            val left = segLen - b.segT
-            if (move < left) { b.segT += move; move = 0f } else { move -= left; b.seg++; b.segT = 0f }
+        b.s = min(b.legLen, b.s + max(0f, b.speed) * dt)
+        if (b.s >= b.legLen - 0.3f && b.legTo != null) {
+            b.state = State.DOCKED; b.stateT = 0f; b.dock = b.legTo; b.leg = null
+            cues.add(floatArrayOf(CUE_DOCK, b.x, b.y)); return
         }
-        if (b.seg >= n - 1) {
-            b.x = p[(n - 1) * 2]; b.y = p[(n - 1) * 2 + 1]; b.path = null
-            if (b.dock != null) { b.state = State.DOCKED; b.stateT = 0f; cues.add(floatArrayOf(CUE_DOCK, b.x, b.y)) }
-            else b.state = State.CRUISING
-            return
-        }
-        val ax = p[b.seg * 2]; val ay = p[b.seg * 2 + 1]; val bx = p[b.seg * 2 + 2]; val by = p[b.seg * 2 + 3]
-        val segLen = max(hypot(bx - ax, by - ay), 1e-3f)
-        b.x = ax + (bx - ax) * b.segT / segLen; b.y = ay + (by - ay) * b.segT / segLen
-        // ---- heading: towards a point ahead on the path (further when faster), no faster than the hull can turn;
-        // the last metres into a berth line up with the pontoon
-        lookAhead(p, b.seg, b.segT, 8f + b.speed * 2f, tmp2)
-        val wantH = if (b.dock != null && remaining < 14f && b.state != State.DEPARTING) b.dockH(b.h) else atan2(tmp2[1] - b.y, tmp2[0] - b.x)
-        // rudder authority grows with speed and with prop wash (a vaporetto can pivot slowly on its prop)
-        val rate = b.kind.yawRate * (0.25f + 0.75f * min(1f, b.speed / 3f)) + 0.06f * b.rpm
+        pointAt(leg, b.s, tmp2); b.x = tmp2[0]; b.y = tmp2[1]
+        // heading: towards a point ahead on the leg (further when faster), turning no faster than the hull can
+        pointAt(leg, b.s + 6f + b.speed * 1.5f, tmp2)
+        var wantH = if (hypot(tmp2[0] - b.x, tmp2[1] - b.y) > 0.5f) atan2(tmp2[1] - b.y, tmp2[0] - b.x) else b.h
+        if (b.legTo != null && remaining < 10f) wantH = b.dockH(b.h)
+        val rate = b.kind.yawRate * (0.3f + 0.7f * min(1f, b.speed / 3f)) + 0.05f * b.rpm
         b.h += wrap(wantH - b.h).coerceIn(-rate * dt, rate * dt)
+    }
+
+    private fun pointAt(leg: FloatArray, s: Float, out: FloatArray) {
+        val n = leg.size / 2
+        val f = (s / LEG_STEP).coerceIn(0f, (n - 1).toFloat()); val i = min(f.toInt(), n - 2); val k = f - i
+        out[0] = leg[i * 2] + (leg[i * 2 + 2] - leg[i * 2]) * k; out[1] = leg[i * 2 + 1] + (leg[i * 2 + 3] - leg[i * 2 + 1]) * k
     }
 
     /** throttle (-0.6 astern .. 1 ahead) that brings the boat to `want` m/s */
@@ -287,7 +364,7 @@ class LiveBoats(private val world: WorldMap) {
         val vmax = b.kind.maxSpeed
         val err = want - b.speed
         return if (err < -0.9f && b.speed > 0.6f) (-0.25f + err * 0.25f).coerceIn(-0.6f, -0.15f)     // astern to stop her
-        else (want / vmax + err * 0.6f / vmax * 3f).coerceIn(0f, 1f)
+        else (want / vmax + err * 1.8f / vmax).coerceIn(0f, 1f)
     }
 
     /** diesel + prop + hull: rpm follows the throttle with lag; thrust ~ rpm^2, drag ~ v^2 */
@@ -302,8 +379,7 @@ class LiveBoats(private val world: WorldMap) {
         val thrust = dir * b.rpm * b.rpm * vmax * vmax
         val drag = b.speed * abs(b.speed) + 0.4f * b.speed
         b.speed += b.kind.accel * (thrust - drag) / (vmax * vmax) * dt
-        b.speed = b.speed.coerceIn(-0.6f, vmax)
-        if (b.speed < 0f && b.path != null) b.speed = max(b.speed, 0f)          // astern only stops her, never backs along the path
+        b.speed = b.speed.coerceIn(0f, vmax)
     }
 
     // ================================================================ OFFLINE: the timetable drives the same behaviour
@@ -317,7 +393,7 @@ class LiveBoats(private val world: WorldMap) {
         val cal = Calendar.getInstance()
         val secs = cal.get(Calendar.HOUR_OF_DAY) * 3600 + cal.get(Calendar.MINUTE) * 60 + cal.get(Calendar.SECOND) + cal.get(Calendar.MILLISECOND) / 1000f
         val alive = HashSet<String>()
-        for ((ri, r) in simRoutes!!.withIndex()) {
+        for (r in simRoutes!!) {
             val dur = r.arr.last()
             for (st in r.starts) {
                 var t = secs - st; if (t < -3600f) t += 86400f
@@ -325,14 +401,13 @@ class LiveBoats(private val world: WorldMap) {
                 val id = "sim:${r.line}:${r.berth[0]}:$st"
                 alive.add(id)
                 val b = boats.getOrPut(id) { Boat(id).also { it.sim = true; it.kind = kindFor(r.line); it.line = r.line; it.head = r.head } }
-                b.simRoute = ri
                 follow(b, r, t)
             }
         }
         boats.values.removeAll { it.sim && it.id !in alive }
     }
 
-    /** where the timetable says the boat should be at trip time t -> what the behaviour layer should do */
+    /** the timetable says where the boat should be at trip time t: docked at stop i, or a fraction of the leg to i+1 */
     private fun follow(b: Boat, r: SimRoute, t: Float) {
         val n = r.berth.size
         var i = 0
@@ -340,31 +415,39 @@ class LiveBoats(private val world: WorldMap) {
         val dwelling = t <= r.dep[i] || i == n - 1
         if (b.fresh) {
             b.fresh = false
-            if (dwelling) { placeDocked(b, berths[r.berth[i]]); b.simStop = i; return }
-            // mid-leg: start on the straight line between the stops, already under way
-            val a = berths[r.berth[i]]; val c = berths[r.berth[i + 1]]
-            val f = ((t - r.dep[i]) / max(1, r.arr[i + 1] - r.dep[i]).toFloat()).coerceIn(0.1f, 0.9f)
-            val w = nav.nearestWater(a.x + (c.x - a.x) * f, a.y + (c.y - a.y) * f)
-            b.x = w[0]; b.y = w[1]; b.h = atan2(c.y - a.y, c.x - a.x); b.speed = 3f; b.rpm = 0.5f
-            b.simStop = i + 1
-            goTo(b, c, legSpeed(b, c, r.arr[i + 1] - t))
+            val a = berths[r.berth[i]]
+            placeDocked(b, a); b.simStop = i
+            if (!dwelling) {
+                // mid-leg: start on the straight line between the stops, already under way, leg planned from there
+                val c = berths[r.berth[i + 1]]
+                val f = ((t - r.dep[i]) / max(1, r.arr[i + 1] - r.dep[i]).toFloat()).coerceIn(0.1f, 0.9f)
+                val w = nav.nearestWater(a.x + (c.x - a.x) * f, a.y + (c.y - a.y) * f)
+                b.x = w[0]; b.y = w[1]; b.h = atan2(c.y - a.y, c.x - a.x); b.speed = 3f; b.rpm = 0.5f
+                b.state = State.UNDERWAY; b.simStop = i + 1
+                planLeg(b, c, null)
+            }
             return
         }
-        // the stop it should be at, or heading for
         val want = if (dwelling) i else i + 1
-        if (b.simStop == want) {
-            if (!b.docked && b.dock != null) b.cruise = legSpeed(b, b.dock!!, r.arr[want] - t)
-            return
+        if (b.simStop != want) {
+            b.simStop = want
+            val be = berths[r.berth[want]]
+            if (b.docked) { planLeg(b, be, b.dock); depart(b) } else planLeg(b, be, null)
         }
-        // time to leave for the next stop (or running so late the timetable moved on: head for where it should be)
-        val be = berths[r.berth[want]]
-        b.simStop = want
-        goTo(b, be, legSpeed(b, be, r.arr[want] - t))
+        // progress the timetable expects along the current leg (eased out of / into the stops)
+        if (!b.docked && b.leg != null && !dwelling) {
+            val f = ((t - r.dep[i]) / max(1, r.arr[i + 1] - r.dep[i]).toFloat()).coerceIn(0f, 1f)
+            b.simGoal = b.legLen * easeTrip(f, min(0.25f, 40f / max(b.legLen, 1f)))
+        } else if (!b.docked && b.leg != null) b.simGoal = b.legLen
     }
 
-    private fun legSpeed(b: Boat, be: Berth, secsLeft: Float): Float {
-        val d = hypot(be.x - b.x, be.y - b.y) * 1.2f
-        return (d / max(secsLeft, 10f) * 1.15f).coerceIn(2.2f, b.kind.maxSpeed)
+    private fun easeTrip(f: Float, a: Float): Float {
+        val v = 1f / (1f - a)
+        return when {
+            f < a -> v * f * f / (2f * a)
+            f > 1f - a -> 1f - v * (1f - f) * (1f - f) / (2f * a)
+            else -> v * (f - a / 2f)
+        }.coerceIn(0f, 1f)
     }
 
     private fun buildSimRoutes(src: List<Vaporetti.Route>): List<SimRoute> {
@@ -566,21 +649,6 @@ class LiveBoats(private val world: WorldMap) {
         return best
     }
 
-    private fun travelledOn(p: FloatArray, seg: Int, segT: Float): Float {
-        var s = segT
-        for (i in 0 until seg) s += hypot(p[i * 2 + 2] - p[i * 2], p[i * 2 + 3] - p[i * 2 + 1])
-        return s
-    }
-    private fun lookAhead(p: FloatArray, seg: Int, segT: Float, dist: Float, out: FloatArray) {
-        var s = seg; var t = segT + dist; val n = p.size / 2
-        while (s < n - 1) {
-            val l = hypot(p[s * 2 + 2] - p[s * 2], p[s * 2 + 3] - p[s * 2 + 1])
-            if (t <= l) { val k = t / max(l, 1e-3f); out[0] = p[s * 2] + (p[s * 2 + 2] - p[s * 2]) * k; out[1] = p[s * 2 + 1] + (p[s * 2 + 3] - p[s * 2 + 1]) * k; return }
-            t -= l; s++
-        }
-        out[0] = p[(n - 1) * 2]; out[1] = p[(n - 1) * 2 + 1]
-    }
-    private fun pathLength(p: FloatArray): Float { var s = 0f; for (i in 0 until p.size / 2 - 1) s += hypot(p[i * 2 + 2] - p[i * 2], p[i * 2 + 3] - p[i * 2 + 1]); return s }
 
     private var seed = 12345
     private fun rnd(): Float { seed = seed * 1103515245 + 12345; return ((seed ushr 8) and 0xFFFF) / 65535f }
@@ -608,6 +676,7 @@ class LiveBoats(private val world: WorldMap) {
         const val MAX_SMOKE = 900
         const val TRAIL_N = 48
         const val TRAIL_LIFE = 45f
+        const val LEG_STEP = 2f
         @Volatile var markers: List<Marker> = emptyList()
         /** x, y, speed, kind, docked, rpm - for the audio engine */
         @Volatile var audio: List<FloatArray> = emptyList()

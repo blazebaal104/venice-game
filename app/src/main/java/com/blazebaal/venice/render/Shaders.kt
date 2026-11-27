@@ -915,6 +915,11 @@ layout(location=0) in vec2 aPos;
 out vec2 vUv;
 void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
 """
+    const val DIM_FS = """#version 300 es
+precision mediump float;
+uniform vec4 uCol; in vec2 vUv; out vec4 o;
+void main() { o = uCol; }
+"""
     const val BRIGHT_FS = """#version 300 es
 precision mediump float;
 in vec2 vUv; uniform sampler2D uTex; uniform vec2 uTexel;

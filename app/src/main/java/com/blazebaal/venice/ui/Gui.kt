@@ -55,7 +55,9 @@ class Gui(val ink: Ink) {
         val fg = when (style) { 1 -> Theme.INK; 2 -> Theme.RED; else -> Theme.TEXT }
         var x = r.left + 18 * dp
         if (icon != null) { ink.icon(icon, x + 10 * dp, r.centerY(), fg); x += 32 * dp }
-        val big = min(20f, r.height() / dp * 0.36f)
+        var big = min(20f, r.height() / dp * 0.36f)
+        // never past the button's edge: shrink long labels (IMPOSTAZIONI on a half-width button)
+        while (big > 10f && ink.width(label, big * (if (sub == null) 1f else 0.9f), spacing = 0.04f) > r.right - x - 14 * dp) big -= 0.5f
         if (sub == null) ink.label(label, x, r.centerY() + big * 0.36f * dp, big, fg, spacing = 0.04f)
         else {
             ink.label(label, x, r.centerY() - 1 * dp, big * 0.9f, fg, spacing = 0.04f)

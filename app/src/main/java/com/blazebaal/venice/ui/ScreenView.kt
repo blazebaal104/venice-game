@@ -139,42 +139,57 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     // the panels, text and buttons, and leaves the boat's window transparent.
     private var boatDrag = false; private var boatLastX = 0f
     private val boatWin = RectF()
+    private val cardPath = Path()
 
     private fun drawMenu() {
         // gentle darkening behind the title column and the bottom line, never over the boat window
         ink.fill.shader = LinearGradient(W * 0.5f, 0f, W, 0f, intArrayOf(Color.argb(0, 6, 9, 14), Color.argb(170, 6, 9, 14)), null, Shader.TileMode.CLAMP)
         c.drawRect(W * 0.5f, 0f, W, H, ink.fill); ink.fill.shader = null
 
-        // ---- boat card (left): header, transparent 3D window, specs
-        val cardW = min(320 * dp, W * 0.34f)
+        // ---- boat card (left): one full-height panel - name, the 3D model floating in the middle, the specs
+        val cardW = min(470 * dp, W * 0.42f)
         val x0 = m; val x1 = m + cardW
-        val header = RectF(x0, m, x1, m + 64 * dp)
-        ink.glass(header, 16 * dp)
-        ink.label("LA TUA BARCA", header.left + 18 * dp, header.top + 24 * dp, 10.5f, Theme.YELLOW, spacing = 0.16f)
-        ink.label("Lampo 5.4", header.left + 18 * dp, header.top + 50 * dp, 22f, Theme.TEXT, face = Theme.black)
-        ink.label("1 / 1", header.right - 18 * dp, header.top + 50 * dp, 12f, Theme.TEXT_FAINT, Paint.Align.RIGHT)
-        val specsH = 132 * dp
-        val specs = RectF(x0, H - m - specsH, x1, H - m)
-        boatWin.set(x0, header.bottom + 8 * dp, x1, specs.top - 8 * dp)
-        if (boatWin.height() > 60 * dp) {
-            Controls.menuBoatRect = intArrayOf(boatWin.left.toInt(), boatWin.top.toInt(), boatWin.right.toInt(), boatWin.bottom.toInt())
-            ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1.5f * dp
-            c.drawRoundRect(boatWin, 16 * dp, 16 * dp, ink.stroke)
-            ink.label(if (boatDrag) "" else "TRASCINA PER RUOTARE", boatWin.centerX(), boatWin.bottom - 12 * dp, 9f, Theme.TEXT_FAINT, Paint.Align.CENTER, spacing = 0.14f)
-        } else Controls.menuBoatRect = IntArray(4)
-        ink.glass(specs, 16 * dp)
-        ink.label("Barchino in vetroresina · fuoribordo 115 cv", specs.left + 18 * dp, specs.top + 24 * dp, 11f, Theme.TEXT_DIM, face = Theme.condensed)
-        val stats = listOf(Triple("VELOCITÀ", 0.92f, "140 km/h"), Triple("ACCELERAZIONE", 0.72f, "0-100 in 9 s"), Triple("MANOVRABILITÀ", 0.8f, ""))
+        val card = RectF(x0, m, x1, H - m)
+        val headH = 74 * dp
+        val specsH = min(150 * dp, card.height() * 0.36f)
+        val header = RectF(x0, card.top, x1, card.top + headH)
+        val specs = RectF(x0, card.bottom - specsH, x1, card.bottom)
+        // glass top and bottom; the middle is dimmed by the renderer behind the model, so the card reads as one piece
+        val rr = 18 * dp
+        cardPath.reset(); cardPath.addRoundRect(header, floatArrayOf(rr, rr, rr, rr, 0f, 0f, 0f, 0f), Path.Direction.CW)
+        cardPath.addRoundRect(specs, floatArrayOf(0f, 0f, 0f, 0f, rr, rr, rr, rr), Path.Direction.CW)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.GLASS; c.drawPath(cardPath, ink.fill)
+        boatWin.set(x0, header.bottom, x1, specs.top)
+        Controls.menuBoatRect = if (boatWin.height() > 60 * dp) intArrayOf(boatWin.left.toInt(), boatWin.top.toInt(), boatWin.right.toInt(), boatWin.bottom.toInt()) else IntArray(4)
+        ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1.2f * dp
+        c.drawRoundRect(card, 18 * dp, 18 * dp, ink.stroke)
+        ink.label("LA TUA BARCA", header.left + 22 * dp, header.top + 26 * dp, 10f, Theme.YELLOW, spacing = 0.22f)
+        ink.label("LAMPO 5.4", header.left + 21 * dp, header.top + 58 * dp, 28f, Theme.TEXT, face = Theme.black, spacing = 0.01f)
+        // three spec tiles: big figure, unit, label, a 10-segment rating
+        val stats = arrayOf(
+            arrayOf("140", "KM/H", "VELOCITÀ MAX", "9"),
+            arrayOf("9,0", "S", "0-100 KM/H", "7"),
+            arrayOf("115", "CV", "FUORIBORDO", "8"))
+        val pad = 22 * dp; val gap = 12 * dp
+        val tw = (specs.width() - 2 * pad - 2 * gap) / 3
         for ((i, st) in stats.withIndex()) {
-            val y = specs.top + 50 * dp + i * 26 * dp
-            ink.label(st.first, specs.left + 18 * dp, y + 4 * dp, 9.5f, Theme.TEXT_DIM, spacing = 0.1f)
-            val valueW = if (st.third.isEmpty()) 0f else ink.width(st.third, 10.5f) + 10 * dp
-            val bar = RectF(specs.left + 120 * dp, y - 2 * dp, specs.right - 18 * dp - valueW, y + 4 * dp)
-            ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(50, 255, 255, 255); c.drawRoundRect(bar, 3 * dp, 3 * dp, ink.fill)
-            ink.fill.color = Theme.YELLOW; c.drawRoundRect(RectF(bar.left, bar.top, bar.left + bar.width() * st.second, bar.bottom), 3 * dp, 3 * dp, ink.fill)
-            if (st.third.isNotEmpty()) ink.label(st.third, specs.right - 18 * dp, y + 4 * dp, 10.5f, Theme.TEXT, Paint.Align.RIGHT)
+            val tx = specs.left + pad + i * (tw + gap)
+            val base = specs.top + specs.height() * 0.42f
+            var fs = 34f; while (fs > 18f && ink.width(st[0], fs, Theme.black) + ink.width(st[1], 11f) + 4 * dp > tw) fs -= 1f
+            ink.label(st[0], tx, base, fs, Theme.TEXT, face = Theme.black)
+            ink.label(st[1], tx + ink.width(st[0], fs, Theme.black) + 4 * dp, base, 11f, Theme.YELLOW, spacing = 0.08f)
+            ink.label(st[2], tx, base + 20 * dp, 9f, Theme.TEXT_DIM, spacing = 0.14f)
+            val segs = 10; val sg = 2.5f * dp; val sw = (tw - (segs - 1) * sg) / segs
+            val by = base + 32 * dp
+            for (k in 0 until segs) {
+                ink.fill.style = Paint.Style.FILL
+                ink.fill.color = if (k < st[3].toInt()) Theme.YELLOW else Color.argb(45, 255, 255, 255)
+                c.drawRoundRect(RectF(tx + k * (sw + sg), by, tx + k * (sw + sg) + sw, by + 5 * dp), 1.5f * dp, 1.5f * dp, ink.fill)
+            }
         }
-        ink.label("Altre barche in arrivo", specs.left + 18 * dp, specs.bottom - 12 * dp, 9.5f, Theme.TEXT_FAINT, face = Theme.condensed)
+        // thin separators between the tiles
+        ink.fill.color = Color.argb(30, 255, 255, 255)
+        for (i in 1..2) { val sx = specs.left + pad + i * (tw + gap) - gap / 2; c.drawRect(sx, specs.top + 14 * dp, sx + 1 * dp, specs.bottom - 16 * dp, ink.fill) }
 
         // ---- title + buttons (right), sized to fit the height
         val colW = min(330 * dp, W * 0.34f)
@@ -208,11 +223,19 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         ink.text.clearShadowLayer()
     }
 
-    /** drag on the boat window turns the boat (handled before the widget kit) */
+    /** drag on the boat window spins the boat: the finger sets its angular speed (gently), released it keeps turning
+     *  and slows to a stop (handled before the widget kit; the renderer integrates the spin) */
+    private var boatLastT = 0L
     private fun menuTouch(e: MotionEvent): Boolean {
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> if (boatWin.contains(e.x, e.y)) { boatDrag = true; boatLastX = e.x; Controls.menuBoatDragging = true; return true }
-            MotionEvent.ACTION_MOVE -> if (boatDrag) { Controls.menuBoatYaw += (e.x - boatLastX) * 0.012f; boatLastX = e.x; return true }
+            MotionEvent.ACTION_DOWN -> if (boatWin.contains(e.x, e.y)) { boatDrag = true; boatLastX = e.x; boatLastT = e.eventTime; Controls.menuBoatDragging = true; return true }
+            MotionEvent.ACTION_MOVE -> if (boatDrag) {
+                val dt = max(8L, e.eventTime - boatLastT) / 1000f
+                val w = ((e.x - boatLastX) / dp * 0.006f / dt).coerceIn(-5f, 5f)
+                Controls.menuBoatSpin = Controls.menuBoatSpin * 0.65f + w * 0.35f
+                Controls.menuBoatTouchT = System.nanoTime()
+                boatLastX = e.x; boatLastT = e.eventTime; return true
+            }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (boatDrag) { boatDrag = false; Controls.menuBoatDragging = false; return true }
         }
         return boatDrag

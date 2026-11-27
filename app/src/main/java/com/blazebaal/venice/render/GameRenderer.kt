@@ -101,6 +101,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         cityShadow = ShadowMap(2048); boatShadow = ShadowMap(1024)
         groundQuad = Mesh(floatArrayOf(0f, 0f, 0f, 256f, 0f, 0f, 256f, 256f, 0f, 0f, 0f, 0f, 256f, 256f, 0f, 0f, 256f, 0f), 3, intArrayOf(3))
         skyTri = Mesh(floatArrayOf(-1f, -1f, 3f, -1f, -1f, 3f), 2, intArrayOf(2))
+        dimP = Program(Shaders.POST_VS, Shaders.DIM_FS, "dim")
         // fine grid around the camera so the wake's mound, hollow and V crests are real geometry, coarser rings outside
         waterNear = Mesh(waterGrid(56f, 0.5f, 0f), 3, intArrayOf(3))
         waterMid = Mesh(waterGrid(160f, 2f, 56f), 3, intArrayOf(3))
@@ -362,8 +363,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         else if (goodT > 5f && scale < maxS - 0.01f && time - lastDrop > 12f) { scale = min(maxS, scale + 0.05f); goodT = 0f }
     }
 
-    private var menuScene: MenuScene? = null; private var menuT = 0f; private var previewDisc: Mesh? = null
-    private var autoYaw = 0f
+    private var menuScene: MenuScene? = null; private var menuT = 0f; 
+    private lateinit var dimP: Program
 
     private fun drawMenu(dt: Float) {
         adaptResolution(dt.coerceAtMost(0.1f))
@@ -400,23 +401,29 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val kx = sc.w.toFloat() / width; val ky = sc.h.toFloat() / height
             val vx = (r[0] * kx).toInt(); val vw = ((r[2] - r[0]) * kx).toInt(); val vh = ((r[3] - r[1]) * ky).toInt(); val vy = sc.h - (r[3] * ky).toInt()
             glEnable(GL_SCISSOR_TEST); glScissor(vx, vy, vw, vh); glViewport(vx, vy, vw, vh)
-            glClearColor(0.012f, 0.02f, 0.035f, 1f); glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
-            if (Controls.menuBoatDragging) autoYaw = 0f else autoYaw += dt * 0.35f
-            val yaw = Controls.menuBoatYaw + autoYaw
-            val bob = sin(menuT * 1.3f) * 0.05f
-            val bvp = Mat4.mul(Mat4.perspective(Math.toRadians(32.0).toFloat(), vw.toFloat() / max(1, vh), 0.5f, 100f),
-                Mat4.lookAt(-cos(0.65f) * 13.5f, 0f, sin(0.65f) * 13.5f + 0.8f, 0f, 0f, 0.6f, 0f, 0f, 1f))
+            // no water, no box: the city behind is dimmed to the card's glass tone and the model floats over it
+            glClear(GL_DEPTH_BUFFER_BIT)
+            glDisable(GL_DEPTH_TEST); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            dimP.use(); glUniform4f(dimP.loc("uCol"), 0.004f, 0.007f, 0.012f, 0.84f); skyTri?.draw()
+            glDisable(GL_BLEND); glEnable(GL_DEPTH_TEST)
+            // spin: the finger sets the speed; released, it coasts and slows to a stop, then a slow idle turn resumes
+            val sinceTouch = (System.nanoTime() - Controls.menuBoatTouchT) / 1e9f
+            if (Controls.menuBoatDragging) { if (sinceTouch > 0.08f) Controls.menuBoatSpin *= exp(-dt * 10f) }
+            else {
+                Controls.menuBoatSpin *= exp(-dt * 1.1f)
+                if (sinceTouch > 3f) Controls.menuBoatSpin += (0.22f - Controls.menuBoatSpin) * (1f - exp(-dt * 0.5f))
+            }
+            Controls.menuBoatYaw += Controls.menuBoatSpin * dt
+            val yaw = Controls.menuBoatYaw
+            val bob = sin(menuT * 1.3f) * 0.04f
+            // as close as the window allows: ~7.8 m across, ~3.2 m tall in view (the model fills the card)
+            val aspect = vw.toFloat() / max(1, vh); val t15 = tan(Math.toRadians(15.0)).toFloat()
+            val camD = max(6.0f, 3.9f / (t15 * aspect)); val camA = 0.42f
+            val bvp = Mat4.mul(Mat4.perspective(Math.toRadians(30.0).toFloat(), vw.toFloat() / max(1, vh), 0.5f, 100f),
+                Mat4.lookAt(-cos(camA) * camD, 0f, sin(camA) * camD + 0.6f, 0f, 0f, 0.55f, 0f, 0f, 1f))
             fogStart = 1e5f; fogEnd = 0f; fogDens = 0f
             common(generic, bvp, ident, -1000f, false)
-            generic.vec3("uCam", -cos(0.65f) * 13.5f, 0f, sin(0.65f) * 13.5f + 0.8f)
-            val disc = previewDisc ?: MeshBuilder(4096).run {
-                color(0.05f, 0.20f, 0.22f, 0.92f)
-                val n = 64
-                for (i in 0 until n) { val a0 = i * 2f * PI.toFloat() / n; val a1 = (i + 1) * 2f * PI.toFloat() / n
-                    quad(Vec3(cos(a0) * 0.05f, sin(a0) * 0.05f, 0f), Vec3(cos(a0) * 7.5f, sin(a0) * 7.5f, 0f), Vec3(cos(a1) * 7.5f, sin(a1) * 7.5f, 0f), Vec3(cos(a1) * 0.05f, sin(a1) * 0.05f, 0f)) }
-                Mesh(floats())
-            }.also { previewDisc = it }
-            generic.mat4("uModel", ident); disc.draw()
+            generic.vec3("uCam", -cos(camA) * camD, 0f, sin(camA) * camD + 0.6f)
             var m = Mat4.mul(Mat4.translation(0f, 0f, bob), Mat4.rotZ(yaw))
             m = Mat4.mul(m, Mat4.rotY(-0.03f + sin(menuT * 0.9f) * 0.012f))
             val s = Mat4.identity(); s[0] = Boat.SCALE; s[5] = Boat.SCALE; s[10] = Boat.SCALE

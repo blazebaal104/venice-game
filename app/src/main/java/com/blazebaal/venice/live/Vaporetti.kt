@@ -22,6 +22,8 @@ object Vaporetti {
         val id: String, val line: String, val headsign: String,
         val lat: Double, val lon: Double, val bearing: Float, val speed: Float, val time: Long,
         val status: Int, val stopName: String,
+        /** the stop names of its trip in order (its whole route today), empty if the trip is unknown */
+        val tripStops: List<String> = emptyList(),
     )
     class StopRef(val name: String, val lat: Double, val lon: Double, val arr: Int, val dep: Int)
     /** one line in one direction: its stops with times relative to the first departure, and the day's departures */
@@ -40,6 +42,8 @@ object Vaporetti {
     private val tripHead = HashMap<String, String>()
     private val tripDir = HashMap<String, String>()
     private val stopInfo = HashMap<String, StopRef>()
+    /** trip id -> its stop names in order (shared lists: one per distinct stop pattern) */
+    private val tripPattern = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 
     fun start(ctx: Context) {
         if (thread != null) return
@@ -98,6 +102,8 @@ object Vaporetti {
                 }
             }
         }
+        val patterns = HashMap<List<String>, List<String>>()
+        for ((t, ids) in tripStops) { val names = ids.mapNotNull { stopInfo[it]?.name }; tripPattern[t] = patterns.getOrPut(names) { names } }
         // one stop pattern per line + direction (the trip with the most stops), plus every departure of that pattern
         val groups = HashMap<String, ArrayList<String>>()
         for (t in tripStops.keys) { val r = tripRoute[t] ?: continue; groups.getOrPut(r + "|" + tripDir[t].orEmpty()) { ArrayList() }.add(t) }
@@ -192,7 +198,7 @@ object Vaporetti {
         val rid = routeId.ifEmpty { tripRoute[tripId] ?: "" }
         val line = routeName[rid] ?: rid.ifEmpty { "?" }
         return Vessel(label.ifEmpty { id }, line, tripHead[tripId] ?: "", lat, lon, bearing, speed,
-            if (time > 0) time * 1000 else System.currentTimeMillis(), st, stopInfo[stopId]?.name ?: "")
+            if (time > 0) time * 1000 else System.currentTimeMillis(), st, stopInfo[stopId]?.name ?: "", tripPattern[tripId] ?: emptyList())
     }
 
     private fun open(url: String): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {
