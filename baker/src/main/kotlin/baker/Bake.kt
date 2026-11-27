@@ -32,13 +32,27 @@ fun main(args: Array<String>) {
             val t = world.tile(tx, ty) ?: return@execute
             val m = meshers.get().build(t)
             val arrays = arrayOf(m.facade, m.generic, m.detail, m.vegetation)
+            val strides = intArrayOf(16, 12, 12, 12)
             val bytes = 4 * 6 + arrays.sumOf { it.size } * 4
-            val buf = ByteBuffer.allocate(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            buf.putInt(0x47544332); buf.putInt(if (m.hasMarsh) 1 else 0)          // "GTC2": byte-shuffled floats
+            // "GTC3": per mesh, one column per vertex component; positions in centimetres (int16) when they fit,
+            // normals in int8, everything else exact float. Columns of similar numbers deflate very well.
+            val buf = ByteBuffer.allocate(bytes + 64).order(ByteOrder.LITTLE_ENDIAN)
+            buf.putInt(0x47544333); buf.putInt(if (m.hasMarsh) 1 else 0)
             for (a in arrays) buf.putInt(a.size)
-            // byte planes per array (all the low bytes, then the next...): floats of a mesh compress far better
-            for (a in arrays) for (plane in 0 until 4) for (v in a) buf.put(((java.lang.Float.floatToRawIntBits(v) ushr (plane * 8)) and 0xff).toByte())
-            val d = Deflater(6); d.setInput(buf.array()); d.finish()
+            val q = BooleanArray(4) { k -> val a = arrays[k]; val s = strides[k]; var ok = true; var i = 0; while (i < a.size) { for (c in 0 until 3) if (kotlin.math.abs(a[i + c]) > 327f) ok = false; i += s }; ok }
+            for (k in 0 until 4) buf.putInt(strides[k] or (if (q[k]) 0x100 else 0))
+            for (k in 0 until 4) {
+                val a = arrays[k]; val s = strides[k]; val n = a.size / s
+                for (c in 0 until s) {
+                    when {
+                        c < 3 && q[k] -> for (v in 0 until n) buf.putShort(kotlin.math.round(a[v * s + c] * 100f).toInt().toShort())
+                        c in 3..5 -> for (v in 0 until n) buf.put(kotlin.math.round(a[v * s + c].coerceIn(-1f, 1f) * 127f).toInt().toByte())
+                        else -> for (v in 0 until n) buf.putFloat(a[v * s + c])
+                    }
+                }
+            }
+            buf.flip()
+            val d = Deflater(6); d.setInput(buf.array(), 0, buf.limit()); d.finish()
             val o = java.io.ByteArrayOutputStream(bytes / 3); val chunk = ByteArray(1 shl 16)
             while (!d.finished()) { val k = d.deflate(chunk); o.write(chunk, 0, k) }
             d.end()

@@ -50,9 +50,30 @@ class TileCache(root: File, key: String, private val assets: android.content.res
         val am = assets ?: return null
         return try {
             val bytes = java.util.zip.InflaterInputStream(am.open("tiles/${tx}_$ty.gtc"), java.util.zip.Inflater(), 1 shl 16).use { it.readBytes() }
-            val buf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.LITTLE_ENDIAN)
             val head = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            if (head.getInt(0) == MAGIC2) {
+            val size = if (head.getInt(0) == MAGIC3) 24 + (0 until 4).sumOf { head.getInt(8 + it * 4) } * 4 else bytes.size
+            val buf = ByteBuffer.allocateDirect(size).order(ByteOrder.LITTLE_ENDIAN)
+            if (head.getInt(0) == MAGIC3) {
+                // columns back to interleaved floats: positions from cm, normals from int8
+                buf.putInt(MAGIC); buf.putInt(head.getInt(4))
+                val n = IntArray(4) { head.getInt(8 + it * 4) }
+                for (k in 0 until 4) buf.putInt(n[k])
+                var src = 24 + 16
+                for (k in 0 until 4) {
+                    val sf = head.getInt(24 + k * 4); val s = sf and 0xff; val qz = sf and 0x100 != 0
+                    val verts = n[k] / s
+                    val out = FloatArray(n[k])
+                    for (c in 0 until s) {
+                        when {
+                            c < 3 && qz -> { for (v in 0 until verts) out[v * s + c] = head.getShort(src + v * 2) / 100f; src += verts * 2 }
+                            c in 3..5 -> { for (v in 0 until verts) out[v * s + c] = bytes[src + v] / 127f; src += verts }
+                            else -> { for (v in 0 until verts) out[v * s + c] = head.getFloat(src + v * 4); src += verts * 4 }
+                        }
+                    }
+                    buf.asFloatBuffer().put(out); buf.position(buf.position() + out.size * 4)
+                }
+                buf.flip()
+            } else if (head.getInt(0) == MAGIC2) {
                 // un-shuffle the byte planes back into little-endian floats
                 buf.put(bytes, 0, 24)
                 var src = 24
@@ -134,7 +155,7 @@ class TileCache(root: File, key: String, private val assets: android.content.res
         return counted
     }
 
-    companion object { const val MAGIC = 0x47544331; const val MAGIC2 = 0x47544332 }  // "GTC1", "GTC2" (shuffled)
+    companion object { const val MAGIC = 0x47544331; const val MAGIC2 = 0x47544332; const val MAGIC3 = 0x47544333 }  // "GTC1", "GTC2" (shuffled)
 }
 
 class TileStreamer(private val world: WorldMap, var radius: Float = 640f, private val cache: TileCache? = null) {
