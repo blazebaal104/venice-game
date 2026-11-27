@@ -18,7 +18,7 @@ class LoadingScreen(private val dp: Float) {
     private val rnd = java.util.Random(11)
     private val glints = FloatArray(90 * 3)
     // the boat currently crossing: type 0 gondola, 1 vaporetto; x from the left edge, direction
-    private var boatT = -1f; private var boatType = 0; private var boatDir = 1; private var boatSpeed = 0f; private var nextBoat = 2.5f
+    private var boatT = -1f; private var boatType = 1; private var boatDir = 1; private var boatSpeed = 0f; private var nextBoat = 0.25f; private var firstBoat = true
     private var shown = 0f
 
     private fun layout(width: Float, height: Float) {
@@ -147,12 +147,21 @@ class LoadingScreen(private val dp: Float) {
             c.drawRect(x - len / 2, y, x + len / 2, y + (1f + fy * 1.5f) * dp, paint)
         }
         // ---- a boat now and then: gondola or vaporetto, crossing with a little bow wave and a wake
-        if (boatT < 0f) { nextBoat -= dt; if (nextBoat <= 0f) { boatT = 0f; boatType = if (rnd.nextFloat() < 0.5f) 0 else 1; boatDir = if (rnd.nextBoolean()) 1 else -1; boatSpeed = if (boatType == 0) 0.035f else 0.06f } }
+        if (boatT < 0f) {
+            nextBoat -= dt
+            if (nextBoat <= 0f) {
+                // the first one is a vaporetto already on its way across the middle of the lagoon, so it's always seen
+                boatT = if (firstBoat) 3.5f else 0f
+                boatType = if (firstBoat) 1 else if (rnd.nextFloat() < 0.5f) 0 else 1
+                boatDir = if (firstBoat) 1 else if (rnd.nextBoolean()) 1 else -1
+                boatSpeed = if (boatType == 0) 0.045f else 0.07f; firstBoat = false
+            }
+        }
         if (boatT >= 0f) {
             boatT += dt
             val f = boatT * boatSpeed
             val bx = if (boatDir > 0) -0.15f * w + f * w * 1.3f else 1.15f * w - f * w * 1.3f
-            val by = horizon + (h - horizon) * (if (boatType == 0) 0.42f else 0.30f) + sin(boatT * 1.6f) * 1.2f * dp
+            val by = horizon + (h - horizon) * (if (boatType == 0) 0.48f else 0.40f) + sin(boatT * 1.6f) * 1.2f * dp
             drawBoat(c, bx, by, boatType, boatDir, boatT)
             if (f > 1f) { boatT = -1f; nextBoat = 6f + rnd.nextFloat() * 8f }
         }
@@ -184,11 +193,18 @@ class LoadingScreen(private val dp: Float) {
     }
 
     private fun drawBoat(c: Canvas, x: Float, y: Float, type: Int, dir: Int, t: Float) {
-        val s = dp * (if (type == 0) 1.0f else 1.3f)
+        val s = dp * (if (type == 0) 1.35f else 1.8f)
         c.save(); c.translate(x, y); c.scale(dir.toFloat(), 1f)
-        // wake behind and a bow wave
-        paint.color = Color.argb(110, 255, 200, 160)
-        for (k in 1..5) { val wx = -k * 14f * s; c.drawRect(wx - 6f * s, 2f * s + k * 0.6f * s, wx + 6f * s, 3f * s + k * 0.6f * s, paint) }
+        // the wake: a V of foam opening behind the stern, broken into dashes that shimmer, plus the bow wave
+        for (k in 1..14) {
+            val wx = -26f * s - k * 11f * s; val spread = k * 2.1f * s
+            val a = ((150 - k * 9) * (0.75f + 0.25f * sin(t * 4f + k))).toInt().coerceAtLeast(0)
+            paint.color = Color.argb(a, 255, 214, 175)
+            c.drawRect(wx - 5f * s, 2f * s + spread, wx + 5f * s, 3.2f * s + spread, paint)
+            c.drawRect(wx - 5f * s, 2f * s - spread * 0.25f, wx + 5f * s, 2.8f * s - spread * 0.25f, paint)
+            if (k < 6) { paint.color = Color.argb(a / 2, 255, 230, 200); c.drawRect(wx - 7f * s, 2.2f * s, wx + 7f * s, 3.4f * s, paint) }
+        }
+        paint.color = Color.argb(170, 255, 225, 190); c.drawRect(24f * s, 1.5f * s, 30f * s, 3f * s, paint)
         paint.color = Color.rgb(30, 14, 34)
         if (type == 0) {
             // gondola: long crescent hull, the ferro at the bow, the gondolier rowing at the stern

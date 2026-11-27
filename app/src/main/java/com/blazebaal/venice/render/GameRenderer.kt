@@ -136,6 +136,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         "San Marco, Rialto e i monumenti" to { loadLandmarks() },
         "I ponti" to { loadBridges() },
         "Gli imbarcaderi ACTV" to { loadStops() },
+        "Le barene" to { grassP = Program(Shaders.GRASS_VS, Shaders.GRASS_FS, "grass"); grass = MarshGrass(world) },
         "La flotta ACTV" to {
             live = LiveBoats(world); live.setStops(stopList)
             for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) { fleetMeshes[i] = loadMesh("live/$n.mesh"); fleetLod[i] = loadMesh("live/${n}_lod.mesh") }
@@ -432,6 +433,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     private var menuScene: MenuScene? = null; private var menuT = 0f; 
     private lateinit var dimP: Program; private lateinit var copyP: Program; private lateinit var waterSimple: Program
+    private lateinit var grassP: Program; private lateinit var grass: MarshGrass
+    private var towT = 0f; private var weedWarned = false
     private var targetsSimple = false
     // ---- frozen background while a page is open: the last frame, blurred, and no more rendering
     private var frozen = false; private var frzTex = 0; private var frzW = 0; private var frzH = 0
@@ -615,7 +618,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             boat.weatherWaves = if (Settings.liveWeather || Weather.override > 0) Weather.waveFactor() else 1f
             tripTime += sdt
             val ox = boat.x; val oy = boat.y
+            boat.marsh = world.marsh(boat.x, boat.y)
             for (k in 0 until 3) boat.update(sdt / 3, if (Controls.engineOn) thr else 0f, st, world)
+            weed(sdt)
+            navigate(sdt)
             if (boat.splash > 1.5f) Audio.event(Audio.EV_SPLASH, boat.splash)
             distance += hypot(boat.x - ox, boat.y - oy)
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
@@ -691,6 +697,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         sc.bind()
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
+        drawGrass(vp)
         drawSky(vp, false)
         drawWater(vp, r)
         drawTrails(vp)
@@ -754,7 +761,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
                 glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, t.maskTex)
                 glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, t.classTex)
                 ground.f("uMarshPass", 0f); ground.mat4("uModel", Mat4.translation(t.ox, t.oy, Z.GROUND)); groundQuad?.draw()
-                if (t.hasMarsh) { ground.f("uMarshPass", 1f); ground.mat4("uModel", Mat4.translation(t.ox, t.oy, Z.MARSH)); groundQuad?.draw() }
+                if (t.hasMarsh) { ground.f("uMarshPass", 1f); ground.f("uGrassR", if (clipZ > -999f) 0f else grassRadius()); ground.mat4("uModel", Mat4.translation(t.ox, t.oy, Z.MARSH)); groundQuad?.draw() }
             }
         }
         facade.use(); common(facade, vp, mir, clipZ, !reflection)
@@ -829,6 +836,98 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         water.f("uGridHalf", 1e6f); waterNear?.draw()
         water.f("uGridHalf", 160f); waterMid?.draw()
         water.f("uGridHalf", 1f); waterFar?.draw()
+    }
+
+    // ---------------------------------------------------------------- navigator + canal width
+    private val planner by lazy { RoutePlanner(world) }
+    private val navExec = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "navigator").apply { isDaemon = true; priority = Thread.MIN_PRIORITY } }
+    @Volatile private var planning = false
+    private var plannedX = Float.NaN; private var plannedY = Float.NaN; private var replanT = 0f; private var routeSeg = 0; private var widthT = 0f
+
+    private fun navigate(dt: Float) {
+        widthT -= dt
+        if (widthT <= 0f) {
+            widthT = 0.25f
+            // water across the boat: both sides, perpendicular to the heading, up to 350 m
+            val px = -sin(boat.heading); val py = cos(boat.heading)
+            var w = 0f
+            for (sg in intArrayOf(-1, 1)) { var d = 2f; while (d < 350f && world.solid(boat.x + px * d * sg, boat.y + py * d * sg) < 0.5f) d += if (d < 40f) 2f else 6f; w += d }
+            GameState.canalWidth = w
+        }
+        if (!GameState.hasWaypoint()) { GameState.route = null; plannedX = Float.NaN; return }
+        val wx = GameState.wpX; val wy = GameState.wpY
+        replanT -= dt
+        val route = GameState.route
+        if (!planning && (wx != plannedX || wy != plannedY || (route != null && offRoute(route) > 45f && replanT <= 0f))) {
+            planning = true; plannedX = wx; plannedY = wy; replanT = 3f
+            val sx = boat.x; val sy = boat.y
+            navExec.execute {
+                val r = try { planner.plan(sx, sy, wx, wy) } catch (e: Throwable) { null }
+                if (GameState.wpX == wx && GameState.wpY == wy) { GameState.route = r; routeSeg = 0 }
+                planning = false
+            }
+        }
+        val r = GameState.route ?: run { GameState.aimX = wx; GameState.aimY = wy; return }
+        // progress: nearest segment (searching forward from the last one), aim 45 m further along, distance left
+        val n = r.size / 2
+        var best = routeSeg; var bd = Float.MAX_VALUE
+        for (i in max(0, routeSeg - 2) until min(n - 1, routeSeg + 12)) { val d = segDist(r, i, boat.x, boat.y); if (d < bd) { bd = d; best = i } }
+        routeSeg = best
+        val ax = r[best * 2]; val ay = r[best * 2 + 1]; val bx = r[best * 2 + 2]; val by = r[best * 2 + 3]
+        val l = max(hypot(bx - ax, by - ay), 1e-3f)
+        val t = (((boat.x - ax) * (bx - ax) + (boat.y - ay) * (by - ay)) / (l * l)).coerceIn(0f, 1f)
+        var left = l * (1 - t)
+        for (i in best + 1 until n - 1) left += hypot(r[i * 2 + 2] - r[i * 2], r[i * 2 + 3] - r[i * 2 + 1])
+        GameState.routeLeft = left + bd
+        var need = 45f; var i = best; var px = ax + (bx - ax) * t; var py = ay + (by - ay) * t
+        while (i < n - 1) {
+            val ex = r[i * 2 + 2]; val ey = r[i * 2 + 3]; val sl = hypot(ex - px, ey - py)
+            if (sl >= need) { px += (ex - px) * need / sl; py += (ey - py) * need / sl; break }
+            need -= sl; px = ex; py = ey; i++
+        }
+        GameState.aimX = px; GameState.aimY = py
+    }
+    private fun segDist(r: FloatArray, i: Int, x: Float, y: Float): Float {
+        val ax = r[i * 2]; val ay = r[i * 2 + 1]; val bx = r[i * 2 + 2]; val by = r[i * 2 + 3]
+        val l2 = max((bx - ax) * (bx - ax) + (by - ay) * (by - ay), 1e-6f)
+        val t = (((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / l2).coerceIn(0f, 1f)
+        return hypot(ax + (bx - ax) * t - x, ay + (by - ay) * t - y)
+    }
+    private fun offRoute(r: FloatArray): Float { var m = Float.MAX_VALUE; for (i in max(0, routeSeg - 2) until min(r.size / 2 - 1, routeSeg + 12)) m = min(m, segDist(r, i, boat.x, boat.y)); return m }
+
+    private fun grassRadius() = if (Settings.simple) 32f else 60f
+    private fun drawGrass(vp: FloatArray) {
+        grass.radius = grassRadius(); grass.update(camX, camY)
+        grassP.use(); common(grassP, vp, ident, -1000f, false)
+        val w = if ((Settings.liveWeather && Weather.live) || Weather.override > 0) Weather.windVec() else floatArrayOf(2.5f, 1.2f)
+        grassP.vec2("uWind", w[0], w[1]); grassP.f("uRadius", grass.radius)
+        grass.draw()
+    }
+
+    /** barene: weed wraps round the prop; fully tangled, the boat is towed out to open water */
+    private fun weed(dt: Float) {
+        if (boat.entangle > 0.3f && !weedWarned) { weedWarned = true; Events.post("ALGHE NELL'ELICA", Events.WARN, key = "weed") }
+        if (boat.entangle < 0.1f) weedWarned = false
+        if (boat.entangle >= 1f) {
+            if (towT == 0f) Events.post("ELICA IMPIGLIATA", Events.BAD, key = "tangled")
+            towT += dt
+            if (towT > 2.5f) {
+                // nearest open water clear of the barene, searched in widening rings
+                var done = false
+                var r = 10f
+                while (!done && r < 600f) {
+                    for (k in 0 until 24) {
+                        val a = k * 0.2618f; val x = boat.x + cos(a) * r; val y = boat.y + sin(a) * r
+                        if (world.marsh(x, y) < 0.05f && world.solid(x, y) < 0.05f && world.marsh(x + 6f, y) < 0.1f && world.marsh(x - 6f, y) < 0.1f && world.solid(x + 4f, y) < 0.1f && world.solid(x, y + 4f) < 0.1f) {
+                            boat.x = x; boat.y = y; boat.heading = a; done = true; break
+                        }
+                    }
+                    r += 10f
+                }
+                boat.surge = 0f; boat.sway = 0f; boat.entangle = 0f; towT = 0f
+                Events.post("RIMORCHIATO FUORI", Events.INFO, key = "towed")
+            }
+        } else towT = 0f
     }
 
     private fun drawTrails(vp: FloatArray) {

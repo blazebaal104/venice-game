@@ -26,6 +26,13 @@ class WorldMap(val map: MapData) {
         return t.solidAt(x - t.ox, y - t.oy)
     }
 
+    /** 0..1 barena (marsh vegetation) coverage */
+    fun marsh(x: Float, y: Float): Float {
+        val (tx, ty) = tileCoords(x, y)
+        val t = tile(tx, ty) ?: return 0f
+        return t.marshAt(x - t.ox, y - t.oy)
+    }
+
     /** Gradient of solidity pointing towards water (unnormalised). */
     fun toWater(x: Float, y: Float): Pair<Float, Float> {
         val e = 0.6f

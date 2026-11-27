@@ -452,7 +452,7 @@ void main() { vec4 w = uModel * vec4(aPos, 1.0); vW = w.xyz; vL = aPos.xy; gl_Po
 precision highp float;
 $COMMON
 in vec3 vW; in vec2 vL;
-uniform sampler2D uMask; uniform sampler2D uClass; uniform float uMarshPass;
+uniform sampler2D uMask; uniform sampler2D uClass; uniform float uMarshPass; uniform float uGrassR;
 out vec4 o;
 void main() {
     if (vW.z < uClipZ) discard;
@@ -460,6 +460,11 @@ void main() {
     vec2 mk = texture(uMask, uv).rg;
     float cov = uMarshPass > 0.5 ? mk.g : mk.r;
     if (cov < 0.5) discard;
+    if (uMarshPass > 0.5) {
+        // up close the barena is real grass standing in the water (MarshGrass): dithered hand-over
+        float th = fract(sin(dot(floor(gl_FragCoord.xy), vec2(12.9898, 78.233))) * 43758.5453);
+        if (distance(vW.xy, uCam.xy) < uGrassR * (0.8 + 0.2 * th)) discard;
+    }
     vec3 alb; float rough; vec3 tn;
     vec2 q = vW.xy;
     if (uMarshPass > 0.5) {
@@ -965,6 +970,47 @@ void main() {
     vec3 h = normalize(uSunDir + v);
     col += uSunCol * pow(max(dot(n, h), 0.0), 280.0) * 1.8;
     o = vec4(fog(col, vW), 1.0);
+}
+"""
+
+    // ------------------------------------------------------------------ barene grass (instanced clumps)
+    const val GRASS_VS = """#version 300 es
+layout(location=0) in vec3 aPos; layout(location=2) in vec4 aInst;
+uniform mat4 uVP; uniform vec3 uCam; uniform vec2 uWind; uniform float uTime; uniform float uRadius;
+out vec3 vW; out float vZ; out float vSeed;
+void main() {
+    float s = aInst.w; float ang = s * 43.98;
+    float c = cos(ang), sn = sin(ang);
+    vec2 lp = vec2(aPos.x * c - aPos.y * sn, aPos.x * sn + aPos.y * c);
+    float d = distance(aInst.xy, uCam.xy);
+    float h = aInst.z * (1.0 - smoothstep(uRadius * 0.85, uRadius, d));    // sinks away at the hand-over edge
+    float z = aPos.z;
+    float w = length(uWind);
+    vec2 wd = w > 0.05 ? uWind / w : vec2(0.8, 0.6);
+    // gusts rolling across the field downwind + each blade's own flutter; stronger wind = bent further over
+    float gust = sin(dot(aInst.xy, wd) * 0.32 - uTime * (1.1 + w * 0.22)) * 0.5 + 0.5;
+    float flutter = sin(uTime * (2.2 + s * 1.9) + s * 40.0);
+    float bend = (0.06 + w * 0.045) * (0.45 + gust);
+    vec2 off = (wd * bend + vec2(-wd.y, wd.x) * flutter * (0.03 + w * 0.006)) * z * z * (0.4 + h);
+    vec3 p = vec3(aInst.xy + lp * (0.7 + 0.5 * h) + off, -0.18 + z * (h + 0.18));
+    vW = p; vZ = z; vSeed = s;
+    gl_Position = uVP * vec4(p, 1.0);
+}
+"""
+    val GRASS_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in float vZ; in float vSeed;
+out vec4 o;
+void main() {
+    // late-autumn barena palette: green spartina, olive limonium, straw, the red of the salicornia
+    vec3 c0 = vec3(0.16, 0.26, 0.08), c1 = vec3(0.30, 0.31, 0.12), c2 = vec3(0.46, 0.40, 0.22), c3 = vec3(0.40, 0.12, 0.08);
+    float s = vSeed;
+    vec3 col = s < 0.45 ? mix(c0, c1, s / 0.45) : (s < 0.8 ? mix(c1, c2, (s - 0.45) / 0.35) : mix(c2, c3, (s - 0.8) / 0.2));
+    col *= 0.55 + 0.55 * vZ;                                   // darker, wet bases; sunlit tips
+    vec3 lit = col * (uSkyAmb * 1.25 + uSunCol * (0.35 + 0.45 * max(uSunDir.z, 0.0)));
+    lit += uSunCol * col * 0.25 * vZ * vZ;                       // light through the blades
+    o = vec4(fog(lit, vW), 1.0);
 }
 """
 

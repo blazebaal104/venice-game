@@ -121,11 +121,19 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             val tiles = if (glReady) (GameState.tilesLoaded.toFloat() / max(1, min(4, GameState.tilesWanted))).coerceIn(0f, 1f) else 0f
             val p = 0.85f * GameState.bootProgress + 0.15f * tiles
             if (glReady && !GameState.loading && loadShown > 2.2f) loadFade += dt
-            val a = (1f - loadFade / 0.8f).coerceIn(0f, 1f)
-            if (glReady && loadFade > 0f) { drawMenu(); gui.endFrame() }
             val stage = if (glReady) (if (GameState.loading) "Costruisco i quartieri intorno a te" else "Venezia è pronta") else GameState.bootStage
-            loadingScreen.draw(canvas, W, H, dt, p, stage, a, GameState.bootError)
-            if (a <= 0f) GameState.booted = true
+            // transition: the sunset fades to black (0.6 s), a beat of black while the menu settles behind,
+            // then the menu comes up out of the black (0.7 s) - nothing pops in on screen
+            ink.fill.style = Paint.Style.FILL
+            if (loadFade < 0.6f) {
+                if (loadFade > 0f) { ink.fill.color = Color.BLACK; c.drawRect(0f, 0f, W, H, ink.fill) }
+                loadingScreen.draw(canvas, W, H, dt, p, stage, 1f - loadFade / 0.6f, GameState.bootError)
+            } else {
+                drawMenu(); gui.endFrame()
+                ink.fill.color = Color.argb(((1f - ((loadFade - 0.9f) / 0.7f)).coerceIn(0f, 1f) * 255).toInt(), 0, 0, 0)
+                c.drawRect(0f, 0f, W, H, ink.fill)
+            }
+            if (loadFade >= 1.6f) GameState.booted = true
             postInvalidateOnAnimation()
             return
         }
@@ -478,7 +486,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     private fun controls(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "GUIDA")
-        Settings.analogSteering = gui.segmented(row(x, y, w, "Sterzo", if (Settings.analogSteering) "Trascina il timone: sterzata progressiva" else "Due frecce: tutto a destra o a sinistra"), listOf("Timone", "Frecce"), if (Settings.analogSteering) 0 else 1) == 0
+        Settings.steerMode = gui.segmented(row(x, y, w, "Sterzo", when (Settings.steerMode) { 0 -> "Trascina il timone: sterzata progressiva"; 1 -> "Due frecce: tutto a destra o a sinistra"; else -> "Volante: giralo, si ferma a 90° per lato" }), listOf("Timone", "Frecce", "Volante"), Settings.steerMode)
+        Settings.analogSteering = Settings.steerMode != 1
         y += ROW
         Settings.steerSensitivity = gui.slider("ss", row(x, y, w, "Sensibilità sterzo", "${(Settings.steerSensitivity * 100).roundToInt()}%"), Settings.steerSensitivity, 0.5f, 1.5f, 0.05f); y += ROW
         Settings.cameraSensitivity = gui.slider("cs", row(x, y, w, "Sensibilità telecamera", "${(Settings.cameraSensitivity * 100).roundToInt()}%"), Settings.cameraSensitivity, 0.4f, 2f, 0.1f); y += ROW
@@ -637,11 +646,18 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             if (abs(q.x) > W / 2 + 30 * dp || abs(q.y) > H / 2 + 30 * dp) continue
             vaporettoMark(q.x, q.y, v.h, v.line, z > 0.25f)
         }
-        // waypoint + route line
+        // canal names
+        Canals.draw(ink, 11f, 0f, 160 * dp, { x, y -> sp(x, y) }, { q -> abs(q.x) < W / 2 + 60 * dp && abs(q.y) < H / 2 + 30 * dp })
+        // waypoint + the navigator's route along the canals
         if (GameState.hasWaypoint()) {
-            val b = sp(GameState.x, GameState.y); val w = sp(GameState.wpX, GameState.wpY)
-            ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 3 * dp; ink.stroke.pathEffect = DashPathEffect(floatArrayOf(8 * dp, 6 * dp), 0f)
-            c.drawLine(b.x, b.y, w.x, w.y, ink.stroke); ink.stroke.pathEffect = null
+            val w = sp(GameState.wpX, GameState.wpY)
+            GameState.route?.let { rt ->
+                ink.path.reset()
+                for (i in 0 until rt.size / 2) { val q = sp(rt[i * 2], rt[i * 2 + 1]); if (i == 0) ink.path.moveTo(q.x, q.y) else ink.path.lineTo(q.x, q.y) }
+                ink.stroke.strokeJoin = Paint.Join.ROUND; ink.stroke.strokeCap = Paint.Cap.ROUND
+                ink.stroke.color = Color.argb(200, 10, 30, 50); ink.stroke.strokeWidth = 7 * dp; c.drawPath(ink.path, ink.stroke)
+                ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 4 * dp; c.drawPath(ink.path, ink.stroke)
+            }
             ink.icon("pin", w.x, w.y - 10 * dp, Theme.YELLOW, 1.4f)
         }
         // selection

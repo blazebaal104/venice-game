@@ -37,7 +37,7 @@ class Navigator(private val world: WorldMap) {
         }
         return false
     }
-    private fun water(x: Float, y: Float) = world.solid(x, y) < 0.3f && !blocked(x, y)
+    private fun water(x: Float, y: Float) = world.solid(x, y) < 0.3f && world.marsh(x, y) < 0.4f && !blocked(x, y)    // vaporetti keep out of the barene
     private fun free(x: Float, y: Float, cl: Float) =
         water(x, y) && water(x + cl, y) && water(x - cl, y) && water(x, y + cl) && water(x, y - cl)
 

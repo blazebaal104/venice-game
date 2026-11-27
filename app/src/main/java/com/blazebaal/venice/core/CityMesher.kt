@@ -5,7 +5,7 @@ import kotlin.math.*
 
 object Z {
     const val GROUND = 1.1f      // fondamenta / campi height above mean water
-    const val MARSH = 0.32f      // barene
+    const val MARSH = 0.05f      // barene: a carpet of vegetation just above the water (far away; up close: MarshGrass)
     const val WALL_BOTTOM = -1.8f
 }
 

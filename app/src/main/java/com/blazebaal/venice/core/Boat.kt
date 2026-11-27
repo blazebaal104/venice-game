@@ -20,6 +20,8 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
     }
 
     var surge = 0f; var sway = 0f; var yawRate = 0f
+    /** barene: 0..1 how much weed is wrapped round the prop (1 = stuck); marsh = coverage under the hull now */
+    var entangle = 0f; var marsh = 0f
     /** Outboard trim, -1 trimmed in (bow down) .. +1 trimmed out (bow up).
      *  Like a real outboard: trimmed in gets you on the plane fastest and bites in turns but ploughs (more wetted hull,
      *  lower top speed); trimming out lifts the bow, takes hull out of the water and gains speed up to a sweet spot
@@ -71,10 +73,16 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         val planingH = (abs(surge) / 11f).coerceIn(0f, 1f)
         val holeShot = 1f + (1f - planingH) * (-0.22f * trim)
         val thrust = 9.4f * (1.15f - 0.35f * (surge / top).coerceIn(0f, 1f)) * holeShot
-        val accel = if (!inWater) 0f else if (thr >= 0) thr * thrust else thr * (if (surge > 0.5f) 11f else 2.6f)
+        // weed round the prop: less and less thrust as it wraps up (in the grass it wraps faster the harder you push)
+        val weed = 1f - entangle * entangle * 0.92f
+        val accel = (if (!inWater) 0f else if (thr >= 0) thr * thrust else thr * (if (surge > 0.5f) 11f else 2.6f)) * weed
         val dragK = (9.4f * 0.8f - 0.06f * top) / (top * top)       // thrust = drag exactly at the top speed
         val drag = if (surge >= 0) dragK * surge * abs(surge) else 2.6f / (REVERSE_SPEED * REVERSE_SPEED) * surge * abs(surge)
-        surge += (accel - drag * (if (inWater) 1f else 0.15f) - (if (surge >= 0) 0.06f else 0.3f) * surge * (if (inWater) 1f else 0.1f)) * dt
+        // the grass itself drags on the hull
+        val grass = marsh * (0.35f + 0.04f * abs(surge)) * surge
+        surge += (accel - drag * (if (inWater) 1f else 0.15f) - (if (surge >= 0) 0.06f else 0.3f) * surge * (if (inWater) 1f else 0.1f) - grass) * dt
+        if (marsh > 0.4f && abs(thr) > 0.05f) entangle = (entangle + dt * (0.03f + 0.04f * abs(thr) + 0.004f * abs(surge))).coerceAtMost(1f)
+        else if (marsh < 0.2f) entangle = (entangle - dt * (if (thr < -0.1f) 0.12f else 0.03f)).coerceAtLeast(0f)   // astern shakes it off
         // trimmed out the hull slides more in turns (less wetted surface), trimmed in it grips
         sway += (-sway * (if (inWater) 3.4f * (1f - 0.3f * max(trim, 0f)) + 0.6f * max(-trim, 0f) else 0.3f) - surge * yawRate * 0.14f) * dt
         val authority = (abs(surge) / 5f).coerceIn(0f, 1f) * 0.95f * (1f - 0.16f * trim) + abs(thr) * 0.4f * (1f - (abs(surge) / 6f).coerceIn(0f, 1f))

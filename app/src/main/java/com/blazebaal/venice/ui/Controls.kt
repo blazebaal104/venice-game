@@ -91,8 +91,14 @@ object GameState {
     @Volatile var wpX = Float.NaN; @Volatile var wpY = Float.NaN
     @Volatile var wpName = ""
     fun hasWaypoint() = !wpX.isNaN()
-    fun clearWaypoint() { wpX = Float.NaN; wpY = Float.NaN; wpName = "" }
-    fun waypointDistance() = if (hasWaypoint()) hypot(wpX - x, wpY - y) else 0f
+    fun clearWaypoint() { wpX = Float.NaN; wpY = Float.NaN; wpName = ""; route = null }
+    /** the navigator's route along the canals (x0, y0, x1, y1...), where to steer now, and the distance left on it */
+    @Volatile var route: FloatArray? = null
+    @Volatile var aimX = Float.NaN; @Volatile var aimY = Float.NaN
+    @Volatile var routeLeft = 0f
+    fun waypointDistance() = if (!hasWaypoint()) 0f else if (route != null) routeLeft else hypot(wpX - x, wpY - y)
+    /** width of the water across the boat (m), for the minimap zoom */
+    @Volatile var canalWidth = 120f
     /** cache pre-build progress (0..1), -1 when idle */
     @Volatile var prebuild = -1f
 }
@@ -121,6 +127,8 @@ object Settings {
     @Volatile var showFps = false
     // ---- controls
     @Volatile var analogSteering = true
+    /** 0 timone (slider), 1 frecce, 2 volante (wheel, stops at ±90°) */
+    @Volatile var steerMode = 0
     @Volatile var steerSensitivity = 1f
     @Volatile var cameraSensitivity = 1f
     @Volatile var vibration = true
@@ -173,7 +181,7 @@ object Settings {
         shadows = p.getBoolean("shadows", true); reflections = p.getBoolean("reflections", true); bloom = p.getBoolean("bloom", true)
         sharpen = if (p.getInt("settingsVersion", 1) < 3) 0.5f else p.getFloat("sharpen", 0.5f); fogDensity = p.getInt("fog", 1)
         showFps = if (p.getInt("settingsVersion", 1) < 2) false else p.getBoolean("showFps", false)
-        analogSteering = p.getBoolean("analog", true); steerSensitivity = p.getFloat("steerSens", 1f); cameraSensitivity = p.getFloat("camSens", 1f)
+        analogSteering = p.getBoolean("analog", true); steerMode = p.getInt("steerMode", if (analogSteering) 0 else 1); steerSensitivity = p.getFloat("steerSens", 1f); cameraSensitivity = p.getFloat("camSens", 1f)
         vibration = p.getBoolean("vibration", true); speedUnit = p.getInt("speedUnit", 0); hudScale = p.getFloat("hudScale", 1f)
         minimapNorthUp = p.getBoolean("northUp", false)
         volMaster = p.getFloat("volMaster", 0.8f); volEngine = p.getFloat("volEngine", 0.8f); volAmbience = p.getFloat("volAmbience", 0.6f)
@@ -188,7 +196,7 @@ object Settings {
             .putInt("resolution", resolution).putInt("fps", fpsTarget)
             .putBoolean("shadows", shadows).putBoolean("reflections", reflections).putBoolean("bloom", bloom)
             .putFloat("sharpen", sharpen).putInt("fog", fogDensity).putBoolean("showFps", showFps)
-            .putBoolean("analog", analogSteering).putFloat("steerSens", steerSensitivity).putFloat("camSens", cameraSensitivity)
+            .putBoolean("analog", analogSteering).putInt("steerMode", steerMode).putFloat("steerSens", steerSensitivity).putFloat("camSens", cameraSensitivity)
             .putBoolean("vibration", vibration).putInt("speedUnit", speedUnit).putFloat("hudScale", hudScale).putBoolean("northUp", minimapNorthUp)
             .putFloat("volMaster", volMaster).putFloat("volEngine", volEngine).putFloat("volAmbience", volAmbience)
             .putBoolean("liveWeather", liveWeather).putBoolean("liveVaporetti", liveVaporetti).putInt("language", language)
