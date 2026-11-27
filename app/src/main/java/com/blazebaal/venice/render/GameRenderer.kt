@@ -487,6 +487,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val bvp = Mat4.mul(Mat4.perspective(Math.toRadians(30.0).toFloat(), vw.toFloat() / max(1, vh), 0.5f, 100f),
                 Mat4.lookAt(-cos(camA) * camD, 0f, sin(camA) * camD + 0.6f, 0f, 0f, 0.55f, 0f, 0f, 1f))
             fogStart = 1e5f; fogEnd = 0f; fogDens = 0f
+            generic.use()                      // the dim pass above switched programs
             common(generic, bvp, ident, -1000f, false)
             generic.vec3("uCam", -cos(camA) * camD, 0f, sin(camA) * camD + 0.6f)
             var m = Mat4.mul(Mat4.translation(0f, 0f, bob), Mat4.rotZ(yaw))
