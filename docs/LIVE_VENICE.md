@@ -84,3 +84,26 @@ Layer A.)
 Each boat shows its **line number** on the bow sign (same sign-sheet approach as the pontoon names:
 `landmarks/actv_signs.png`) and follows real ACTV livery (white/grey hull, yellow-black accents).
 Gameplay hooks later: collisions + wake from big boats, horns, riding along as a passenger, "follow line N" camera.
+
+## Behaviour layer (v3)
+
+ACTV data says *where* a boat is; `render/LiveBoats.kt` decides *how* it gets there, like a real vaporetto:
+
+| State | What it does | Leaves the state when |
+|---|---|---|
+| DOCKED | alongside the pontoon, engine idling ahead against it | live: a fix away from the stop (or no longer STOPPED_AT); offline: the timetable departure |
+| DEPARTING | swings its bow out from the pontoon on a short exit leg, opens the throttle slowly | ~8 s and 20 m out |
+| CRUISING | follows a water path (A*, quay clearance) at the speed that reaches the next fix in time | a stop becomes its target |
+| APPROACHING | braking curve (~0.18 m/s²), astern for the last metres (white churn), comes alongside | it is alongside: DOCKED |
+
+Live feed hints used: `STOPPED_AT` (dock / stay docked), `INCOMING_AT` + stop id (start the approach to that stop
+early), plain positions otherwise. A fix just behind the boat (GPS jitter) never makes it reverse.
+
+Every boat runs an engine model (throttle -> rpm with lag -> thrust ~ rpm², hull drag ~ v²); rpm drives:
+- exhaust smoke (thin haze at idle, dark puffs when the throttle opens),
+- the foam trail behind the stern and the prop wash / astern churn,
+- the hull's displacement in the GPU wake simulation (Kelvin wake, up to 4 boats near the player),
+- the diesel sound.
+
+Boat type follows the line: motobattello (1, 2, N...), motoscafo (3, 4.1/4.2, 5.1/5.2, 6, 7, 10), motonave (11-19),
+lancione "Gran Turismo" (9, 20...). Models: `tools/procedural/vaporetti.py`, liveries from reference photos.
