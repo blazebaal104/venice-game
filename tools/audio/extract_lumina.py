@@ -1,7 +1,9 @@
 import sys, re, json, base64, subprocess, wave
 # Usage: python3 extract_lumina.py <lumina-sfx clone> <out dir> <recording names...>  (see build_bank.py for the list)
 repo, out = sys.argv[1], sys.argv[2]
-credits = {}
+import os
+cp = os.path.join(out, 'credits.json')
+credits = json.load(open(cp)) if os.path.exists(cp) else {}   # merge with earlier runs
 def field(src, k):
     m = re.search(r'["\']?%s["\']?\s*:\s*["\']([^"\']*)["\']' % k, src); return m.group(1) if m else None
 for n in sys.argv[3:]:

@@ -14,7 +14,7 @@ import kotlin.math.*
 class MarshGrass(private val world: WorldMap) {
     private val vao: Int; private val vbo: Int; private val ibo: Int
     private val verts: Int
-    private val maxInst = 12000
+    private val maxInst = 24000
     private val inst = FloatArray(maxInst * 4)
     private val buf = ByteBuffer.allocateDirect(maxInst * 16).order(ByteOrder.nativeOrder()).asFloatBuffer()
     private var count = 0
@@ -22,15 +22,21 @@ class MarshGrass(private val world: WorldMap) {
     var radius = 60f
 
     init {
-        // 3 blades round the clump, each a tapered quad + tip triangle, leaning outwards a little
+        // a tuft of 10 fine blades: thin tapered triangles spread over ~0.25 m, each its own height and lean
+        // (spartina, limonium and salicornia stems standing in the shallow water)
         val v = ArrayList<Float>()
-        for (b in 0 until 3) {
-            val a = b * 2.094f + 0.3f; val c = cos(a); val s = sin(a)
-            val lean = 0.10f + 0.05f * b
-            fun p(w: Float, z: Float) { val out = lean * z * z; v.add(c * w - s * out); v.add(s * w + c * out); v.add(z) }
-            val w0 = 0.055f; val w1 = 0.035f
-            p(-w0, 0f); p(w0, 0f); p(w1, 0.55f); p(-w0, 0f); p(w1, 0.55f); p(-w1, 0.55f)
-            p(-w1, 0.55f); p(w1, 0.55f); p(0f, 1f)
+        fun h(k: Int, n: Int): Float { var x = k * 374761393 + n * 668265263; x = (x xor (x ushr 13)) * 1274126177; return ((x xor (x ushr 16)) and 0xffff) / 65535f }
+        for (b in 0 until 10) {
+            val a = b * 2.39996f; val r = 0.03f + 0.20f * sqrt((b + 0.5f) / 10f)
+            val bx = cos(a) * r; val by = sin(a) * r
+            val o = h(b, 1) * 6.283f; val px = cos(o); val py = sin(o)       // blade's own facing
+            val hb = 0.45f + 0.55f * h(b, 2)
+            val lean = 0.06f + 0.16f * h(b, 3)
+            val lx = cos(a + (h(b, 4) - 0.5f)) * lean * hb; val ly = sin(a + (h(b, 4) - 0.5f)) * lean * hb
+            val w = 0.011f + 0.008f * h(b, 5)
+            v.add(bx - px * w); v.add(by - py * w); v.add(0f)
+            v.add(bx + px * w); v.add(by + py * w); v.add(0f)
+            v.add(bx + lx); v.add(by + ly); v.add(hb)
         }
         verts = v.size / 3
         val ids = IntArray(3)
@@ -62,7 +68,7 @@ class MarshGrass(private val world: WorldMap) {
         var sx = -radius
         while (sx <= radius && !any) { var sy = -radius; while (sy <= radius) { if (world.marsh(cx + sx, cy + sy) > 0.3f) { any = true; break }; sy += 12f }; sx += 12f }
         if (!any) { count = 0; return }
-        val step = 1.05f
+        val step = 0.52f
         val i0 = floor((cx - radius) / step).toInt(); val i1 = ceil((cx + radius) / step).toInt()
         val j0 = floor((cy - radius) / step).toInt(); val j1 = ceil((cy + radius) / step).toInt()
         var n = 0
@@ -76,8 +82,9 @@ class MarshGrass(private val world: WorldMap) {
             val m = world.marsh(x, y); if (m < 0.45f) continue
             if (world.solid(x, y) > 0.4f) continue
             val seed = hash(i, j, 4)
-            // tufts of different heights: low salicornia, mid limonium, the odd tall reed clump
-            val hgt = (0.25f + 0.55f * hash(i, j, 5) + (if (seed > 0.9f) 0.6f else 0f)) * (0.55f + 0.45f * ((m - 0.45f) / 0.55f))
+            // tufts of very different heights: low salicornia carpets, mid limonium, taller spartina, the odd reed clump
+            val r5 = hash(i, j, 5)
+            val hgt = (0.12f + 0.55f * r5 * r5 + 0.35f * hash(i / 3, j / 3, 6) + (if (seed > 0.93f) 0.55f else 0f)) * (0.55f + 0.45f * ((m - 0.45f) / 0.55f))
             val o = n * 4; inst[o] = x; inst[o + 1] = y; inst[o + 2] = hgt; inst[o + 3] = seed
             if (++n >= maxInst) break@loop
         }

@@ -1009,9 +1009,10 @@ void main() {
     const val GRASS_VS = """#version 300 es
 layout(location=0) in vec3 aPos; layout(location=2) in vec4 aInst;
 uniform mat4 uVP; uniform vec3 uCam; uniform vec2 uWind; uniform float uTime; uniform float uRadius;
-out vec3 vW; out float vZ; out float vSeed;
+out vec3 vW; out float vZ; out float vSeed; out float vBlade;
 void main() {
     float s = aInst.w; float ang = s * 43.98;
+    float bl = fract(sin(float(gl_VertexID / 3) * 12.9898 + s * 78.233) * 43758.5453);   // this blade
     float c = cos(ang), sn = sin(ang);
     vec2 lp = vec2(aPos.x * c - aPos.y * sn, aPos.x * sn + aPos.y * c);
     float d = distance(aInst.xy, uCam.xy);
@@ -1023,25 +1024,79 @@ void main() {
     float gust = sin(dot(aInst.xy, wd) * 0.32 - uTime * (1.1 + w * 0.22)) * 0.5 + 0.5;
     float flutter = sin(uTime * (2.2 + s * 1.9) + s * 40.0);
     float bend = (0.06 + w * 0.045) * (0.45 + gust);
-    vec2 off = (wd * bend + vec2(-wd.y, wd.x) * flutter * (0.03 + w * 0.006)) * z * z * (0.4 + h);
-    vec3 p = vec3(aInst.xy + lp * (0.7 + 0.5 * h) + off, -0.18 + z * (h + 0.18));
-    vW = p; vZ = z; vSeed = s;
+    // the taller the stem, the further it bends and the more it waves
+    vec2 off = (wd * bend + vec2(-wd.y, wd.x) * flutter * (0.03 + w * 0.006)) * z * z * (0.2 + 1.5 * h);
+    vec3 p = vec3(aInst.xy + lp * (0.8 + 0.4 * h) + off, -0.18 + z * (h * (0.75 + 0.5 * bl) + 0.18));
+    vW = p; vZ = z; vSeed = s; vBlade = bl;
     gl_Position = uVP * vec4(p, 1.0);
 }
 """
     val GRASS_FS = """#version 300 es
 precision highp float;
 $COMMON
-in vec3 vW; in float vZ; in float vSeed;
+in vec3 vW; in float vZ; in float vSeed; in float vBlade;
 out vec4 o;
 void main() {
-    // late-autumn barena palette: green spartina, olive limonium, straw, the red of the salicornia
-    vec3 c0 = vec3(0.16, 0.26, 0.08), c1 = vec3(0.30, 0.31, 0.12), c2 = vec3(0.46, 0.40, 0.22), c3 = vec3(0.40, 0.12, 0.08);
-    float s = vSeed;
-    vec3 col = s < 0.45 ? mix(c0, c1, s / 0.45) : (s < 0.8 ? mix(c1, c2, (s - 0.45) / 0.35) : mix(c2, c3, (s - 0.8) / 0.2));
-    col *= 0.55 + 0.55 * vZ;                                   // darker, wet bases; sunlit tips
+    // the barene as they look most of the year: grey-green, straw, pale ochre, a little rust of salicornia
+    vec3 c0 = vec3(0.30, 0.33, 0.22), c1 = vec3(0.42, 0.43, 0.34), c2 = vec3(0.55, 0.50, 0.33), c3 = vec3(0.62, 0.53, 0.30), c4 = vec3(0.45, 0.26, 0.18);
+    float s = fract(vSeed * 0.7 + vBlade * 0.45);
+    vec3 col = s < 0.3 ? mix(c0, c1, s / 0.3) : (s < 0.62 ? mix(c1, c2, (s - 0.3) / 0.32) : (s < 0.93 ? mix(c2, c3, (s - 0.62) / 0.31) : c4));
+    col *= 0.85 + 0.3 * vBlade;                                // blade to blade
+    col *= 0.5 + 0.6 * vZ;                                     // darker, wet bases; sunlit tips
     vec3 lit = col * (uSkyAmb * 1.25 + uSunCol * (0.35 + 0.45 * max(uSunDir.z, 0.0)));
     lit += uSunCol * col * 0.25 * vZ * vZ;                       // light through the blades
+    o = vec4(fog(lit, vW), 1.0);
+}
+"""
+
+    // ------------------------------------------------------------------ gulls (instanced, wing beat in the vertex shader)
+    const val GULL_VS = """#version 300 es
+layout(location=0) in vec4 aPos; layout(location=2) in vec4 aI0; layout(location=4) in vec4 aI1;
+uniform mat4 uVP;
+out vec3 vW; out float vPart; out float vSpan;
+void main() {
+    vec3 p = aPos.xyz * 1.1; float part = aPos.w;
+    float phase = aI1.x, amp = aI1.y, fold = aI1.z, bank = aI1.w;
+    float span = abs(p.y); float sg = p.y < 0.0 ? -1.0 : 1.0;
+    if (part > 0.5 && part < 2.5) {
+        float sh = 0.06, el = 0.40;
+        // the arm about the shoulder, the hand about the elbow, a little behind it (the wing tip lags)
+        float a1 = amp * 0.75 * sin(phase);
+        float a2 = a1 + amp * 0.45 * sin(phase - 0.7);
+        float r1 = min(span, el) - sh;
+        float yy = sh + r1 * cos(a1); float zz = p.z + r1 * sin(a1);
+        if (span > el) { float r2 = span - el; yy += r2 * cos(a2); zz += r2 * sin(a2); }
+        vec3 spread = vec3(p.x, sg * yy, zz);
+        // folded: laid back along the body, the tips crossed over the tail
+        vec3 folded = vec3(p.x - (span - sh) * 0.62, sg * (sh + (span - sh) * 0.10), p.z + 0.03 + (span - sh) * 0.04);
+        p = mix(spread, folded, fold);
+    }
+    float cb = cos(bank), sb = sin(bank);
+    p = vec3(p.x, p.y * cb - p.z * sb, p.y * sb + p.z * cb);
+    float ch = cos(aI0.w), shh = sin(aI0.w);
+    vec3 w = vec3(aI0.x + p.x * ch - p.y * shh, aI0.y + p.x * shh + p.y * ch, aI0.z + p.z);
+    vW = w; vPart = part; vSpan = span;
+    gl_Position = uVP * vec4(w, 1.0);
+}
+"""
+    val GULL_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in float vPart; in float vSpan;
+out vec4 o;
+void main() {
+    vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
+    vec3 v = normalize(uCam - vW);
+    if (dot(n, v) < 0.0) n = -n;
+    vec3 col = vec3(0.88, 0.89, 0.88);                                   // white head and body
+    if (vPart > 0.5 && vPart < 2.5) {
+        col = n.z > 0.0 ? vec3(0.55, 0.60, 0.65) : vec3(0.82, 0.83, 0.83); // grey mantle above, white below
+        if (vSpan > 0.60) col = vec3(0.05);                              // black wing tips
+    }
+    if (vPart > 2.5) col = vec3(0.90, 0.72, 0.12);                       // yellow bill
+    col = lin(col);
+    float dif = max(dot(n, uSunDir), 0.0);
+    vec3 lit = col * (uSkyAmb * 1.2 + uSunCol * 0.5 * dif);
     o = vec4(fog(lit, vW), 1.0);
 }
 """

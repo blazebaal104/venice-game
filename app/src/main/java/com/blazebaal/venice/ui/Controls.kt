@@ -22,6 +22,7 @@ object Controls {
     @Volatile var cameraMode = 0         // 0 chase, 1 high chase, 2 helm
     @Volatile var camYawDelta = 0f       // accumulated drag, consumed by the renderer
     @Volatile var camPitchDelta = 0f
+    @Volatile var camHeld = false        // a finger is on the camera drag (keeps a looked-round view)
     // keyboard / gamepad
     @Volatile var kLeft = false; @Volatile var kRight = false; @Volatile var kUp = false; @Volatile var kDown = false
     /** one-shot requests from the UI to the GL thread */

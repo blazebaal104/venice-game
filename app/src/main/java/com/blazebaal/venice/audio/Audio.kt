@@ -13,7 +13,8 @@
 //  - collisions sound like what you hit: stone fondamenta, pontoon, a vaporetto's steel hull, a wooden bricola.
 //  - weather: rain on the water and single drops on the boat (clearest when you're still), wind, thunder near or far.
 //  - canals echo: a short ping-pong delay, stronger between the walls.
-//  - gulls and the church bells on the hour stay synthesised.
+//  - real gull calls (from the gulls you see, and distant ones near the city), terns over the open lagoon; the hour
+//    struck on a big bell, and at noon the bells of the whole city ringing together.
 // The game writes the @Volatile inputs every frame; nothing here touches GL.
 package com.blazebaal.venice.audio
 
@@ -38,6 +39,10 @@ object Audio {
     @Volatile var nearLand = 0f            // 0 open lagoon .. 1 narrow canal (more slap, more echo)
     @Volatile var waveAmp = 0.06f          // swell height where you are (m)
     @Volatile var rain = 0f; @Volatile var wind = 0f
+    /** weed wound round the prop (0..1): the engine labours, misfires, the blades chop through it */
+    @Volatile var tangle = 0f
+    /** nearest ACTV pontoon: position and distance (they creak, the ropes groan, only near them) */
+    @Volatile var pontoonX = 0f; @Volatile var pontoonY = 0f; @Volatile var pontoonD = 1e9f
     @Volatile var lx = 0f; @Volatile var ly = 0f; @Volatile var lyaw = 0f   // listener (camera) position + yaw
     /** nearby boats: x, y, speed, kind, docked, rpm, heading, id */
     @Volatile var boats: List<FloatArray> = emptyList()
@@ -49,6 +54,8 @@ object Audio {
     const val EV_HORN = 8f
     /** a vaporetto's wake reaching you: a short train of slaps */
     const val EV_WAKE = 9f
+    /** a gull calling at x, y (the birds you see) */
+    const val EV_GULL = 10f
 
     /** one-shot sound at a world position (NaN = at the player): type, strength, x, y, kind (what was hit / boat type) */
     fun event(type: Float, strength: Float, x: Float = Float.NaN, y: Float = Float.NaN, kind: Float = 0f) {
@@ -136,24 +143,34 @@ object Audio {
     }
     private val CENTRE = floatArrayOf(0.55f, 0.55f, 1f)
 
-    /** an air horn: attack, a sustain held as long as wanted (two read heads crossfading over the steady part), release */
-    private class Horn(val c: Clip, val rate: Float, val gain: Float, val pl: Float, val pr: Float, var delay: Int, val hold: Float) {
+    /** an air horn: the recorded attack, a sustain held as long as wanted (two read heads crossfading over its
+     *  steady part), a smooth release; a low reed body under it (a ship's horn has a fuller bottom than the recording),
+     *  darker with distance */
+    private class Horn(val c: Clip, val rate: Float, val gain: Float, val pl: Float, val pr: Float, var delay: Int, val hold: Float, val lpA: Float) {
         val s0 = c.marks[0].toDouble(); val s1 = c.marks[1].toDouble(); val half = (s1 - s0) / 2.0
-        var a = 0.0; var b = -1.0; var held = 0f; var done = false
+        var a = 0.0; var b = -1.0; var held = 0f; var done = false; var env = 0f
+        var ph = 0.0; val f0 = 1290.0 * rate * 0.5; val lp = OnePole(); val lp2 = OnePole(); val bodyLp = OnePole()
         fun next(): Float {
             if (delay > 0) { delay--; return 0f }
             val st = rate * c.step
             held += 1f / SR
+            // attack 30 ms, release 220 ms (instead of the recording's own tail)
+            env = if (held < hold) min(1f, env + 1f / (0.03f * SR)) else env * 0.99981f
+            if (held >= hold && env < 0.002f) { done = true; return 0f }
             var out = at(a)
             if (b >= 0.0) {
                 val w = ((b - s0) / half).toFloat().coerceIn(0f, 1f)
                 out = out * cos(w * 1.5708f) + at(b) * sin(w * 1.5708f)
                 b += st
                 if (w >= 1f) { a = b; b = -1.0 }
-            } else if (held < hold && a >= s1 - half) b = s0
+            } else if (a >= s1 - half) b = s0                    // keep looping the steady part through the release
             a += st
-            if (a >= c.n - 2) done = true
-            return out * gain
+            if (a >= c.n - 2) a = s0
+            // the body: a reedy tone an octave under, a touch of vibrato
+            ph += f0 * (1.0 + 0.003 * sin(held * 31.0)) / SR; if (ph > 1.0) ph -= 1.0
+            val p2 = 2.0 * PI * ph
+            val body = bodyLp.lp((sin(p2) + 0.55 * sin(2 * p2) + 0.32 * sin(3 * p2) + 0.18 * sin(4 * p2)).toFloat(), 0.25f) * 0.22f
+            return lp2.lp(lp.lp(out + body, lpA), lpA) * gain * env
         }
         private fun at(p: Double): Float { val i = p.toInt().coerceIn(0, c.n - 2); val f = (p - i).toFloat(); return (c.pcm[i] + (c.pcm[i + 1] - c.pcm[i]) * f) / 32768f }
     }
@@ -168,10 +185,12 @@ object Audio {
     private var engIdle: Loop? = null
 
     // water + ambience beds
-    private var bow: Loop? = null; private var cabin: Loop? = null; private var lap: Loop? = null
+    private var bow: Loop? = null; private var hullLap: Loop? = null; private var lap: Loop? = null; private var gurgle: Loop? = null
     private var rainL: Loop? = null; private var windL: Loop? = null
     private val rushHp = OnePole(); private val rushLp = OnePole(); private val bowLp = OnePole(); private val windLp = OnePole(); private val rainLp = OnePole()
     private var slapT = 1f; private var wakeLeft = 0; private var wakeT = 0f; private var wakeS = 0f; private var wingT = 30f
+    private var creakT = 2f; private var farGullT = 10f; private var ternT = 30f
+    private var lugPh = 0.0; private var bladePh = 0.0; private val chopLp = OnePole(); private val gurgleLp = OnePole()
 
     // ACTV boats: one voice per boat (by id), fading in/out as boats come and go
     private class BoatVoice(val id: Int, val eng: Loop?, val wash: Loop?, val base: Float) {
@@ -185,10 +204,11 @@ object Audio {
     private val dlL = FloatArray(8192); private val dlR = FloatArray(8192); private var dlPos = 0
     private val echoLpL = OnePole(); private val echoLpR = OnePole()
 
-    // synthesised: gulls, bells
-    private var gullT = 8f; private var gullCalls = 0; private var gullPh = 0.0; private var gullAge = 1f; private var gullPan = 0.5f; private var gullGap = 0f
+    // bells: the hour struck on a big bell; at noon the whole city rings (several peals, near and far)
     private var bellsLeft = 0; private var bellT = 0f; private var lastBellHour = -1
-    private val bellPh = DoubleArray(5)
+    private class Peal(val l: Loop, val rate: Float, val gain: Float, val pl: Float, val pr: Float, val lpA: Float, var delay: Int) { var t = 0f; val lp = OnePole() }
+    private val peals = ArrayList<Peal>()
+    private const val PEAL_LEN = 75f
     private var fade = 0f
 
     private fun loop() {
@@ -199,7 +219,7 @@ object Audio {
             .setBufferSizeInBytes(max(minBuf, N * 4 * 4)).setTransferMode(AudioTrack.MODE_STREAM).build()
         track.play()
         if (bow == null) {
-            engIdle = loopOf("eng_idle"); bow = loopOf("bow"); cabin = loopOf("cabin"); lap = loopOf("lap")
+            engIdle = loopOf("eng_idle"); bow = loopOf("bow"); hullLap = loopOf("hlap"); lap = loopOf("plap") ?: loopOf("lap"); gurgle = loopOf("bubbles")
             rainL = loopOf("rain"); windL = loopOf("wind")
         }
         val out = ShortArray(N * 2)
@@ -233,7 +253,7 @@ object Audio {
             }
             EV_SLAP -> {                                    // the hull meeting a wave
                 val g = (s / 0.6f).coerceIn(0.05f, 1f)
-                play(pick("slap", 5), (0.15f + 0.5f * g), rr(0.65f, 0.95f), p, lp = 900f + 1500f * g, send = 0.15f)
+                play(pick("hslap", 5) ?: pick("slap", 5), (0.2f + 0.55f * g), rr(0.8f, 1.05f), p, lp = 1500f + 3000f * g, send = 0.15f)
                 if (g > 0.5f) synth(T_THUD, 0.12f * g, 0.25f, p, f = 70f)
             }
             EV_WAKE -> { wakeLeft = 3 + rnd.nextInt(3); wakeS = s.coerceIn(0.1f, 1.5f); wakeT = 0f }
@@ -258,6 +278,10 @@ object Audio {
                 synth(T_CHURN, 0.6f, 3.5f, p, 0.4f, f = 1f)
             }
             EV_HORN -> horn(s.toInt(), e[4].toInt(), e[2], e[3])
+            EV_GULL -> {
+                val pg = pan(e[2], e[3]).let { floatArrayOf(it[0], it[1], (1f / (1f + (hypotL(e[2], e[3]) / 35f).pow(2f))).coerceAtMost(1f)) }
+                play(pick("gull", 6), 0.5f * pg[2] * max(0.3f, s), rr(0.92f, 1.08f), pg, lp = 9000f, send = 0.5f)
+            }
             EV_THUNDER -> thunder()
         }
     }
@@ -304,12 +328,28 @@ object Audio {
         val pl = 0.5f - 0.45f * side + 0.05f; val pr = 0.5f + 0.45f * side + 0.05f
         // pitch by size: the motonavi are deepest, the motoscafi highest
         val rate = when (kind) { 2 -> 0.36f; 1 -> 0.48f; 3 -> 0.5f; else -> 0.42f } * rr(0.98f, 1.02f)
-        val g = 0.55f * att
-        fun blast(at: Float, hold: Float) { horns.add(Horn(c, rate, g, pl, pr, (at * SR).toInt(), hold)) }
+        val g = 0.6f * att
+        val lpA = coef(9000f / (1f + d / 120f) + 600f)
+        fun blast(at: Float, hold: Float) { horns.add(Horn(c, rate, g, pl, pr, (at * SR).toInt(), hold, lpA)) }
         when (pattern) {
-            3 -> { blast(0f, 0.12f); blast(0.42f, 0.12f); blast(0.84f, 0.12f); blast(1.3f, 1.1f) }
-            2 -> { blast(0f, 0.25f); blast(0.6f, 0.25f) }
-            else -> blast(0f, 1.3f)
+            3 -> { blast(0f, 0.16f); blast(0.4f, 0.16f); blast(0.8f, 0.16f); blast(1.25f, 1.2f) }
+            2 -> { blast(0f, 0.35f); blast(0.7f, 0.35f) }
+            else -> blast(0f, 1.4f)
+        }
+    }
+
+    private fun hypotL(x: Float, y: Float) = if (x.isNaN()) 0f else hypot(x - lx, y - ly)
+
+    /** noon: the bells of the city answering each other - several peals, pitched and placed apart, the far ones darker */
+    private fun noonPeal() {
+        val c = clip("peal") ?: return
+        peals.clear()
+        val rates = floatArrayOf(0.62f, 0.74f, 0.86f, 1.0f, 1.13f, 0.8f)
+        for ((i, r) in rates.withIndex()) {
+            val far = i / (rates.size - 1f)
+            val side = rr(-0.9f, 0.9f)
+            peals.add(Peal(Loop(c, rnd.nextDouble()), r * rr(0.98f, 1.02f), 0.22f * (1f - 0.6f * far), 0.5f - 0.45f * side + 0.05f, 0.5f + 0.45f * side + 0.05f,
+                coef(6000f - 4800f * far), (rr(0f, 6f) * SR).toInt()))
         }
     }
 
@@ -338,8 +378,9 @@ object Audio {
         val sp = (spd / 39f).coerceIn(0f, 1f)
         val load = (1f - (spd / 38f).coerceIn(0f, 1f)) * thr               // pushing hard at low speed = load
         val trimFree = 1f + 0.12f * trim                                     // trimmed out revs a little higher
+        val tg = tangle
         val targetRpm = if (!on) 0f else (750f + 5100f * (0.55f * thr + 0.45f * sp) * trimFree - 450f * load * (1f - trim) * 0.5f +
-            (if (airborne) 900f * thr else 0f) + 1300f * thr * (1f - propLoad)).coerceIn(650f, 6300f)
+            (if (airborne) 900f * thr else 0f) + 1300f * thr * (1f - propLoad) - 2600f * tg * thr).coerceIn(if (tg > 0.6f) 480f else 650f, 6300f)
         if (on && !lastOn && rpm < 300f) rpm = 220f                         // starting: it catches and spins up
         lastOn = on
         val mv = master * engineVol; val amb = master * ambienceVol
@@ -354,14 +395,50 @@ object Audio {
         // bells on the hour (a few strokes), seagulls now and then
         val cal = Calendar.getInstance()
         val hr = cal.get(Calendar.HOUR_OF_DAY)
-        if (cal.get(Calendar.MINUTE) == 0 && hr != lastBellHour) { lastBellHour = hr; bellsLeft = ((hr + 11) % 12) + 1; bellT = 0f }
+        if (cal.get(Calendar.MINUTE) == 0 && hr != lastBellHour) {
+            lastBellHour = hr; bellsLeft = if (hr in 7..22) ((hr + 11) % 12) + 1 else 0; bellT = 2.5f
+            if (hr == 12) noonPeal()
+        }
+        if (bellsLeft > 0) {
+            bellT += N * dt
+            if (bellT > 2.6f) { bellT = 0f; bellsLeft--; play(pick("toll", 3), 0.32f * amb, rr(0.44f, 0.46f), floatArrayOf(0.52f, 0.58f, 1f), lp = 5000f, send = 0.9f) }
+        }
+        // the pontoons: steel boxes on chains, timber and ropes, groaning in the swell - only when you're near one
+        creakT -= N * dt
+        if (creakT <= 0f) {
+            creakT = rr(2.5f, 7f)
+            if (pontoonD < 45f) {
+                val pp = pan(pontoonX, pontoonY); val k = (1f - pontoonD / 45f).pow(1.5f)
+                val g = k * (0.35f + waveAmp * 2.5f) * amb
+                when (rnd.nextInt(4)) {
+                    0 -> play(pick("groan", 2), 0.45f * g, rr(0.8f, 1.05f), pp, lp = 4000f, send = 0.4f)
+                    1 -> play(clip("rope"), 0.35f * g, rr(0.85f, 1.1f), pp, send = 0.3f)
+                    2 -> play(pick("creak", 2), 0.3f * g, rr(0.6f, 0.8f), pp, send = 0.4f)
+                    else -> play(pick("clank", 2), 0.12f * g, rr(0.7f, 0.9f), pp, lp = 3000f, send = 0.5f)
+                }
+            }
+        }
+        // gulls far off over the city (the near ones call from the birds you see); terns out on the lagoon
+        farGullT -= N * dt
+        if (farGullT <= 0f) {
+            farGullT = rr(8f, 30f) / (0.4f + nearLand)
+            if (nearLand > 0.25f) {
+                val n = 1 + rnd.nextInt(3); val pl = rr(0.25f, 0.85f)
+                for (k in 0 until n) play(pick("gull", 6), rr(0.06f, 0.16f) * amb, rr(0.9f, 1.1f), floatArrayOf(pl, 1.1f - pl, 1f), k * rr(0.3f, 0.9f), lp = 3500f, send = 0.6f)
+            }
+        }
+        ternT -= N * dt
+        if (ternT <= 0f) {
+            ternT = rr(25f, 70f)
+            if (nearLand < 0.3f) play(pick("tern", 3), rr(0.05f, 0.12f) * amb, rr(0.95f, 1.05f), floatArrayOf(rr(0.25f, 0.85f), rr(0.25f, 0.85f), 1f), lp = 7000f, send = 0.3f)
+        }
 
         // idle slaps against the hull, the swell lifting the boat; pigeons near the walls
         slapT -= N * dt
         if (slapT <= 0f) {
-            slapT = rr(0.6f, 2.6f) / (0.6f + waveAmp * 8f)
-            val g = (0.12f + 0.25f * rnd.nextFloat()) * (0.5f + waveAmp * 6f + 0.4f * nearLand) * (1f - sp * 5f).coerceIn(0f, 1f)
-            play(pick("slap", 5), g * amb, rr(0.6f, 0.9f), floatArrayOf(rr(0.35f, 0.75f), rr(0.35f, 0.75f), 1f), lp = rr(900f, 1800f), send = 0.15f)
+            slapT = rr(0.5f, 2.4f) / (0.6f + waveAmp * 10f)
+            val g = (0.15f + 0.3f * rnd.nextFloat()) * (0.45f + waveAmp * 8f) * (1f - sp * 5f).coerceIn(0f, 1f)
+            play(pick("hslap", 5) ?: pick("slap", 5), g * amb, rr(0.85f, 1.1f), floatArrayOf(rr(0.35f, 0.75f), rr(0.35f, 0.75f), 1f), lp = rr(2500f, 6000f), send = 0.1f)
             if (rnd.nextFloat() < 0.25f) play(pick("plip", 2), 0.12f * amb * still, rr(0.8f, 1.2f), floatArrayOf(rr(0.3f, 0.8f), rr(0.3f, 0.8f), 1f), send = 0.2f)
         }
         if (wakeLeft > 0) {
@@ -403,7 +480,8 @@ object Audio {
                 val spacing = SR / f
                 if (grainT >= spacing) {
                     grainT -= spacing
-                    spawnGrain(eng, f)
+                    // weed in the prop: the engine is lugging, now and then a cylinder misses
+                    if (tg < 0.05f || rnd.nextFloat() > tg * 0.28f * (0.3f + thr)) spawnGrain(eng, f)
                 }
                 var g = 0f
                 for (gr in grains) {
@@ -421,18 +499,29 @@ object Audio {
                 shaftPhase += rpm / 60f / 2.08f * 13f / SR; if (shaftPhase > 1.0) shaftPhase -= 1.0
                 e += sin(2.0 * PI * shaftPhase).toFloat() * 0.012f * sp
                 e += burble.lp(noise(), coef(140f)) * (0.5f - thr * 0.4f) * 0.12f * (rpm / 900f).coerceAtMost(1f)
+                // labouring against the weed: an uneven surge, and the blades chopping through it
+                if (tg > 0.02f) {
+                    lugPh += (4.0 + 3.0 * rnd.nextFloat()) / SR
+                    e *= 1f - 0.4f * tg * (0.5f + 0.5f * sin(2.0 * PI * lugPh).toFloat())
+                    bladePh += rpm / 60f / 2.08f * 3f / SR; if (bladePh > 1.0) bladePh -= 1.0
+                    val chop = sin(PI * bladePh).toFloat().pow(10f)
+                    e += chopLp.lp(noise(), coef(700f)) * chop * tg * (0.2f + thr) * 1.6f
+                    e += sin(2.0 * PI * shaftPhase).toFloat() * 0.03f * tg * thr       // the gearcase whining under the strain
+                }
                 e *= lvl
             } else grainT = 0f
-            e *= mv * 1.25f
+            e *= mv * 2.8f
+            // prop gurgle: the exhaust bubbling out through the hub, churned water at low speed
+            if (on && rpm > 300f) gurgle?.let { e += gurgleLp.lp(it.next(0.8f + 0.5f * thr), coef(1400f + 1200f * thr)) * (0.12f + 0.55f * thr) * (1f - sp * 4f).coerceIn(0f, 1f) * (1f + tg) * mv }
             send += e * 0.12f
             // ---------------- water along your hull
             var w = 0f
-            bow?.let { w += bowLp.lp(it.next(0.75f + 0.6f * sp), coef(1400f + 7000f * sp)) * (0.04f + 1.1f * sp.pow(1.1f)) * (if (airborne) 0.12f else 1f) }
+            bow?.let { w += bowLp.lp(it.next(0.75f + 0.6f * sp), coef(900f + 4200f * sp)) * (0.02f + 0.8f * sp.pow(1.25f)) * (if (airborne) 0.12f else 1f) }
             val wn = noise()
-            w += rushLp.lp(wn - rushHp.lp(wn, coef(400f)), coef(3000f + 4000f * sp)) * sp * sp * 0.22f * (if (airborne) 0.1f else 1f)
+            w += rushLp.lp(wn - rushHp.lp(wn, coef(400f)), coef(2200f + 2500f * sp)) * sp * sp * 0.07f * (if (airborne) 0.1f else 1f)
             w *= mv
-            cabin?.let { w += it.next(1f) * (1f - sp * 4f).coerceIn(0f, 1f) * (0.6f + 3f * waveAmp) * amb }
-            lap?.let { w += it.next(1f) * nearLand * (1f - sp * 3f).coerceIn(0f, 1f) * 0.9f * amb }
+            hullLap?.let { w += it.next(1f) * (1f - sp * 4f).coerceIn(0f, 1f) * (0.5f + 5f * waveAmp) * amb }
+            lap?.let { w += it.next(1f) * nearLand * (1f - sp * 3f).coerceIn(0f, 1f) * 0.7f * amb }
             var sl = e + w; var sr = e + w
             // ---------------- ACTV boats
             for (bv in boatVoices.values) {
@@ -471,32 +560,22 @@ object Audio {
                 rainL?.let { a += rainLp.lp(it.next(1f), coef(3000f + 6000f * rain)) * rain * 1.1f }
                 if (rnd.nextFloat() < dropP) play(pick("drop", 10), dropG * rr(0.4f, 1f), rr(0.75f, 1.3f), floatArrayOf(rr(0.2f, 0.9f), rr(0.2f, 0.9f), 1f), lp = rr(2500f, 9000f), send = 0.1f)
             }
-            val wv = wind * 0.9f + sp.pow(1.5f) * 0.45f
-            if (wv > 0.02f) windL?.let { a += windLp.lp(it.next(0.9f + 0.25f * wind), coef(500f + 2500f * min(1f, wv))) * wv }
+            val wv = wind * 0.6f + sp.pow(1.5f) * 0.2f
+            if (wv > 0.02f) windL?.let { a += windLp.lp(it.next(0.9f + 0.25f * wind), coef(400f + 1800f * min(1f, wv))) * wv }
             a *= amb
-            // gulls: a few descending calls every so often
-            gullT -= dt
-            if (gullT <= 0f && gullCalls == 0) { gullCalls = 2 + rnd.nextInt(4); gullPan = rnd.nextFloat(); gullGap = 0f; gullT = 14f + rnd.nextFloat() * 30f }
-            if (gullCalls > 0) {
-                if (gullGap > 0f) gullGap -= dt
-                else {
-                    gullAge += dt / 0.32f
-                    if (gullAge >= 1f) { gullAge = 0f; gullCalls--; gullGap = 0.12f + rnd.nextFloat() * 0.25f }
-                    val fq = 2300f - 900f * gullAge + 120f * sin(gullAge * 60f)
-                    gullPh += fq / SR
-                    val g = (sin(2.0 * PI * gullPh) + 0.4 * sin(4.0 * PI * gullPh)).toFloat() * sin(PI * gullAge).toFloat() * 0.07f * amb
-                    sl += g * (1f - gullPan * 0.7f); sr += g * (0.3f + gullPan * 0.7f); send += g * 0.5f
+            // noon: the city's bells
+            if (peals.isNotEmpty()) {
+                var q = 0
+                while (q < peals.size) {
+                    val pe = peals[q]
+                    if (pe.delay > 0) { pe.delay--; q++; continue }
+                    pe.t += dt
+                    if (pe.t > PEAL_LEN) { peals.removeAt(q); continue }
+                    val env = min(1f, pe.t / 4f) * min(1f, (PEAL_LEN - pe.t) / 8f)
+                    val v = pe.lp.lp(pe.l.next(pe.rate), pe.lpA) * pe.gain * env * amb
+                    sl += v * pe.pl; sr += v * pe.pr; send += v * 0.8f
+                    q++
                 }
-            }
-            // bells (inharmonic partials), one stroke every 2.2 s
-            if (bellsLeft > 0) {
-                bellT += dt
-                if (bellT > 2.2f) { bellT = 0f; bellsLeft-- }
-                val env = exp(-bellT * 1.3f) * 0.06f * amb
-                val parts = BELL; val base = 392f
-                var bs = 0f
-                for (p in 0 until 5) { bellPh[p] += base * parts[p] / SR; bs += sin(2.0 * PI * bellPh[p]).toFloat() / (p + 1) }
-                a += bs * env; send += bs * env * 0.6f
             }
             // ---------------- canal echo: ping-pong delay, darker on each bounce
             val eL = dlL[(dlPos - 2280) and 8191]; val eR = dlR[(dlPos - 3410) and 8191]
@@ -506,7 +585,6 @@ object Audio {
             L[i] = (sl + a + eL * wet) * fade; R[i] = (sr + a + eR * wet) * fade
         }
     }
-    private val BELL = floatArrayOf(1f, 2f, 2.4f, 3f, 4.2f)
 
     /** one firing pulse of the recorded outboard, read at rate r, Hann-windowed over two periods */
     private fun spawnGrain(c: Clip, fire: Float) {
@@ -571,21 +649,23 @@ object Audio {
             val id = if (b.size > 7) b[7].toInt() else (b[0].toInt() * 31 + b[1].toInt())
             val kind = b[3].toInt()
             val bv = boatVoices.getOrPut(id) {
-                val (eng, base) = when (kind) { 2 -> "dsl_big" to 0.8f; 1 -> "dsl_hood" to 0.85f; 3 -> "dsl_bus" to 0.95f; else -> "dsl_big" to 1f }
-                BoatVoice(id, loopOf(eng), loopOf("bow"), base)
+                val (eng, base) = when (kind) { 2 -> "dsl_md22" to 0.8f; 1 -> "dsl_hood" to 0.85f; 3 -> "dsl_big" to 1f; else -> "dsl_md22" to 0.95f }
+                BoatVoice(id, loopOf(eng) ?: loopOf("dsl_big"), loopOf("bow"), base)
             }
             bv.seen = true
             val dx = b[0] - lx; val dy = b[1] - ly; val d = hypot(dx, dy)
-            val att = 1f / (1f + (d / 24f).pow(2f)) * (if (d > 320f) 0f else 1f)
+            val att = 1f / (1f + (d / 30f).pow(2f)) * (if (d > 340f) 0f else 1f)
             val side = -sin(atan2(dy, dx) - lyaw)
             bv.pl = 0.5f - 0.45f * side + 0.05f; bv.pr = 0.5f + 0.45f * side + 0.05f
             val rpm = if (b.size > 5) b[5] else (if (b[4] > 0.5f) 0.12f else 0.5f)
             val spd = abs(b[2])
-            bv.tg = att * mv * (0.4f + 0.6f * rpm) * 1.5f
-            bv.tRate = 0.82f + 0.42f * rpm + 0.015f * spd
-            bv.tWash = (spd / 6f).coerceIn(0f, 1f) * 0.7f
+            // full astern coming alongside: the diesel roars and the prop churns the water white
+            val astern = if (b.size > 8 && b[8] < -0.1f && spd > 0.3f) rpm else 0f
+            bv.tg = att * mv * (0.4f + 0.6f * rpm) * 2.6f * (1f + 0.6f * astern)
+            bv.tRate = 0.82f + 0.42f * rpm + 0.015f * spd + 0.08f * astern
+            bv.tWash = (spd / 6f).coerceIn(0f, 1f) * 0.6f + astern * 0.9f
             // air absorption: distant boats lose their top; an engine under load opens up
-            bv.tFc = coef((700f + 3800f * rpm) / (1f + d / 60f) + 250f)
+            bv.tFc = coef((700f + 3800f * rpm + 2000f * astern) / (1f + d / 60f) + 250f)
             // doppler from the change of distance (gentle: boats are slow)
             if (bv.dPrev >= 0f) {
                 val vr = ((d - bv.dPrev) / blockDt).coerceIn(-20f, 20f)

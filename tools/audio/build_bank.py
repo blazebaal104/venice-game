@@ -3,7 +3,7 @@
 
 Sources: the CC0 Freesound excerpts collected (and licence-verified) by the LuminaBench/lumina-sfx repository
 (sources/recordings.json, commit 9ee63012e36b4d67a025a1a135750f980c511512); clone it and extract them with extract_lumina.py into a folder of mono WAVs, then
-    python3 build_bank.py <wav dir> <out sfx.bank> <out CREDITS.md>
+    python3 build_bank.py <wav dir> <out sfx.bank> <out CREDITS.md> [<second wav dir>]
 
 Bank format (little endian):  'SFX1' u16 count, then per entry:
     u8 name length, name (ascii), u32 sample rate, u32 frames, u32 marks, i32 marks[] , i16 pcm[frames]
@@ -15,11 +15,17 @@ import sys, os, json, wave, struct
 import numpy as np, scipy.signal as ss
 
 RAW, OUT, CRED = sys.argv[1], sys.argv[2], sys.argv[3]
+# second folder: CC0 recordings from other licence-checked game repos (see credits_extra.json), ogg decoded with
+#   ffmpeg -i x.ogg -ac 1 -ar 24000 -c:a pcm_s16le x.wav
+RAW2 = sys.argv[4] if len(sys.argv) > 4 else None
 credits = json.load(open(os.path.join(RAW, 'credits.json')))
+extra = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credits_extra.json')))
 SRMAX = 24000
 
 def load(name):
-    w = wave.open(os.path.join(RAW, name + '.wav')); sr = w.getframerate()
+    path = os.path.join(RAW, name + '.wav')
+    if not os.path.exists(path) and RAW2: path = os.path.join(RAW2, name + '.wav')
+    w = wave.open(path); sr = w.getframerate()
     x = np.frombuffer(w.readframes(w.getnframes()), dtype='<i2').astype(np.float64) / 32768
     if sr > SRMAX:
         g = np.gcd(sr, SRMAX); x = ss.resample_poly(x, SRMAX // g, sr // g); sr = SRMAX
@@ -96,7 +102,6 @@ for nm, src in (('dsl_big', 'field-diesel-idle__0'), ('dsl_bus', 'city-bus-engin
 
 # ---------------------------------------------------------------- water
 x, sr = load('milestone-bow__0'); add('bow', norm_rms(loop(x, sr, 0.5), -18), sr, (), 'milestone-bow__0')
-x, sr = load('motion-sailboat-cabin__0'); add('cabin', norm_rms(loop(x, sr, 0.5), -24), sr, (), 'motion-sailboat-cabin__0')
 a, sr = load('atlas-pebble__0'); b, _ = load('atlas-pebble__1')
 add('lap', norm_rms(loop(np.concatenate([a, b]), sr, 0.4), -22), sr, (), ['atlas-pebble__0', 'atlas-pebble__1'])
 for i in range(4):
@@ -128,6 +133,28 @@ oneshots = [('stone0', 'rock-pile-impact__0'), ('stone1', 'rock-pile-impact__1')
 for nm, src in oneshots:
     x, sr = load(src); add(nm, norm_peak(oneshot(x, sr)), sr, (), src)
 
+# ---------------------------------------------------------------- second set (gulls, bells, hull, pontoons, marine diesel)
+if RAW2:
+    def cut(x, sr, a, b, fade=0.05):
+        y = x[int(a * sr):int(b * sr)].copy(); f = int(fade * sr); y[:f // 5] *= np.linspace(0, 1, f // 5); y[-f:] *= np.linspace(1, 0, f); return y
+    for i in range(6):
+        x, sr = load(f'gull_{i + 1}'); add(f'gull{i}', norm_peak(oneshot(x, sr)), sr, (), f'gull_{i + 1}')
+    for i in range(3):
+        x, sr = load(f'tern_{i + 1}'); add(f'tern{i}', norm_peak(oneshot(x, sr)), sr, (), f'tern_{i + 1}')
+    for i in range(5):
+        x, sr = load(f'hull_slap_{i + 1}'); add(f'hslap{i}', norm_peak(oneshot(x, sr)), sr, (), f'hull_slap_{i + 1}')
+    x, sr = load('boat_lap'); add('hlap', norm_rms(loop(x[:int(20 * sr)], sr, 0.8), -22), sr, (), 'boat_lap')
+    x, sr = load('pier_lap'); add('plap', norm_rms(loop(x[:int(20 * sr)], sr, 0.8), -22), sr, (), 'pier_lap')
+    x, sr = load('boat_engine'); add('dsl_md22', norm_rms(loop(x[int(4 * sr):int(20 * sr)], sr, 0.5), -18), sr, (), 'boat_engine')
+    x, sr = load('emerge_1'); add('drip', norm_peak(oneshot(x, sr)), sr, (), 'emerge_1')
+    x, sr = load('timber_creak_groan'); add('groan0', norm_peak(cut(x, sr, 0.0, 1.95)), sr, (), 'timber_creak_groan'); add('groan1', norm_peak(cut(x, sr, 2.2, 5.6)), sr, (), 'timber_creak_groan')
+    x, sr = load('rope_hoist'); add('rope', norm_peak(cut(x, sr, 0.7, 4.5)), sr, (), 'rope_hoist')
+    x, sr = load('church_bell'); add('peal', norm_rms(loop(x, sr, 0.6), -18), sr, (), 'church_bell')
+    x, sr = load('temple_bell')
+    for i, (a, b) in enumerate(((0.15, 2.15), (2.15, 5.4), (5.4, 9.0))): add(f'toll{i}', norm_peak(cut(x, sr, a, b, 0.3)), sr, (), 'temple_bell')
+    a, sr = load('atlas-bubbles__0'); b, _ = load('atlas-bubbles__1')
+    add('bubbles', norm_rms(loop(np.concatenate([a, b]), sr, 0.3), -20), sr, (), ['atlas-bubbles__0', 'atlas-bubbles__1'])
+
 # ---------------------------------------------------------------- horn: an air horn with a sustain loop
 x, sr = load('heavy-truck-horn__0'); x = norm_peak(oneshot(x, sr, 0.05, 0.06))
 h = int(0.01 * sr); e = np.array([rms(x[i:i + h]) for i in range(0, len(x) - h, h)])
@@ -153,4 +180,6 @@ with open(CRED, 'w') as f:
             '(tools/audio/build_bank.py) and are played back pitched, granulated and mixed by app/.../audio/Audio.kt.\n\n'
             '| Used as | Title | Author | Source |\n|---|---|---|---|\n')
     for k, names in sorted(used.items()):
-        c = credits[k]; f.write(f"| {', '.join(sorted(set(names)))} | {c['title']} | {c['author']} | {c['url']} |\n")
+        c = credits.get(k) or extra.get(k) or extra.get(k.rstrip('_0123456789'))
+        via = f" (via {c['via']})" if 'via' in c else ''
+        f.write(f"| {', '.join(sorted(set(names)))} | {c['title']} | {c['author']} | {c['url']}{via} |\n")

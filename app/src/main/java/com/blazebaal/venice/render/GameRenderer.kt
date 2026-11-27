@@ -140,6 +140,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         "I ponti" to { loadBridges() },
         "Gli imbarcaderi ACTV" to { loadStops() },
         "Le barene" to { grassP = Program(Shaders.GRASS_VS, Shaders.GRASS_FS, "grass"); grass = MarshGrass(world) },
+        "I gabbiani" to { try { gullP = Program(Shaders.GULL_VS, Shaders.GULL_FS, "gulls"); gulls = Gulls(world) } catch (e: Throwable) { android.util.Log.e("Venice", "gulls", e); gullP = null; gulls = null } },
         "La flotta ACTV" to {
             live = LiveBoats(world); live.setStops(stopList)
             for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) { fleetMeshes[i] = loadMesh("live/$n.mesh"); fleetLod[i] = loadMesh("live/${n}_lod.mesh") }
@@ -273,20 +274,115 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun loadBridges() {
         val lines = try { ctx.assets.open("bridges/bridges.txt").bufferedReader().readLines() } catch (e: Exception) { return }
         val atlas = loadAtlas("bridges/bridges_atlas.jpg"); if (atlas == 0) return
-        val meshes = HashMap<String, Mesh?>()
+        val meshes = HashMap<String, Pair<Mesh, BridgeShape>?>()
         val own = (ctx.assets.list("bridges") ?: emptyArray()).filter { it.endsWith("_atlas.jpg") && it != "bridges_atlas.jpg" }.associate { it.removeSuffix("_atlas.jpg") to loadAtlas("bridges/$it") }  // models baked on their own sheet
         val g = 1.1f
         for (line in lines) {
             if (line.isBlank() || line.startsWith("#")) continue
             val p = line.trim().split(Regex("\\s+")); if (p.size < 7) continue
-            val mesh = meshes.getOrPut(p[0]) { loadMesh("bridges/${p[0]}.mesh") } ?: continue
+            val ms = meshes.getOrPut(p[0]) { loadMeshData("bridges/${p[0]}.mesh")?.let { Pair(Mesh(it), bridgeShape(it)) } } ?: continue
+            val mesh = ms.first
             val x = p[1].toFloat(); val y = p[2].toFloat(); val rot = Math.toRadians(p[3].toDouble()).toFloat()
             val sx = p[4].toFloat(); val sy = p[5].toFloat(); val sz = p[6].toFloat()
             val sc = Mat4.identity().also { it[0] = sx; it[5] = sy; it[10] = sz; it[14] = g * (1f - sz) }
             val model = Mat4.mul(Mat4.mul(Mat4.translation(x, y, 0f), Mat4.rotZ(rot)), sc)
             landmarks.add(Landmark(mesh, model, x, y, own[p[0]] ?: atlas))
+            val sh = ms.second
+            bridgeCol.add(BridgeInst(x, y, cos(rot), sin(rot), sx, sy, sz, g * (1f - sz), sh, hypot(max(abs(sh.minX), abs(sh.maxX)) * sx, sh.halfW * sy) + 3f))
         }
     }
+
+    // ---------------------------------------------------------------- camera collision
+    /** a bridge model's shape for the camera: along its span (local x), the underside and the top of the deck */
+    private class BridgeShape(val minX: Float, val maxX: Float, val halfW: Float, val lo: FloatArray, val hi: FloatArray)
+    private class BridgeInst(val x: Float, val y: Float, val c: Float, val s: Float, val sx: Float, val sy: Float, val sz: Float, val z0: Float, val shape: BridgeShape, val r: Float)
+    private val bridgeCol = ArrayList<BridgeInst>()
+    private val NB = 32
+    private fun bridgeShape(d: FloatArray): BridgeShape {
+        var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE; var hw = 0f
+        var i = 0
+        while (i < d.size) { minX = min(minX, d[i]); maxX = max(maxX, d[i]); hw = max(hw, abs(d[i + 1])); i += STRIDE }
+        val lo = FloatArray(NB) { Float.MAX_VALUE }; val hi = FloatArray(NB) { -Float.MAX_VALUE }
+        val span = max(maxX - minX, 0.1f)
+        i = 0
+        while (i < d.size) {
+            val k = ((d[i] - minX) / span * (NB - 1)).roundToInt().coerceIn(0, NB - 1)
+            lo[k] = min(lo[k], d[i + 2]); hi[k] = max(hi[k], d[i + 2]); i += STRIDE
+        }
+        // bins no vertex fell in: take the neighbours'
+        for (k in 0 until NB) if (lo[k] == Float.MAX_VALUE) {
+            var a = k - 1; while (a >= 0 && lo[a] == Float.MAX_VALUE) a--
+            var b = k + 1; while (b < NB && lo[b] == Float.MAX_VALUE) b++
+            val src = if (a >= 0 && (b >= NB || k - a <= b - k)) a else b
+            if (src in 0 until NB) { lo[k] = lo[src]; hi[k] = hi[src] } else { lo[k] = 0f; hi[k] = 0f }
+        }
+        return BridgeShape(minX, maxX, hw, lo, hi)
+    }
+    private fun loadMeshData(asset: String): FloatArray? = try {
+        DataInputStream(InflaterInputStream(ctx.assets.open(asset)).buffered(1 shl 16)).use { d -> val n = d.readInt(); FloatArray(n * STRIDE) { d.readFloat() } }
+    } catch (e: Exception) { android.util.Log.e("Venice", "mesh $asset", e); null }
+
+    private var camBridge = -1; private var camBridgeUp = true; private var camBridgeT = 0f
+    /** the height the camera must be at, at x, y, so it isn't inside a bridge: over the deck or under the arch,
+     *  whichever it is nearer (decided once per bridge, so it doesn't flip-flop) */
+    private fun bridgeClear(x: Float, y: Float, z: Float, floor: Float): Float {
+        for ((i, b) in bridgeCol.withIndex()) {
+            val dx = x - b.x; val dy = y - b.y
+            if (abs(dx) > b.r || abs(dy) > b.r) continue
+            val sh = b.shape
+            val lx = (dx * b.c + dy * b.s) / b.sx; val ly = (-dx * b.s + dy * b.c) / b.sy
+            if (lx < sh.minX - 0.8f / b.sx || lx > sh.maxX + 0.8f / b.sx || abs(ly) > sh.halfW + 0.9f / b.sy) continue
+            val f = ((lx - sh.minX) / max(sh.maxX - sh.minX, 0.1f) * (NB - 1)).coerceIn(0f, NB - 1f)
+            val k = f.toInt().coerceAtMost(NB - 2); val t = f - k
+            val lo = b.z0 + b.sz * (sh.lo[k] + (sh.lo[k + 1] - sh.lo[k]) * t)
+            val hi = b.z0 + b.sz * (sh.hi[k] + (sh.hi[k + 1] - sh.hi[k]) * t)
+            val m = 0.6f
+            if (z <= lo - m || z >= hi + m) continue
+            if (camBridge != i) { camBridge = i; camBridgeUp = z > (lo + hi) * 0.5f }
+            camBridgeT = 1.2f
+            return if (camBridgeUp || lo - m < floor + 0.2f) hi + m else lo - m
+        }
+        return z
+    }
+
+    private val bboxCache = HashMap<BuildingData, FloatArray>()
+    /** what the camera has to stay above at x, y: a building's roofs, the quay, or nothing (water) */
+    private fun obstacleTop(x: Float, y: Float): Float {
+        if (world.solid(x, y) < 0.5f) return -10f
+        val (tx, ty) = world.tileCoords(x, y)
+        val t = world.tile(tx, ty) ?: return Z.GROUND + 1f
+        val lx = x - t.ox; val ly = y - t.oy
+        for (b in t.buildings) {
+            val n = b.ringSizes.firstOrNull() ?: continue
+            val bb = bboxCache.getOrPut(b) {
+                var a = Float.MAX_VALUE; var c = Float.MAX_VALUE; var e = -Float.MAX_VALUE; var f = -Float.MAX_VALUE
+                for (k in 0 until n) { a = min(a, b.xy[k * 2]); c = min(c, b.xy[k * 2 + 1]); e = max(e, b.xy[k * 2]); f = max(f, b.xy[k * 2 + 1]) }
+                floatArrayOf(a, c, e, f)
+            }
+            if (lx < bb[0] || ly < bb[1] || lx > bb[2] || ly > bb[3]) continue
+            var inside = false; var j = n - 1
+            for (k in 0 until n) {
+                val xi = b.xy[k * 2]; val yi = b.xy[k * 2 + 1]; val xj = b.xy[j * 2]; val yj = b.xy[j * 2 + 1]
+                if ((yi > ly) != (yj > ly) && lx < (xj - xi) * (ly - yi) / (yj - yi) + xi) inside = !inside
+                j = k
+            }
+            if (inside) return Z.GROUND + b.height + 4f            // plus the roof
+        }
+        return Z.GROUND + 1.1f                                       // fondamenta, campo: over it, not through it
+    }
+    /** how far (0..1) the camera can go from the pivot towards `to` before it would enter a building */
+    private fun armFree(px: Float, py: Float, pz: Float, qx: Float, qy: Float, qz: Float): Float {
+        val len = hypot(qx - px, qy - py)
+        val n = max(2, (len / 0.3f).toInt())
+        for (k in 1..n) {
+            val f = k / n.toFloat()
+            val x = px + (qx - px) * f; val y = py + (qy - py) * f; val z = pz + (qz - pz) * f
+            if (z < obstacleTop(x, y)) return max(0f, (k - 1) / n.toFloat() - 0.35f / max(len, 0.1f))
+        }
+        return 1f
+    }
+    private var camSX = Float.NaN; private var camSY = 0f; private var camSZ = 0f
+    private var camArm = 1f; private var camLift = 0f; private var camTouchT = -100f
 
     private fun waterGrid(half: Float, step: Float, hole: Float): FloatArray {
         val n = (2 * half / step).toInt()
@@ -323,6 +419,13 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         Audio.propLoad = if (boat.airborne) 0f else (1f - ((boat.vz - 0.25f) * 0.7f).coerceIn(0f, 0.85f)) * (if (boat.vz < -0.8f) 1f else 1f)
         Audio.nearLand = ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f)
         Audio.waveAmp = boat.waveAmp
+        Audio.tangle = boat.entangle.coerceIn(0f, 1f)
+        // nearest pontoon (they creak only when you're close)
+        val pts = LiveBoats.pontoons
+        var pd = 1e9f; var pxN = 0f; var pyN = 0f
+        var i = 0
+        while (i + 1 < pts.size) { val d = hypot(pts[i] - boat.x, pts[i + 1] - boat.y); if (d < pd) { pd = d; pxN = pts[i]; pyN = pts[i + 1] }; i += 2 }
+        Audio.pontoonX = pxN; Audio.pontoonY = pyN; Audio.pontoonD = pd
         val wx = (Settings.liveWeather && Weather.live) || Weather.override > 0
         Audio.rain = if (wx) Weather.rainIntensity() else 0f
         Audio.wind = if (wx) (hypot(Weather.windVec()[0], Weather.windVec()[1]) * 3.6f / 45f).coerceIn(0f, 1f) else 0.1f
@@ -454,6 +557,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private var menuScene: MenuScene? = null; private var menuT = 0f; 
     private lateinit var dimP: Program; private lateinit var copyP: Program; private lateinit var waterSimple: Program
     private lateinit var grassP: Program; private lateinit var grass: MarshGrass
+    private var gullP: Program? = null; private var gulls: Gulls? = null
     private var towT = 0f; private var weedWarned = false
     private var flatWater: Mesh? = null
     // ---- frozen background while a page is open: the last frame, blurred, and no more rendering
@@ -650,6 +754,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         }
         LiveBoats.playerX = boat.x; LiveBoats.playerY = boat.y
         live.update(if (paused) 0f else dt, camX, camY)
+        gulls?.let { gl ->
+            val w = if ((Settings.liveWeather && Weather.live) || Weather.override > 0) Weather.windVec() else floatArrayOf(2.5f, 1.2f)
+            gl.update(if (paused) 0f else dt, camX, camY, boat.x, boat.y, abs(boat.surge), ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f), w[0], w[1], LiveBoats.audio)
+            for (c in gl.calls) Audio.event(Audio.EV_GULL, c[2], c[0], c[1])
+            gl.calls.clear()
+        }
         if (!paused) watchEvents(sdt)
         feedAudio(paused)
         GameState.x = boat.x; GameState.y = boat.y; GameState.heading = boat.heading; GameState.speedKmh = boat.speedKmh()
@@ -658,9 +768,13 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         GameState.boatPitch = boat.pitch; GameState.porpoising = boat.porpoise
 
         // ---- camera: zoomed in when slow, pulled back (and wider) as the speed builds up
+        // look around: drag left/right to swing round the boat (profile, bow on); hold it there as long as you like,
+        // let go and after ~5 s it eases back behind the boat
+        if (Controls.camYawDelta != 0f || Controls.camPitchDelta != 0f || Controls.camHeld) camTouchT = time
         camYawOff += Controls.camYawDelta * Settings.cameraSensitivity; Controls.camYawDelta = 0f
+        camYawOff = LiveBoats.wrap(camYawOff)
         camPitch = (camPitch + Controls.camPitchDelta * Settings.cameraSensitivity).coerceIn(0.04f, 0.9f); Controls.camPitchDelta = 0f
-        if (abs(thr) > 0.1f) camYawOff *= exp(-dt * 1.2f)
+        if (time - camTouchT > 5f) camYawOff *= exp(-dt * 0.9f)
         val yaw = boat.heading + camYawOff
         // speed feel: the camera used to pull far back as you sped up, which made 130 km/h feel like 70. Now it stays
         // low and close behind the boat, the field of view widens and the water rushes past at the screen edges.
@@ -682,11 +796,31 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val tx = boat.x - cos(yaw) * camDist * cos(pitch); val ty = boat.y - sin(yaw) * camDist * cos(pitch)
             val tz = 1.6f + camDist * sin(pitch) + boat.z * 0.6f
             val k = 1f - exp(-dt * (5f + 4f * spS))
-            camX += (tx - camX) * k; camY += (ty - camY) * k; camZ += (tz - camZ) * (1f - exp(-dt * 3f))
-            if (world.solid(camX, camY) > 0.5f && camZ < 14f) { camX += (boat.x - camX) * 0.25f; camY += (boat.y - camY) * 0.25f }
-            camZ = max(camZ, Waves.height(camX, camY, boat.time, boat.waveAmp) + 0.6f)
+            // the free (unobstructed) camera follows smoothly; the obstacles are applied after, so they never feed
+            // back into the smoothing (that was the shaking when near a wall)
+            if (camSX.isNaN() || hypot(camSX - boat.x, camSY - boat.y) > 80f) { camSX = camX; camSY = camY; camSZ = camZ }
+            camSX += (tx - camSX) * k; camSY += (ty - camSY) * k; camSZ += (tz - camSZ) * (1f - exp(-dt * 3f))
+            val floor = Waves.height(camSX, camSY, boat.time, boat.waveAmp) + 0.6f
+            // bridges: seen coming (where the camera will be in half a second), it eases over the deck or down under
+            // the arch - whichever side of the bridge it is on - instead of cutting through it
+            camBridgeT -= dt; if (camBridgeT <= 0f) camBridge = -1
+            val vx = (tx - camSX) * k / max(dt, 1e-3f); val vy = (ty - camSY) * k / max(dt, 1e-3f)
+            val zAhead = bridgeClear(camSX + vx * 0.5f, camSY + vy * 0.5f, camSZ, floor)
+            val zHere = bridgeClear(camSX, camSY, camSZ + camLift, floor)
+            val wantLift = (if (zHere != camSZ + camLift) zHere else zAhead) - camSZ
+            camLift += (wantLift - camLift) * (1f - exp(-dt * 6f))
+            var ez = max(camSZ + camLift, floor)
+            val hardZ = bridgeClear(camSX, camSY, ez, floor); if (hardZ != ez) ez = hardZ     // never inside a deck
+            // buildings: the camera can't go inside one - it stops at the wall (the boat keeps going) and comes back
+            // out gently when there's room again
+            val pz = 1.6f + boat.z * 0.6f
+            val free = armFree(boat.x, boat.y, pz, camSX, camSY, ez)
+            camArm = if (free < camArm) free else camArm + (free - camArm) * (1f - exp(-dt * 2.5f))
+            camX = boat.x + (camSX - boat.x) * camArm; camY = boat.y + (camSY - boat.y) * camArm
+            camZ = max(pz + (ez - pz) * camArm + (1f - camArm) * 1.2f, floor)
             val shake = boat.bump * 0.05f + spS * spS * 0.028f + boat.porpoise * 0.06f
-            view = Mat4.lookAt(camX + sin(time * 40) * shake, camY, camZ + cos(time * 37) * shake, boat.x + cos(boat.heading) * 3f, boat.y + sin(boat.heading) * 3f, 1.2f + boat.z * 0.7f, 0f, 0f, 1f)
+            val ahead = 3f * max(0f, cos(camYawOff))                  // swung round to the bow: look at the boat itself
+            view = Mat4.lookAt(camX + sin(time * 40) * shake, camY, camZ + cos(time * 37) * shake, boat.x + cos(boat.heading) * ahead, boat.y + sin(boat.heading) * ahead, 1.2f + boat.z * 0.7f, 0f, 0f, 1f)
         }
         val sc = scene!!
         val proj = Mat4.perspective(Math.toRadians(camFov.toDouble()).toFloat(), sc.w.toFloat() / sc.h, 0.3f, max(700f, drawDist * 1.6f))
@@ -720,6 +854,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
         drawGrass(vp)
+        drawGulls(vp)
         drawSky(vp, false)
         drawWater(vp, r)
         drawTrails(vp)
@@ -918,6 +1053,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private var ripOffX = 0f; private var ripOffY = 0f
     private fun advanceRipple(dt: Float) {
         ripOffX = (ripOffX + wake.dirX * dt * 0.25f) % 64f; ripOffY = (ripOffY + wake.dirY * dt * 0.25f) % 64f
+    }
+
+    private fun drawGulls(vp: FloatArray) {
+        val p = gullP ?: return; val g = gulls ?: return
+        p.use(); common(p, vp, ident, -1000f, false)
+        g.draw()
     }
 
     private fun grassRadius() = if (Settings.simple) 32f else 60f

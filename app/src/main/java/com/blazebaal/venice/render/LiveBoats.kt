@@ -59,7 +59,7 @@ class LiveBoats(private val world: WorldMap) {
         var smokeAcc = 0f
         var clearT = -1f; var clearAhead = true; var wakePick = false
         // horn: cooldowns, the smoothed rate of turn; wake reaching the player
-        var hornCd = 0f; var hornTurnCd = 0f; var turnRate = 0f; var lastH = Float.NaN; var wakeCd = 0f
+        var hornCd = 0f; var hornTurnCd = 0f; var turnRate = 0f; var lastH = Float.NaN; var wakeCd = 0f; var blockT = 0f
         val trail = FloatArray(TRAIL_N * 4); var trailHead = 0; var trailCount = 0; var trailX = 0f; var trailY = 0f
         val px get() = x + offX
         val py get() = y + offY
@@ -88,6 +88,7 @@ class LiveBoats(private val world: WorldMap) {
             val off = 2.75f + 2.1f
             Berth(st.x + nx * off, st.y + ny * off, st.rot, st.name, norm(st.name), nx, ny)
         }
+        pontoons = FloatArray(stops.size * 2).also { a -> for ((i, st) in stops.withIndex()) { a[i * 2] = st.x; a[i * 2 + 1] = st.y } }
     }
 
     // ================================================================ per frame
@@ -380,9 +381,9 @@ class LiveBoats(private val world: WorldMap) {
             want = min(want, 0.8f + b.stateT * 0.22f).coerceAtLeast(0.6f)       // slow throttle-up, bow swinging out
             if (b.stateT > 8f && b.s > 20f) b.state = State.UNDERWAY
         }
-        if (b.legTo != null) want = min(want, sqrt(2f * 0.18f * max(remaining - 2f, 0f)) + 0.3f)   // braking into the stop
+        if (b.legTo != null) want = min(want, sqrt(2f * 0.42f * max(remaining - 1.5f, 0f)) + 0.25f)   // braking into the stop: full astern at the end
         else if (remaining < 25f) want = min(want, remaining * 0.08f)                               // end of a guessed leg: slow, wait
-        b.cmd = control(b, want)
+        b.cmd = control(b, want, b.legTo != null && remaining < 45f)
         b.s = min(b.legLen, b.s + max(0f, b.speed) * dt)
         if (b.s >= b.legLen - 0.3f && b.legTo != null) {
             b.state = State.DOCKED; b.stateT = 0f; b.dock = b.legTo; b.leg = null
@@ -403,11 +404,12 @@ class LiveBoats(private val world: WorldMap) {
         out[0] = leg[i * 2] + (leg[i * 2 + 2] - leg[i * 2]) * k; out[1] = leg[i * 2 + 1] + (leg[i * 2 + 3] - leg[i * 2 + 1]) * k
     }
 
-    /** throttle (-0.6 astern .. 1 ahead) that brings the boat to `want` m/s */
-    private fun control(b: Boat, want: Float): Float {
+    /** throttle (-1 astern .. 1 ahead) that brings the boat to `want` m/s */
+    private fun control(b: Boat, want: Float, docking: Boolean = false): Float {
         val vmax = b.kind.maxSpeed
         val err = want - b.speed
-        return if (err < -0.9f && b.speed > 0.6f) (-0.25f + err * 0.25f).coerceIn(-0.6f, -0.15f)     // astern to stop her
+        return if (docking && err < -0.35f && b.speed > 0.5f) (-0.3f + err * 0.7f).coerceIn(-1f, -0.2f)     // coming alongside: astern, hard
+        else if (err < -0.9f && b.speed > 0.6f) (-0.25f + err * 0.25f).coerceIn(-0.6f, -0.15f)              // easing off under way
         else (want / vmax + err * 1.8f / vmax).coerceIn(0f, 1f)
     }
 
@@ -419,7 +421,7 @@ class LiveBoats(private val world: WorldMap) {
         b.rpmRise = max(0f, (b.rpm - old) / max(dt, 1e-3f))
         if (b.state == State.DOCKED) return
         val vmax = b.kind.maxSpeed
-        val dir = if (b.cmd < 0f) -0.65f else 1f
+        val dir = if (b.cmd < 0f) -1.25f else 1f       // the prop astern at high revs brakes hard (and churns the water)
         val thrust = dir * b.rpm * b.rpm * vmax * vmax
         val drag = b.speed * abs(b.speed) + 0.4f * b.speed
         b.speed += b.kind.accel * (thrust - drag) / (vmax * vmax) * dt
@@ -680,7 +682,8 @@ class LiveBoats(private val world: WorldMap) {
             if (dx * dx + dy * dy > 160f * 160f) continue
             // a thin haze at idle, more with rpm, dark puffs when the throttle opens (the diesel under load)
             val load = min(1f, b.rpmRise * 4f)
-            b.smokeAcc += dt * (0.6f + 3.5f * b.rpm + 12f * load)
+            val astern = if (b.cmd < -0.1f && b.speed > 0.3f) b.rpm else 0f
+            b.smokeAcc += dt * (0.6f + 3.5f * b.rpm + 12f * load + 18f * astern)
             while (b.smokeAcc >= 1f && smokeN < MAX_SMOKE) {
                 b.smokeAcc -= 1f
                 val c = cos(b.h); val s = sin(b.h)
@@ -693,7 +696,8 @@ class LiveBoats(private val world: WorldMap) {
                 smokeP[o + 3] = c * b.speed * 0.3f; smokeP[o + 4] = s * b.speed * 0.3f
                 smokeP[o + 5] = 0f; smokeP[o + 6] = 2.2f + 2f * b.rpm + rnd() * 1.0f
                 smokeP[o + 7] = 0.3f + 0.3f * b.rpm
-                smokeP[o + 8] = (0.15f + 0.85f * load).coerceIn(0f, 1f)
+                smokeP[o + 8] = (0.15f + 0.85f * max(load, astern)).coerceIn(0f, 1f)
+                if (astern > 0f) { smokeP[o + 6] += 1.5f * astern; smokeP[o + 7] += 0.25f * astern }   // bigger, longer-lived puffs
                 smokeN++
             }
             if (b.smokeAcc > 1f) b.smokeAcc = 0f
@@ -826,7 +830,7 @@ class LiveBoats(private val world: WorldMap) {
         Obstacles.boats = list.map { floatArrayOf(it.px, it.py, it.h, it.kind.len / 2f, it.kind.beam / 2f) }
         markers = list.map { Marker(it.px, it.py, it.h, it.line, it.head) }
         // x, y, speed, kind, docked, rpm
-        audio = list.map { floatArrayOf(it.px, it.py, it.speed, it.kind.ordinal.toFloat(), if (it.docked) 1f else 0f, it.rpm, it.h, (it.id.hashCode() and 0xFFFFFF).toFloat()) }
+        audio = list.map { floatArrayOf(it.px, it.py, it.speed, it.kind.ordinal.toFloat(), if (it.docked) 1f else 0f, it.rpm, it.h, (it.id.hashCode() and 0xFFFFFF).toFloat(), it.cmd) }
         wakeHits()
     }
 
@@ -843,7 +847,8 @@ class LiveBoats(private val world: WorldMap) {
         b.turnRate += ((dh / dt).coerceIn(-1f, 1f) - b.turnRate) * min(1f, dt * 1.5f)
         b.hornCd -= dt; b.hornTurnCd -= dt
         val px = playerX; val py = playerY
-        if (px.isNaN() || b.docked || b.speed < 1.2f || b.hornCd > 0f) return
+        if (px.isNaN() || b.docked || b.speed < 1.2f) { b.blockT = 0f; return }
+        if (b.hornCd > 0f) return
         val dx = px - b.px; val dy = py - b.py
         val d2 = dx * dx + dy * dy
         if (d2 > 350f * 350f) return
@@ -852,11 +857,16 @@ class LiveBoats(private val world: WorldMap) {
         val half = b.kind.len * 0.5f
         val reach = half + 12f + b.speed * 7f
         if (ahead > half - 1f && ahead < reach && abs(side) < b.kind.beam * 0.5f + 3.5f + (ahead - half) * 0.06f) {
+            // crossing its bow is fine; sitting in its way is not: it only sounds once you've been blocking it a moment
+            b.blockT += dt
+            if (b.blockT < 1.6f) return
             val close = 1f - ((ahead - half) / (reach - half)).coerceIn(0f, 1f)
-            cues.add(floatArrayOf(CUE_HORN, b.px, b.py, if (close > 0.55f) 3f else 2f, b.kind.ordinal.toFloat()))
-            b.hornCd = if (close > 0.55f) 3.8f else 5.5f
+            val angry = close > 0.55f || b.blockT > 5f
+            cues.add(floatArrayOf(CUE_HORN, b.px, b.py, if (angry) 3f else 2f, b.kind.ordinal.toFloat()))
+            b.hornCd = if (angry) 3.8f else 4.5f
             return
         }
+        b.blockT = max(0f, b.blockT - dt * 2f)
         if (abs(b.turnRate) > 0.09f && b.hornTurnCd <= 0f && d2 < 300f * 300f) {
             cues.add(floatArrayOf(CUE_HORN, b.px, b.py, 1f, b.kind.ordinal.toFloat()))
             b.hornTurnCd = 40f + rnd() * 30f; b.hornCd = 4f
@@ -933,12 +943,14 @@ class LiveBoats(private val world: WorldMap) {
         const val CUE_DEPART = 1f; const val CUE_DOCK = 2f; const val CUE_HORN = 3f; const val CUE_WAKE = 4f
         /** where the player's boat is (set by the renderer): vaporetti honk at you, their wakes reach you */
         @Volatile var playerX = Float.NaN; @Volatile var playerY = Float.NaN
+        /** pontoon positions (x, y pairs): the pontoons creak and the ropes groan near them */
+        @Volatile var pontoons = FloatArray(0)
         const val MAX_SMOKE = 260
         const val TRAIL_N = 32
         const val TRAIL_LIFE = 45f
         const val LEG_STEP = 2f
         @Volatile var markers: List<Marker> = emptyList()
-        /** x, y, speed, kind, docked, rpm, heading, id - for the audio engine */
+        /** x, y, speed, kind, docked, rpm, heading, id, throttle command - for the audio engine */
         @Volatile var audio: List<FloatArray> = emptyList()
         /** one-shot sound cues (type, x, y) for the audio engine */
         val cues = ConcurrentLinkedQueue<FloatArray>()

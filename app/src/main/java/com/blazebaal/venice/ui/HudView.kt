@@ -94,7 +94,7 @@ class HudView(ctx: Context) : View(ctx) {
                     hit(engineBtn(), x, y) -> { Controls.engineOn = !Controls.engineOn; if (!Controls.engineOn) Controls.lever = 0f; haptic() }
                     hit(trimUp(), x, y) -> { trimId = id; trimDir = 1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(1); haptic() }
                     hit(trimDown(), x, y) -> { trimId = id; trimDir = -1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(-1); haptic() }
-                    camId < 0 -> { camId = id; camLx = x; camLy = y }
+                    camId < 0 -> { camId = id; camLx = x; camLy = y; Controls.camHeld = true }
                 }
                 invalidate()
             }
@@ -173,7 +173,7 @@ class HudView(ctx: Context) : View(ctx) {
         if (id == leftId || id == -2) { leftId = -1; Controls.leftHeld = false }
         if (id == rightId || id == -2) { rightId = -1; Controls.rightHeld = false }
         if (id == leverId || id == -2) leverId = -1
-        if (id == camId || id == -2) camId = -1
+        if (id == camId || id == -2) { camId = -1; Controls.camHeld = false }
         if (id == padId || id == -2) { padId = -1; Controls.steerAnalog = Float.NaN }
         if (id == wheelId || id == -2) { wheelId = -1; Controls.steerAnalog = Float.NaN; invalidate() }
         if (id == trimId || id == -2) { trimId = -1; trimDir = 0 }
