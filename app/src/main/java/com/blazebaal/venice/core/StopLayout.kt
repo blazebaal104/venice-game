@@ -5,7 +5,7 @@ package com.blazebaal.venice.core
 import kotlin.math.*
 
 object StopLayout {
-    class Stop(val x: Float, val y: Float, val rot: Float, val len: Int, val slot: Int)
+    class Stop(val x: Float, val y: Float, val rot: Float, val len: Int, val slot: Int, val name: String = "")
     class Result(val stops: List<Stop>, val boxes: List<FloatArray>, val extras: MeshBuilder)
 
     fun build(lines: List<String>, world: WorldMap): Result {
@@ -20,7 +20,7 @@ object StopLayout {
             fun landAt(dir: Float): Float { for (k in 0..80) { val d = 2f + k * 0.5f; if (world.solid(x - sin(dir) * d, y + cos(dir) * d) > 0.5f) return d }; return 99f }
             if (landAt(rot + PI.toFloat()) + 3f < landAt(rot)) rot += PI.toFloat()
             val lenM = lens.minByOrNull { abs(it - len) }!!
-            stops.add(Stop(x, y, rot, lenM, slot))
+            stops.add(Stop(x, y, rot, lenM, slot, p[0]))
             boxes.add(floatArrayOf(x, y, rot, lenM / 2f + 0.35f, 2.75f))
             val gx = lenM / 2f - min(5f, lenM * 0.3f) + 1.4f
             boxes.add(floatArrayOf(x + cos(rot) * gx - sin(rot) * 5.1f, y + sin(rot) * gx + cos(rot) * 5.1f, rot, 1.1f, 2.9f))

@@ -108,7 +108,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         loadLandmarks()
         loadBridges()
         loadStops()
-        vaporettoMesh = loadMesh("live/vaporetto.mesh")
+        live = LiveBoats(world); live.setStops(stopList)
+        for ((i, n) in listOf("motobattello", "motoscafo", "motonave").withIndex()) fleetMeshes[i] = loadMesh("live/$n.mesh")
         boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
         Obstacles.stops = stopBoxes
         findWater()
@@ -144,9 +145,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     } catch (e: Exception) { 0 }
 
     private var signTex = 0
-    private val live = LiveBoats()
-    private var vaporettoMesh: Mesh? = null
+    private lateinit var live: LiveBoats
+    private val fleetMeshes = arrayOfNulls<Mesh>(3)
     private val stopBoxes = ArrayList<FloatArray>()
+    private var stopList: List<StopLayout.Stop> = emptyList()
     private var stopExtras: Mesh? = null
 
     /** ACTV vaporetto stops (see landmarks/actv.txt): pontoon models by length, names from a shared sign sheet.
@@ -165,6 +167,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             landmarks.add(Landmark(mesh, model, st.x, st.y, atlas, rect))
         }
         stopBoxes.addAll(lay.boxes)
+        stopList = lay.stops
         val extra = lay.extras
         if (extra.count > 0) stopExtras = Mesh(extra.floats())
     }
@@ -368,7 +371,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
             wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
-        live.update(dt, time)
+        live.update(dt)
         if (!paused) watchEvents(sdt)
         GameState.x = boat.x; GameState.y = boat.y; GameState.heading = boat.heading; GameState.speedKmh = boat.speedKmh()
         GameState.distanceM = distance.toFloat()
@@ -521,9 +524,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             generic.mat4("uModel", l.model); l.mesh.draw()
         }
         // live ACTV vaporetti (plain-colour materials, no atlas)
-        vaporettoMesh?.let { vm ->
+        run {
             val vd = if (reflection) 220f else maxDist + 30f
-            for (b in live.boats.values) if (hypot(b.x - camX, b.y - camY) < vd) { generic.mat4("uModel", live.model(b, boat.time, boat.waveAmp)); vm.draw() }
+            for (b in live.boats.values) if (hypot(b.px - camX, b.py - camY) < vd) {
+                val vm = fleetMeshes[b.kind.ordinal] ?: continue
+                generic.mat4("uModel", live.model(b, boat.time, boat.waveAmp)); vm.draw()
+            }
         }
         boatMesh?.let { generic.mat4("uModel", bm); it.draw() }
     }
@@ -608,5 +614,5 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         return !(allLeft || allRight || allBelow || allAbove || allBehind)
     }
 
-    fun shutdown() { if (::streamer.isInitialized) streamer.shutdown() }
+    fun shutdown() { if (::streamer.isInitialized) streamer.shutdown(); if (::live.isInitialized) live.shutdown() }
 }
