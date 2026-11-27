@@ -29,7 +29,7 @@ object Audio {
     /** nearby boats: x, y, speed, kind, docked */
     @Volatile var boats: List<FloatArray> = emptyList()
     private val events = ConcurrentLinkedQueue<FloatArray>()
-    const val EV_SPLASH = 1f; const val EV_IMPACT = 2f; const val EV_SCRAPE = 3f; const val EV_DOCK = 4f; const val EV_DEPART = 5f
+    const val EV_SPLASH = 1f; const val EV_IMPACT = 2f; const val EV_SCRAPE = 3f; const val EV_DOCK = 4f; const val EV_DEPART = 5f; const val EV_THUNDER = 6f
 
     /** one-shot sound at a world position (NaN = at the player): type, strength, x, y */
     fun event(type: Float, strength: Float, x: Float = Float.NaN, y: Float = Float.NaN) { if (events.size < 32) events.add(floatArrayOf(type, strength, x, y)) }
@@ -117,6 +117,7 @@ object Audio {
                 EV_SCRAPE -> voices.add(Voice(3, 0f, 0.5f, 0.35f * att, pl, pr, 0f))
                 EV_DOCK -> { voices.add(Voice(4, 0f, 3.0f, 0.55f * att, pl, pr, 0f)); voices.add(Voice(2, -1.6f, 0.8f, 0.5f * att, pl, pr, 48f)); voices.add(Voice(5, -2.4f, 0.5f, 0.35f * att, pl, pr, 0f)) }
                 EV_DEPART -> voices.add(Voice(4, 0f, 3.5f, 0.6f * att, pl, pr, 1f))
+                EV_THUNDER -> voices.add(Voice(6, 0f, 5.5f, 0.9f, 0.55f, 0.55f, 0f))
             }
         }
         if (voices.size > 24) voices.subList(0, voices.size - 24).clear()
@@ -187,6 +188,7 @@ object Audio {
                     2 -> (sin(2.0 * PI * vc.f * vc.t).toFloat() * exp(-vc.t * 9f) * 1.6f + noise() * exp(-vc.t * 60f) * 0.6f) // thud
                     3 -> (noise() - vc.lp.lp(noise(), coef(2500f))) * sin(PI * x).toFloat() * 0.8f                        // scrape
                     4 -> vc.lp.lp(noise(), coef(350f + 250f * sin(PI * x).toFloat())) * sin(PI * x).toFloat() * 2.4f       // prop churn (reverse / rev)
+                    6 -> vc.lp.lp(noise(), coef(90f + 160f * exp(-vc.t * 1.5f))) * (min(1f, vc.t * 8f) * exp(-vc.t * 0.7f) * (0.7f + 0.3f * sin(vc.t * 7f))) * 4f   // thunder
                     5 -> (sin(2.0 * PI * 820.0 * vc.t) + 0.6 * sin(2.0 * PI * 1370.0 * vc.t)).toFloat() * exp(-vc.t * 18f) * 0.5f // gangway clank
                     else -> 0f
                 }

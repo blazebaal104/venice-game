@@ -61,8 +61,11 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     // lighting (linear HDR): Venetian late-afternoon sun from the south-west
     private val sunDir = run { val az = Math.toRadians(228.0); val el = Math.toRadians(32.0); floatArrayOf((sin(az) * cos(el)).toFloat(), (cos(az) * cos(el)).toFloat(), sin(el).toFloat()) }
-    private val sunCol = floatArrayOf(3.3f, 2.95f, 2.45f)
+    private val sunClear = floatArrayOf(3.3f, 2.95f, 2.45f)
+    private val sunCol = sunClear.copyOf()
     private val skyAmb = floatArrayOf(0.34f, 0.42f, 0.56f)
+    private val rain by lazy { Rain() }
+    private var wet = 0f; private var flash = 0f; private var nextBolt = 6f; private var boltT = -1f
     private val groundAmb = floatArrayOf(0.20f, 0.18f, 0.15f)
     // clear-day values; blended towards overcast / fog by the live weather every frame
     private val fogClear = floatArrayOf(0.62f, 0.68f, 0.76f); private val fogGrey = floatArrayOf(0.66f, 0.68f, 0.70f)
@@ -240,8 +243,9 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         Audio.engineOn = Controls.engineOn; Audio.throttle = Controls.throttle(); Audio.speed = abs(boat.surge)
         Audio.trim = Controls.trim; Audio.airborne = boat.airborne
         Audio.nearLand = ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f)
-        Audio.rain = if (Settings.liveWeather && Weather.live && Weather.isRain()) (0.35f + Weather.precipitationMm / 3f).coerceIn(0f, 1f) else 0f
-        Audio.wind = if (Settings.liveWeather && Weather.live) (Weather.windKmh / 45f).coerceIn(0f, 1f) else 0.1f
+        val wx = (Settings.liveWeather && Weather.live) || Weather.override > 0
+        Audio.rain = if (wx) Weather.rainIntensity() else 0f
+        Audio.wind = if (wx) (hypot(Weather.windVec()[0], Weather.windVec()[1]) * 3.6f / 45f).coerceIn(0f, 1f) else 0.1f
         Audio.lx = camX; Audio.ly = camY; Audio.lyaw = boat.heading + camYawOff
         Audio.boats = LiveBoats.audio
         while (true) {
@@ -295,14 +299,29 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     /** Fog distances from the render distance + fog setting, and fog / sky colours from the live weather. */
     private fun updateAtmosphere(dt: Float) {
-        val live = Settings.liveWeather && Weather.live
-        val grey = if (live) (Weather.cloudCover * 0.75f + (if (Weather.isFog() || Weather.isRain()) 0.45f else 0f)).coerceIn(0f, 1f) else 0f
+        val live = (Settings.liveWeather && Weather.live) || Weather.override > 0
+        val grey = if (live) Weather.gloom() else 0f
+        // overcast dims the sun; rain soaks the city slowly and it dries slowly
+        for (i in 0..2) sunCol[i] += (sunClear[i] * (1f - 0.65f * grey) - sunCol[i]) * (1f - exp(-dt * 0.5f))
+        val rainI = if (live) Weather.rainIntensity() else 0f
+        wet += ((if (rainI > 0f) 1f else 0f) - wet) * (1f - exp(-dt * (if (rainI > 0f) 0.08f else 0.02f)))
+        // storms: lightning every 8-25 s, a double flicker, thunder a moment later
+        if (live && Weather.isStorm()) {
+            nextBolt -= dt
+            if (nextBolt <= 0f) { nextBolt = 8f + Math.random().toFloat() * 17f; boltT = 0f }
+        }
+        if (boltT >= 0f) {
+            boltT += dt
+            flash = if (boltT < 0.08f) 1f else if (boltT < 0.14f) 0.2f else if (boltT < 0.22f) 0.8f else max(0f, 0.8f - (boltT - 0.22f) * 3f)
+            if (boltT > 1.2f && boltT - dt <= 1.2f) com.blazebaal.venice.audio.Audio.event(com.blazebaal.venice.audio.Audio.EV_THUNDER, 1f)
+            if (boltT > 2f) boltT = -1f
+        } else flash = 0f
         val k = 1f - exp(-dt * 0.5f)   // ease weather changes in over a few seconds
         for (i in 0..2) {
             fogCol[i] += (fogClear[i] + (fogGrey[i] - fogClear[i]) * grey - fogCol[i]) * k
             zenith[i] += (zenithClear[i] + (zenithGrey[i] - zenithClear[i]) * grey * 0.85f - zenith[i]) * k
         }
-        val wf = if (Settings.liveWeather) Weather.fogFactor() else 1f
+        val wf = if (Settings.liveWeather || Weather.override > 0) Weather.fogFactor() else 1f
         fogEnd = drawDist * 0.97f
         val startK = when (Settings.fogDensity) { 0 -> 0.72f; 2 -> 0.3f; else -> 0.5f } / sqrt(wf)
         fogStart = fogEnd * startK.coerceIn(0.08f, 0.9f)
@@ -352,7 +371,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         lastNs = now
         fpsAcc += rawDt; fpsN++
         if (fpsAcc > 0.5f) { GameState.fps = fpsN / fpsAcc; fpsAcc = 0f; fpsN = 0 }
-        drawDist = Settings.renderDistance
+        // bad weather: the fog closes in and the render distance drops with it (fewer chunks = steady FPS)
+        drawDist = if (Settings.liveWeather || Weather.override > 0) min(Settings.renderDistance, Weather.renderCap()) else Settings.renderDistance
         streamer.radius = drawDist
         // title screen: the page covers the whole view, so don't render the city - just stream in the chunks around
         // the start position so "Gioca" drops you straight into a loaded Venice
@@ -383,7 +403,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val thr = Controls.throttle(); val st = Controls.steer()
         if (!paused) {
             boat.trim = Controls.trim
-            boat.weatherWaves = if (Settings.liveWeather) Weather.waveFactor() else 1f
+            boat.weatherWaves = if (Settings.liveWeather || Weather.override > 0) Weather.waveFactor() else 1f
             tripTime += sdt
             val ox = boat.x; val oy = boat.y
             for (k in 0 until 3) boat.update(sdt / 3, if (Controls.engineOn) thr else 0f, st, world)
@@ -457,6 +477,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
         drawWater(vp, r)
         drawSpray(vp)
+        if (Settings.liveWeather || Weather.override > 0) { val w = Weather.windVec(); rain.draw(vp, camX, camY, camZ, boat.time, Weather.rainIntensity(), w[0] * 0.6f, w[1] * 0.6f, fogCol) }
 
         // ---- post
         glDisable(GL_DEPTH_TEST)
@@ -472,7 +493,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         compP.use()
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sc.tex); compP.i("uScene", 0)
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ba.tex); compP.i("uBloom", 1)
-        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", if (sc.isHdr) 0.85f else 1.45f)
+        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", (if (sc.isHdr) 0.85f else 1.45f) * (1f + flash * 1.6f))
         // sharpen more when the internal resolution is lower
         compP.f("uSharpen", Settings.sharpen * (1f + (1f - scale) * 1.5f)); compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
         skyTri?.draw()
@@ -483,9 +504,9 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glDepthMask(false)
         sky.use(); sky.mat4("uInvVP", Mat4.invert(vp)); sky.vec3("uSunDir", sunDir); sky.vec3("uFogCol", fogCol); sky.vec3("uSkyZenith", zenith); sky.vec3("uSunCol", sunCol)
         sky.f("uMirrorSky", if (mirrored) 1f else 0f); sky.f("uTime", time)
-        sky.f("uCloudCover", if (Settings.liveWeather) Weather.clouds() else 0.55f)
+        sky.f("uCloudCover", if (Settings.liveWeather || Weather.override > 0) Weather.clouds() else 0.55f)
         sky.f("uHazeH", (34f / drawDist).coerceIn(0.02f, 0.25f))
-        if (Settings.liveWeather && Weather.live) sky.vec2("uWind", Weather.windX(), Weather.windY()) else sky.vec2("uWind", 1f, 0.375f)
+        if ((Settings.liveWeather && Weather.live) || Weather.override > 0) { val w = Weather.windVec(); sky.vec2("uWind", w[0] * 0.4f, w[1] * 0.4f) } else sky.vec2("uWind", 1f, 0.375f)
         skyTri?.draw()
         glDepthMask(true)
     }
@@ -493,7 +514,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun common(p: Program, vp: FloatArray, mir: FloatArray, clipZ: Float, shadows: Boolean = true) {
         p.mat4("uVP", vp); p.mat4("uMirror", mir)
         p.vec3("uSunDir", sunDir); p.vec3("uSunCol", sunCol); p.vec3("uSkyAmb", skyAmb); p.vec3("uGroundAmb", groundAmb)
-        p.vec3("uFogCol", fogCol); p.vec3("uSkyZenith", zenith); p.f("uFogDens", fogDens); p.f("uFogStart", fogStart); p.f("uFogEnd", fogEnd); p.vec3("uCam", camX, camY, camZ); p.f("uTime", boat.time)
+        p.vec3("uFogCol", fogCol); p.vec3("uSkyZenith", zenith); p.f("uFogDens", fogDens); p.f("uFogStart", fogStart); p.f("uFogEnd", fogEnd); p.f("uWet", wet); p.vec3("uCam", camX, camY, camZ); p.f("uTime", boat.time)
         p.f("uClipZ", clipZ)
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, cityShadow.tex); p.i("uShadow", 2)
         glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, boatShadow.tex); p.i("uShadowB", 9)
