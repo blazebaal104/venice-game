@@ -113,7 +113,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         loadBridges()
         loadStops()
         live = LiveBoats(world); live.setStops(stopList)
-        for ((i, n) in listOf("motobattello", "motoscafo", "motonave").withIndex()) fleetMeshes[i] = loadMesh("live/$n.mesh")
+        for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) fleetMeshes[i] = loadMesh("live/$n.mesh")
+        wake.fleet = live
+        smokeP = Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke"); trailP = Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail")
+        smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 24000)
         boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
         Obstacles.stops = stopBoxes
         findWater()
@@ -150,7 +153,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     private var signTex = 0
     private lateinit var live: LiveBoats
-    private val fleetMeshes = arrayOfNulls<Mesh>(3)
+    private val fleetMeshes = arrayOfNulls<Mesh>(4)
+    private lateinit var smokeP: Program; private lateinit var trailP: Program
+    private lateinit var smokeMesh: InstMesh; private lateinit var trailMesh: DynMesh
+    private val smokeData = FloatArray(LiveBoats.MAX_SMOKE * 6); private val trailData = FloatArray(24000 * 5)
     private val stopBoxes = ArrayList<FloatArray>()
     private var stopList: List<StopLayout.Stop> = emptyList()
     private var stopExtras: Mesh? = null
@@ -486,7 +492,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
             wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
-        live.update(dt)
+        live.update(if (paused) 0f else dt, camX, camY)
         if (!paused) watchEvents(sdt)
         feedAudio(paused)
         GameState.x = boat.x; GameState.y = boat.y; GameState.heading = boat.heading; GameState.speedKmh = boat.speedKmh()
@@ -550,7 +556,9 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         drawSky(vp, false)
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
         drawWater(vp, r)
+        drawTrails(vp)
         drawSpray(vp)
+        drawSmoke(vp)
         if (Settings.liveWeather || Weather.override > 0) { val w = Weather.windVec(); rain.draw(vp, camX, camY, camZ, boat.time, Weather.rainIntensity(), w[0] * 0.6f, w[1] * 0.6f, fogCol) }
 
         // ---- post
@@ -599,6 +607,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     private fun drawOpaque(vp: FloatArray, mir: FloatArray, clipZ: Float, maxDist: Float, bm: FloatArray, reflection: Boolean) {
         val pv = Mat4.mul(vp, mir)
+        setPlanes(pv)
         visible.clear()
         for (t in streamer.tiles.values) if (hypot(t.cx - camX, t.cy - camY) < maxDist + 182 && inFrustum(pv, t.ox, t.oy)) visible.add(t)
         if (!reflection) {
@@ -635,7 +644,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         generic.i("uAtlas", 6); generic.i("uSign", 8)
         glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, signTex)
         val lmDist = if (reflection) 200f else maxDist + 60f
-        for (l in landmarks) if (hypot(l.x - camX, l.y - camY) < lmDist) {
+        for (l in landmarks) if (hypot(l.x - camX, l.y - camY) < lmDist && sphereVisible(l.x, l.y, 20f, 140f)) {
             glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, l.atlas)
             glUniform4f(generic.loc("uSignRect"), l.signRect[0], l.signRect[1], l.signRect[2], l.signRect[3])
             generic.mat4("uModel", l.model); l.mesh.draw()
@@ -643,7 +652,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // live ACTV vaporetti (plain-colour materials, no atlas)
         run {
             val vd = if (reflection) 220f else maxDist + 30f
-            for (b in live.boats.values) if (hypot(b.px - camX, b.py - camY) < vd) {
+            for (b in live.boats.values) if (hypot(b.px - camX, b.py - camY) < vd && sphereVisible(b.px, b.py, 2f, b.kind.len * 0.6f)) {
                 val vm = fleetMeshes[b.kind.ordinal] ?: continue
                 generic.mat4("uModel", live.model(b, boat.time, boat.waveAmp)); vm.draw()
             }
@@ -664,6 +673,35 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         water.f("uGridHalf", 1e6f); waterNear?.draw()
         water.f("uGridHalf", 160f); waterMid?.draw()
         water.f("uGridHalf", 1f); waterFar?.draw()
+    }
+
+    private fun drawTrails(vp: FloatArray) {
+        val n = live.buildTrails(trailData, min(drawDist, 700f), camX, camY)
+        if (n == 0) return
+        trailMesh.upload(trailData, n)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
+        trailP.use(); common(trailP, vp, ident, -1000f)
+        trailMesh.draw()
+        glDepthMask(true); glDisable(GL_BLEND)
+    }
+
+    private fun drawSmoke(vp: FloatArray) {
+        val src = live.smokeP; var n = 0
+        for (i in 0 until live.smokeN) {
+            val o = i * 9; val t = src[o + 5] / src[o + 6]
+            val q = n * 6
+            smokeData[q] = src[o]; smokeData[q + 1] = src[o + 1]; smokeData[q + 2] = src[o + 2]
+            smokeData[q + 3] = src[o + 7] * (1f + t * 5f)                         // puffs grow as they rise
+            smokeData[q + 4] = (0.10f + 0.30f * src[o + 8]) * min(1f, t * 8f) * (1f - t) // fade in, then out
+            smokeData[q + 5] = src[o + 8] * (1f - t * 0.7f)
+            n++
+        }
+        if (n == 0) return
+        smokeMesh.upload(smokeData, n)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
+        smokeP.use(); common(smokeP, vp, ident, -1000f)
+        smokeMesh.draw()
+        glDepthMask(true); glDisable(GL_BLEND)
     }
 
     private fun drawSpray(vp: FloatArray) {
@@ -713,6 +751,22 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         depth.use(); depth.mat4("uLightVP", lightVPB); depth.mat4("uModel", bm); boatMesh?.draw()
         glDisable(GL_POLYGON_OFFSET_FILL)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    }
+
+    private val planes = FloatArray(20)
+    /** the 5 frustum planes (left, right, bottom, top, near) of a view-projection, normalised */
+    private fun setPlanes(vp: FloatArray) {
+        val sg = floatArrayOf(1f, -1f, 1f, -1f, 1f); val row = intArrayOf(0, 0, 1, 1, 2)
+        for (k in 0 until 5) {
+            val r = row[k]; val s = sg[k]
+            val a = vp[3] + s * vp[r]; val b = vp[7] + s * vp[4 + r]; val c = vp[11] + s * vp[8 + r]; val d = vp[15] + s * vp[12 + r]
+            val l = max(sqrt(a * a + b * b + c * c), 1e-6f)
+            planes[k * 4] = a / l; planes[k * 4 + 1] = b / l; planes[k * 4 + 2] = c / l; planes[k * 4 + 3] = d / l
+        }
+    }
+    private fun sphereVisible(x: Float, y: Float, z: Float, r: Float): Boolean {
+        for (k in 0 until 5) if (planes[k * 4] * x + planes[k * 4 + 1] * y + planes[k * 4 + 2] * z + planes[k * 4 + 3] < -r) return false
+        return true
     }
 
     private fun inFrustum(vp: FloatArray, ox: Float, oy: Float): Boolean {

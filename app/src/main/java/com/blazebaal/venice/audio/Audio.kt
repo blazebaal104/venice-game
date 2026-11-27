@@ -26,7 +26,7 @@ object Audio {
     @Volatile var nearLand = 0f            // 0 open lagoon .. 1 narrow canal (more slap, more echo-ish)
     @Volatile var rain = 0f; @Volatile var wind = 0f
     @Volatile var lx = 0f; @Volatile var ly = 0f; @Volatile var lyaw = 0f   // listener (camera) position + yaw
-    /** nearby boats: x, y, speed, kind, docked */
+    /** nearby boats: x, y, speed, kind, docked, rpm */
     @Volatile var boats: List<FloatArray> = emptyList()
     private val events = ConcurrentLinkedQueue<FloatArray>()
     const val EV_SPLASH = 1f; const val EV_IMPACT = 2f; const val EV_SCRAPE = 3f; const val EV_DOCK = 4f; const val EV_DEPART = 5f; const val EV_THUNDER = 6f
@@ -165,14 +165,15 @@ object Audio {
             for ((bi, b) in nb.withIndex()) {
                 val (pl, pr, att) = nb0[bi]
                 if (att < 0.003f) continue
-                val bs = b[2]; val docked = b[4] > 0.5f
-                val f = (if (docked) 16f else 20f + bs * 3.5f) * (if (b[3] == 2f) 0.8f else 1f)
+                val bs = abs(b[2]); val rpm = if (b.size > 5) b[5] else (if (b[4] > 0.5f) 0.12f else 0.5f)
+                // diesel firing frequency follows the engine rpm from the behaviour layer (idle ~15 Hz, flat out ~42 Hz)
+                val f = (13f + 29f * rpm) * (if (b[3] == 2f) 0.8f else 1f)
                 bPh[bi] += f / SR; if (bPh[bi] > 1.0) bPh[bi] -= 1.0
                 val ph = bPh[bi] * 2.0 * PI
                 var d = (sin(ph) + 0.6 * sin(2 * ph) + 0.35 * sin(3 * ph) + 0.2 * sin(4 * ph + 1.0) + 0.12 * sin(6 * ph)).toFloat()
                 d += bLp[bi].lp(noise() * sin(PI * bPh[bi]).toFloat().pow(6f), coef(400f)) * 1.5f
-                val churn = bChurn[bi].lp(noise(), coef(600f)) * (0.15f + bs * 0.08f)
-                val v = (d * 0.3f + churn) * att * mv * 0.9f
+                val churn = bChurn[bi].lp(noise(), coef(600f)) * (0.1f + bs * 0.06f + rpm * 0.25f)
+                val v = (d * (0.18f + 0.3f * rpm) + churn) * att * mv * 0.9f
                 sl += v * pl; sr += v * pr
             }
             // ---------------- one-shot voices

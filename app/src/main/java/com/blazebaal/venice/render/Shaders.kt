@@ -628,15 +628,17 @@ uniform int uN; uniform float uCell; uniform vec2 uOrigin; uniform ivec2 uShift;
 uniform float uDt; uniform float uK; uniform float uBeta; uniform float uNu; uniform float uDamp; uniform float uSpongeMin;
 uniform float uFoamDiff; uniform float uAerDiff;
 uniform vec4 uB0; uniform vec4 uB0b; uniform vec4 uB1; uniform vec4 uB1b; uniform vec2 uHull;
-uniform vec4 uSplat[12]; uniform int uNSplat;
+uniform vec4 uSplat[16]; uniform int uNSplat;
+// ACTV boats inside the window: pose now / one step ago (x, y, heading, depth), (throttle, 0, speed, 0), half size
+uniform vec4 uV0[4]; uniform vec4 uV0b[4]; uniform vec4 uV1[4]; uniform vec2 uVH[4]; uniform int uNV;
 out vec4 o;
 const float PI = 3.14159265;
 vec4 S(ivec2 c) { c += uShift; if (c.x < 0 || c.y < 0 || c.x >= uN || c.y >= uN) return vec4(0.0); return texelFetch(uState, c, 0); }
 // hull "occupancy" (displacement depth) at world point p for a boat pose: B = x, y, heading, depth; Bb = throttle, planing
-float occ(vec4 B, vec4 Bb, vec2 p) {
+float occH(vec4 B, vec4 Bb, vec2 p, vec2 hull) {
     vec2 d = p - B.xy; float ch = cos(B.z), sh = sin(B.z);
     float lx = d.x * ch + d.y * sh, ly = -d.x * sh + d.y * ch;
-    float hl = uHull.x, hb = uHull.y;
+    float hl = hull.x, hb = hull.y;
     if (B.w <= 0.0 || abs(lx) > hl + 7.0 || abs(ly) > hl + 7.0) return 0.0;
     if (lx < -hl) {
         // behind the transom: the outboard throws water up into a mound, then it falls into a hollow
@@ -657,6 +659,7 @@ float occ(vec4 B, vec4 Bb, vec2 p) {
     float soft = outD > 0.0 ? pow(1.0 - outD / 0.4, 2.0) : 1.0;
     return B.w * inside * aft * soft;
 }
+float occ(vec4 B, vec4 Bb, vec2 p) { return occH(B, Bb, p, uHull); }
 void main() {
     ivec2 c = ivec2(gl_FragCoord.xy);
     vec2 p = uOrigin + (vec2(c) + 0.5) * uCell;
@@ -672,6 +675,13 @@ void main() {
     float v = 2.0 * u0 - up0 + uK * lap + uBeta * lap2 + uNu * (lap - lapP);
     // moving hull: its change of footprint is a volume-conserving height displacement (no velocity kick)
     float dOcc = occ(uB0, uB0b, p) - occ(uB1, uB1b, p);
+    float gateV = 0.0;
+    for (int k = 0; k < 4; k++) {
+        if (k >= uNV) break;
+        if (distance(p, uV0[k].xy) > uVH[k].x + 9.0) continue;
+        dOcc += occH(uV0[k], uV0b[k], p, uVH[k]) - occH(uV1[k], uV0b[k], p, uVH[k]);
+        gateV = max(gateV, 1.0 - clamp((distance(p, uV0[k].xy) - uVH[k].x - 4.0) / 10.0, 0.0, 1.0) * step(0.8, uV0b[k].z));
+    }
     v -= dOcc; float uc = u0 - dOcc;
     int edge = min(min(c.x, c.y), min(uN - 1 - c.x, uN - 1 - c.y));
     v *= edge < 16 ? mix(uSpongeMin, uDamp, float(edge) / 16.0) : uDamp;
@@ -682,11 +692,11 @@ void main() {
     float fAvg = (sE.b + sW.b + sN.b + sS.b) * 0.25;
     float f0 = s0.b + (fAvg - s0.b) * uFoamDiff;
     float q = 1.0 - min(f0, 1.0);
-    float gate = 1.0 - clamp((distance(p, uB0.xy) - 10.0) / 10.0, 0.0, 1.0);
+    float gate = max(1.0 - clamp((distance(p, uB0.xy) - 10.0) / 10.0, 0.0, 1.0), gateV);
     float f = f0 * exp(-uDt / (1.1 + 4.0 * q * q)) + (max(0.0, steep - 0.12) * 3.0 + max(0.0, u0 - 0.16) * 3.0) * uDt * gate;
     float aAvg = (sE.a + sW.a + sN.a + sS.a) * 0.25;
     float a = (s0.a + (aAvg - s0.a) * uAerDiff) * exp(-uDt / 25.0);
-    for (int k = 0; k < 12; k++) {
+    for (int k = 0; k < 16; k++) {
         if (k >= uNSplat) break;
         vec4 sp = uSplat[k];
         float dd = distance(p, sp.xy) / sp.z;
@@ -766,6 +776,63 @@ void main() {
     float fwd = pow(max(dot(-v, uSunDir), 0.0), 6.0);       // droplets glow when backlit
     vec3 col = vec3(0.90, 0.94, 0.95) * (uSunCol * (0.55 + 1.4 * fwd) * sh + uSkyAmb * 1.25);
     o = vec4(fog(col, vW), a);
+}
+"""
+
+    // ------------------------------------------------------------------ ACTV exhaust smoke (instanced soft puffs)
+    const val SMOKE_VS = """#version 300 es
+layout(location=0) in vec3 aPos; layout(location=1) in vec3 aInfo; layout(location=3) in vec2 aCorner;
+uniform mat4 uVP; uniform vec3 uCam;
+out vec3 vW; out vec2 vC; out float vA; out float vDark;
+void main() {
+    vec3 view = normalize(aPos - uCam);
+    vec3 side = normalize(cross(view, vec3(0.0, 0.0, 1.0)));
+    vec3 up = cross(side, view);
+    vec3 p = aPos + (side * aCorner.x + up * aCorner.y) * aInfo.x;
+    vW = p; vC = aCorner; vA = aInfo.y; vDark = aInfo.z;
+    gl_Position = uVP * vec4(p, 1.0);
+}
+"""
+    val SMOKE_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in vec2 vC; in float vA; in float vDark;
+out vec4 o;
+void main() {
+    float r = dot(vC, vC);
+    float n = noise(vC * 2.2 + vW.xy * 0.7 + vec2(uTime * 0.3, 0.0));
+    float d = r * (0.8 + 0.5 * n);
+    if (d > 1.0) discard;
+    float a = (1.0 - d) * (1.0 - d) * vA;
+    vec3 base = mix(vec3(0.62, 0.63, 0.64), vec3(0.16, 0.16, 0.17), vDark);
+    vec3 col = base * (uSunCol * 0.55 + uSkyAmb * 1.2);
+    o = vec4(fog(col, vW), a);
+}
+"""
+
+    // ------------------------------------------------------------------ foam trails behind the ACTV boats
+    const val TRAIL_VS = """#version 300 es
+layout(location=0) in vec2 aPos; layout(location=1) in vec3 aInfo;
+uniform mat4 uVP;
+out vec3 vW; out vec3 vInfo;
+void main() { vW = vec3(aPos, 0.07); vInfo = aInfo; gl_Position = uVP * vec4(vW, 1.0); }
+"""
+    val TRAIL_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in vec3 vInfo;
+out vec4 o;
+void main() {
+    float age = vInfo.x, across = abs(vInfo.y), str = vInfo.z;
+    // churned core right behind the stern, breaking up into streaks and patches as it ages and spreads
+    float n1 = noise(vW.xy * 0.55), n2 = noise(vW.xy * 2.1 + 7.0);
+    float core = smoothstep(1.0, 0.25 + 0.4 * age, across);
+    float edge = smoothstep(0.55, 0.95, across) * smoothstep(1.0, 0.92, across) * 0.6;
+    float breakup = smoothstep(0.25 + 0.55 * age, 0.85, n1 * 0.6 + n2 * 0.4);
+    float a = (core + edge) * breakup * str * pow(1.0 - age, 1.6) * 0.75;
+    if (a < 0.01) discard;
+    vec3 col = vec3(0.93, 0.95, 0.96) * (uSunCol * 0.6 + uSkyAmb * 1.3);
+    o = vec4(fog(col, vW), min(a, 0.85));
 }
 """
 
