@@ -47,6 +47,15 @@ class MeshBuilder(initial: Int = 4096) {
     fun quad(a: Vec3, b: Vec3, c: Vec3, d: Vec3) { tri(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z); tri(a.x, a.y, a.z, c.x, c.y, c.z, d.x, d.y, d.z) }
 
     /** Oriented box: centre, half sizes, rotation about Z (radians). */
+    /** a thin vertical bar: the 4 sides of a box, no top/bottom (24 vertices instead of 36) */
+    fun bar(cx: Float, cy: Float, cz: Float, hx: Float, hy: Float, hz: Float, rot: Float = 0f) {
+        val cs = cos(rot); val sn = sin(rot)
+        fun p(sx: Float, sy: Float, sz: Float) = Vec3(cx + sx * hx * cs - sy * hy * sn, cy + sx * hx * sn + sy * hy * cs, cz + sz * hz)
+        val p000 = p(-1f, -1f, -1f); val p100 = p(1f, -1f, -1f); val p110 = p(1f, 1f, -1f); val p010 = p(-1f, 1f, -1f)
+        val p001 = p(-1f, -1f, 1f); val p101 = p(1f, -1f, 1f); val p111 = p(1f, 1f, 1f); val p011 = p(-1f, 1f, 1f)
+        quad(p000, p100, p101, p001); quad(p100, p110, p111, p101); quad(p110, p010, p011, p111); quad(p010, p000, p001, p011)
+    }
+
     fun box(cx: Float, cy: Float, cz: Float, hx: Float, hy: Float, hz: Float, rot: Float = 0f) {
         val cs = cos(rot); val sn = sin(rot)
         fun p(sx: Float, sy: Float, sz: Float) = Vec3(cx + sx * hx * cs - sy * hy * sn, cy + sx * hx * sn + sy * hy * cs, cz + sz * hz)

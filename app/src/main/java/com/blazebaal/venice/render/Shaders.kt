@@ -67,23 +67,23 @@ vec3 light(vec3 alb, vec3 n, vec3 wpos, float rough, float ao, float f0) {
     float nl = max(dot(n, l), 0.0), nv = max(dot(n, v), 1e-3), nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
     float sh = nl > 0.0 ? sunShadow(wpos, n) : 0.0;
     float a = max(rough * rough, 0.02); float a2 = a * a;
-    float d = nh * nh * (a2 - 1.0) + 1.0; float D = a2 / (PI * d * d);
+    float d = max(nh * nh * (a2 - 1.0) + 1.0, 1e-3); float D = a2 / (PI * d * d);
     float k = (rough + 1.0) * (rough + 1.0) / 8.0;
     float G = (nl / (nl * (1.0 - k) + k)) * (nv / (nv * (1.0 - k) + k));
-    float F = f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
-    vec3 spec = uSunCol * (D * G * F / max(4.0 * nl * nv, 1e-3)) * nl * sh;
+    float fx = clamp(1.0 - vh, 0.0, 1.0); float F = f0 + (1.0 - f0) * fx * fx * fx * fx * fx;
+    vec3 spec = nl > 0.0 ? uSunCol * min(D * G * F / max(4.0 * nl * nv, 1e-3), 200.0) * nl * sh : vec3(0.0);
     vec3 hemi = mix(uGroundAmb, uSkyAmb, n.z * 0.5 + 0.5);
     vec3 diff = alb * (uSunCol * nl * sh + hemi * ao) * (1.0 - F * 0.5);
     vec3 r = reflect(-v, n);
     // reflected environment: sky above the horizon, the dark canal/paving below it (soffits mirror water, not sky)
     vec3 env = r.z >= 0.0 ? mix(uFogCol, uSkyZenith, clamp(r.z * 1.5, 0.0, 1.0)) : mix(uFogCol * 0.5, uFogCol * 0.18, clamp(-r.z * 3.0, 0.0, 1.0));
-    float Fa = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
-    return diff + spec + env * Fa * (1.0 - rough) * ao * 0.9;
+    float ax = clamp(1.0 - nv, 0.0, 1.0); float Fa = f0 + (1.0 - f0) * ax * ax * ax * ax * ax;
+    return clamp(diff + spec + env * Fa * clamp(1.0 - rough, 0.0, 1.0) * ao * 0.9, vec3(0.0), vec3(500.0));
 }
 vec3 fog(vec3 c, vec3 wpos) {
     c *= 1.0 - 0.22 * uWet * step(0.05, wpos.z);
     float d = length(wpos - uCam);
-    float f = 1.0 - exp(-pow(d * uFogDens, 1.4));
+    float f = 1.0 - exp(-pow(max(d * uFogDens, 1e-6), 1.4));
     f = max(f, (1.0 - exp(-d * 0.00035)) * 0.35);   // light lagoon haze
     // caligo: the low mist that sits on the lagoon - thicker near the water, thinning out over the rooftops
     float low = exp(-max(wpos.z, 0.0) / 16.0);
@@ -93,7 +93,10 @@ vec3 fog(vec3 c, vec3 wpos) {
         float e = smoothstep(uFogStart, uFogEnd, d);
         f = max(f, e * e * (3.0 - 2.0 * e) * (0.6 + 0.4 * low) + e * 0.4 * (1.0 - low));
     }
-    return mix(c, uFogCol * 1.15, clamp(f, 0.0, 1.0));
+    vec3 r = mix(c, uFogCol * 1.15, clamp(f, 0.0, 1.0));
+    // a broken value anywhere upstream (NaN / inf in the lighting) used to come out black: show the fog instead
+    if (any(isnan(r)) || any(isinf(r))) r = uFogCol * 1.15;
+    return r;
 }
 """
 
@@ -394,7 +397,7 @@ void main() {
             } else {
                 vec3 r = reflect(-vdir, n);
                 vec3 env = mix(uFogCol, uSkyZenith, clamp(r.z * 1.4 + 0.2, 0.0, 1.0));
-                float fres = 0.08 + 0.92 * pow(1.0 - max(dot(n, vdir), 0.0), 4.0);
+                float gx = clamp(1.0 - dot(n, vdir), 0.0, 1.0); float fres = 0.08 + 0.92 * gx * gx * gx * gx;
                 float wid = float(jseed) + float(fl) * 3.1 + seed * 17.0;
                 vec3 interior = lin(vec3(0.05, 0.045, 0.04)) * (0.6 + 0.8 * noise(vec2(wid, 1.0)));
                 if (hash11(wid) > 0.72) interior = lin(vec3(0.55, 0.50, 0.42)) * 0.35;
@@ -452,7 +455,7 @@ void main() { vec4 w = uModel * vec4(aPos, 1.0); vW = w.xyz; vL = aPos.xy; gl_Po
 precision highp float;
 $COMMON
 in vec3 vW; in vec2 vL;
-uniform sampler2D uMask; uniform sampler2D uClass; uniform float uMarshPass;
+uniform sampler2D uMask; uniform sampler2D uClass; uniform float uMarshPass; uniform float uGrassR;
 out vec4 o;
 void main() {
     if (vW.z < uClipZ) discard;
@@ -460,6 +463,11 @@ void main() {
     vec2 mk = texture(uMask, uv).rg;
     float cov = uMarshPass > 0.5 ? mk.g : mk.r;
     if (cov < 0.5) discard;
+    if (uMarshPass > 0.5) {
+        // up close the barena is real grass standing in the water (MarshGrass): dithered hand-over
+        float th = fract(sin(dot(floor(gl_FragCoord.xy), vec2(12.9898, 78.233))) * 43758.5453);
+        if (distance(vW.xy, uCam.xy) < uGrassR * (0.8 + 0.2 * th)) discard;
+    }
     vec3 alb; float rough; vec3 tn;
     vec2 q = vW.xy;
     if (uMarshPass > 0.5) {
@@ -509,6 +517,10 @@ void main() {
         float e = 1.0 / float(textureSize(uWake, 0).x); float cellM = uWakeO.z * e;
         vec2 gr = vec2(textureLod(uWake, wuv + vec2(e, 0.0), 0.0).r - textureLod(uWake, wuv - vec2(e, 0.0), 0.0).r,
                        textureLod(uWake, wuv + vec2(0.0, e), 0.0).r - textureLod(uWake, wuv - vec2(0.0, e), 0.0).r) / (2.0 * cellM);
+        // a bad value from the simulation must never move the mesh (NaN/inf would throw it up into walls)
+        if (isnan(wk) || isinf(wk)) wk = 0.0;
+        if (any(isnan(gr)) || any(isinf(gr))) gr = vec2(0.0);
+        wk = clamp(wk, -0.8, 0.8);
         w.xy -= clamp(gr, -0.4, 0.4) * 0.5;        // choppy: crests pinch, troughs widen
     }
     w.z = waveH(w.xy, uTime, uWaveAmp) * vFade + wk;
@@ -521,8 +533,9 @@ $COMMON
 ${Waves.glsl()}
 in vec3 vW; in float vFade;
 uniform sampler2D uRefl; uniform vec2 uScreen; uniform float uWaveAmp;
-uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir;   // wake state: r height, g previous height, b foam, a aeration
+uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir; uniform vec2 uRipOff;   // wake state: r height, g previous height, b foam, a aeration
 uniform sampler2D uWaterN;                       // tileable ripple slopes (rg), baked once at start-up
+uniform sampler2D uFoamT;                        // baked foam: r lace, g froth, b blotches (assets/water/foam.png)
 uniform vec4 uBoat; uniform vec2 uHull;          // x, y, heading, speed ; half length, half beam
 out vec4 o;
 vec2 ripple(vec2 uv) { return texture(uWaterN, uv).rg * 2.0 - 1.0; }
@@ -539,6 +552,9 @@ void main() {
         float hN = texture(uWake, wuv + vec2(0.0, e)).r, hS = texture(uWake, wuv - vec2(0.0, e)).r;
         float border = smoothstep(0.0, 0.06, min(min(wuv.x, wuv.y), min(1.0 - wuv.x, 1.0 - wuv.y)));
         vec2 wg = vec2(hE - hW, hN - hS) / (2.0 * cellM) * border;
+        if (any(isnan(wt)) || any(isinf(wt))) wt = vec4(0.0);
+        if (isnan(hE + hW + hN + hS) || isinf(hE + hW + hN + hS)) { hE = 0.0; hW = 0.0; hN = 0.0; hS = 0.0; }
+        hE = clamp(hE, -0.8, 0.8); hW = clamp(hW, -0.8, 0.8); hN = clamp(hN, -0.8, 0.8); hS = clamp(hS, -0.8, 0.8); wt.r = clamp(wt.r, -0.8, 0.8);
         float hc = wt.r; hcF = hc;
         float lapW = (hE + hW + hN + hS - 4.0 * hc) / (cellM * cellM);
         wakeE = clamp((abs(hc) * 2.5 + length(wg) * 3.0 + clamp(-lapW * 8.0, 0.0, 1.0)) * border, 0.0, 1.5);   // capillary chop on crests
@@ -555,11 +571,14 @@ void main() {
     }
     // frame aligned with the wash: along / across the boat's track
     vec2 al = uWakeDir, ac = vec2(-uWakeDir.y, uWakeDir.x);
-    vec2 pw = vec2(dot(p, al) * 0.2, dot(p, ac));        // stretched along the track -> long turbulent streaks
+    // measured from the boat (not from the world origin, hundreds of metres away: turning the boat used to swing the
+    // whole pattern round that far point, so it slid across the water like a cloud of particles)
+    vec2 pr = p - uBoat.xy;
+    vec2 pw = vec2(dot(pr, al) * 0.2, dot(pr, ac));      // stretched along the track -> long turbulent streaks
     // the boil: churned, bulging water where the wash is fresh (just behind the outboard)
     if (foam > 0.35) {
         float bs = smoothstep(0.35, 0.9, foam);
-        g += ripple(p * 0.42 + uWakeDir * uTime * 0.25) * 0.55 * bs;
+        g += ripple(p * 0.42 + uRipOff) * 0.55 * bs;      // scroll accumulated frame by frame (was direction * total time)
         wakeE = max(wakeE, bs * 1.5);
     }
     // wake waves carry short, steep wavelets: much rougher surface where the wake energy is
@@ -570,7 +589,7 @@ void main() {
     vec3 n = normalize(vec3(-g, 1.0));
     vec3 v = normalize(uCam - vW);
     float nv = max(dot(n, v), 0.0);
-    float fres = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
+    float wx5 = clamp(1.0 - nv, 0.0, 1.0); float fres = 0.02 + 0.98 * wx5 * wx5 * wx5 * wx5 * wx5;
     vec2 roff = clamp(n.xy * 0.05 * wakeE * 2.5 + wakeSlope * 0.12, -0.03, 0.03)
               * (1.0 - clamp(foam, 0.0, 1.0)) * (1.0 - smoothstep(60.0, 200.0, length(uCam - vW)));
     vec2 suv = gl_FragCoord.xy / uScreen + n.xy * 0.035 + roff;
@@ -583,7 +602,12 @@ void main() {
     vec3 col = mix(body, refl, fres);
     vec3 h = normalize(uSunDir + v);
     float nh = max(dot(n, h), 0.0);
-    float spec = pow(nh, 600.0) * 40.0 + pow(nh, 80.0) * 0.6;
+    // specular anti-aliasing: where the normal changes within a pixel (distance, ripples, the camera turning) the
+    // sun's highlight widens and dims instead of sparkling pixel to pixel
+    vec3 dn = fwidth(n); float nvar = dot(dn, dn);
+    float sk = 1.0 / (1.0 + 900.0 * nvar);
+    float p1 = max(600.0 * sk, 30.0);
+    float spec = pow(nh, p1) * 40.0 * (p1 / 600.0) + pow(nh, max(80.0 * sk, 12.0)) * 0.6 * max(sk, 0.35);
     col += uSunCol * spec * sh * fres * 4.0 * (1.0 - 0.6 * clamp(milkA, 0.0, 1.0));
     float aerT = clamp(milkA * 0.9 + foam * 0.4, 0.0, 1.0);
     // the hollow behind the mound: water drops away and you see deeper into it - darker, glassier
@@ -595,13 +619,14 @@ void main() {
     if (foam > 0.01) {
         // lace streaked along the track: torn patches x bubble rafts x fine froth, slowly boiling
         vec2 q = pw + n.xy * 0.4 + vec2(0.0, milkA * pw.x * 0.25);
-        float lace = fbm(q * 0.8 + uTime * 0.05) * 0.25 + noise(q * 2.6 - uTime * 0.15) * 0.32
-                   + noise(q * 7.0 + uTime * 0.3) * 0.22 + noise(q * 9.0 + uTime * 0.2) * 0.13 + noise(q * 26.0) * 0.08;
+        // two scrolling samples of the baked lace at unrelated scales (no visible tiling) + fine froth
+        float lace = texture(uFoamT, q * 0.1 + uTime * 0.006).r * 0.58 + texture(uFoamT, q * 0.37 - vec2(uTime * 0.019, uTime * 0.011)).r * 0.42
+                   + (texture(uFoamT, q * 1.1 + uTime * 0.03).g - 0.5) * 0.18;
         float thr = 1.0 - clamp(foam, 0.0, 1.0) * mix(0.64, 0.86, smoothstep(0.6, 0.95, foam));
         float fw = smoothstep(thr - 0.06, thr + 0.06, lace);
         vec2 sb = ripple(q * 0.9 + uTime * 0.02);
         vec3 nf = normalize(vec3(-g * 0.6 - sb * 0.5, 1.0));
-        float alb = 0.62 + 0.28 * clamp(sb.x * 0.5 + 0.5, 0.0, 1.0) * (0.7 + 0.3 * noise(p * 3.0));
+        float alb = 0.62 + 0.28 * clamp(sb.x * 0.5 + 0.5, 0.0, 1.0) * (0.7 + 0.3 * texture(uFoamT, p * 0.21).g);
         float dif = max(dot(nf, uSunDir), 0.0);
         vec3 white = vec3(alb, alb * 1.03, alb * 1.02) * (uSunCol * 0.6 * dif * sh + uSkyAmb * (1.1 + 0.4 * nf.z));
         float sub = smoothstep(thr - 0.3, thr - 0.1, lace) * (1.0 - fw);
@@ -628,20 +653,23 @@ uniform int uN; uniform float uCell; uniform vec2 uOrigin; uniform ivec2 uShift;
 uniform float uDt; uniform float uK; uniform float uBeta; uniform float uNu; uniform float uDamp; uniform float uSpongeMin;
 uniform float uFoamDiff; uniform float uAerDiff;
 uniform vec4 uB0; uniform vec4 uB0b; uniform vec4 uB1; uniform vec4 uB1b; uniform vec2 uHull;
-uniform vec4 uSplat[12]; uniform int uNSplat;
+uniform vec4 uSplat[16]; uniform int uNSplat;
+// ACTV boats inside the window: pose now / one step ago (x, y, heading, depth), (throttle, 0, speed, 0), half size
+uniform vec4 uV0[4]; uniform vec4 uV0b[4]; uniform vec4 uV1[4]; uniform vec2 uVH[4]; uniform int uNV;
 out vec4 o;
 const float PI = 3.14159265;
 vec4 S(ivec2 c) { c += uShift; if (c.x < 0 || c.y < 0 || c.x >= uN || c.y >= uN) return vec4(0.0); return texelFetch(uState, c, 0); }
 // hull "occupancy" (displacement depth) at world point p for a boat pose: B = x, y, heading, depth; Bb = throttle, planing
-float occ(vec4 B, vec4 Bb, vec2 p) {
+float occH(vec4 B, vec4 Bb, vec2 p, vec2 hull) {
     vec2 d = p - B.xy; float ch = cos(B.z), sh = sin(B.z);
     float lx = d.x * ch + d.y * sh, ly = -d.x * sh + d.y * ch;
-    float hl = uHull.x, hb = uHull.y;
+    float hl = hull.x, hb = hull.y;
     if (B.w <= 0.0 || abs(lx) > hl + 7.0 || abs(ly) > hl + 7.0) return 0.0;
     if (lx < -hl) {
         // behind the transom: the outboard throws water up into a mound, then it falls into a hollow
         float bk = -hl - lx;
-        float latM = max(0.0, 1.0 - pow(ly / (hb * 0.45), 2.0)), latH = max(0.0, 1.0 - pow(ly / (hb * 0.95), 2.0));
+        float qm = ly / (hb * 0.45), qh = ly / (hb * 0.95);
+        float latM = max(0.0, 1.0 - qm * qm), latH = max(0.0, 1.0 - qh * qh);
         if (latH <= 0.0 || bk > 6.5) return 0.0;
         float thr = abs(Bb.x), pl = Bb.y;
         float mound = (0.05 + 0.10 * pl) * thr * (bk < 2.0 ? sin(PI * bk / 2.0) : 0.0) * latM;
@@ -653,10 +681,12 @@ float occ(vec4 B, vec4 Bb, vec2 p) {
     float outD = max(abs(lx) - hl, abs(ly) - beam);
     if (outD > 0.4) return 0.0;
     float aft = 1.0 - Bb.y * 0.6 * max(0.0, t);
-    float inside = max(0.0, 1.0 - pow(ly / (beam + 0.8), 2.0)) * (1.0 - t * t * 0.3);
+    float qi = ly / (beam + 0.8);
+    float inside = max(0.0, 1.0 - qi * qi) * (1.0 - t * t * 0.3);
     float soft = outD > 0.0 ? pow(1.0 - outD / 0.4, 2.0) : 1.0;
     return B.w * inside * aft * soft;
 }
+float occ(vec4 B, vec4 Bb, vec2 p) { return occH(B, Bb, p, uHull); }
 void main() {
     ivec2 c = ivec2(gl_FragCoord.xy);
     vec2 p = uOrigin + (vec2(c) + 0.5) * uCell;
@@ -672,6 +702,13 @@ void main() {
     float v = 2.0 * u0 - up0 + uK * lap + uBeta * lap2 + uNu * (lap - lapP);
     // moving hull: its change of footprint is a volume-conserving height displacement (no velocity kick)
     float dOcc = occ(uB0, uB0b, p) - occ(uB1, uB1b, p);
+    float gateV = 0.0;
+    for (int k = 0; k < 4; k++) {
+        if (k >= uNV) break;
+        if (distance(p, uV0[k].xy) > uVH[k].x + 9.0) continue;
+        dOcc += occH(uV0[k], uV0b[k], p, uVH[k]) - occH(uV1[k], uV0b[k], p, uVH[k]);
+        gateV = max(gateV, 1.0 - clamp((distance(p, uV0[k].xy) - uVH[k].x - 4.0) / 10.0, 0.0, 1.0) * step(0.8, uV0b[k].z));
+    }
     v -= dOcc; float uc = u0 - dOcc;
     int edge = min(min(c.x, c.y), min(uN - 1 - c.x, uN - 1 - c.y));
     v *= edge < 16 ? mix(uSpongeMin, uDamp, float(edge) / 16.0) : uDamp;
@@ -682,18 +719,23 @@ void main() {
     float fAvg = (sE.b + sW.b + sN.b + sS.b) * 0.25;
     float f0 = s0.b + (fAvg - s0.b) * uFoamDiff;
     float q = 1.0 - min(f0, 1.0);
-    float gate = 1.0 - clamp((distance(p, uB0.xy) - 10.0) / 10.0, 0.0, 1.0);
+    float gate = max(1.0 - clamp((distance(p, uB0.xy) - 10.0) / 10.0, 0.0, 1.0), gateV);
     float f = f0 * exp(-uDt / (1.1 + 4.0 * q * q)) + (max(0.0, steep - 0.12) * 3.0 + max(0.0, u0 - 0.16) * 3.0) * uDt * gate;
     float aAvg = (sE.a + sW.a + sN.a + sS.a) * 0.25;
     float a = (s0.a + (aAvg - s0.a) * uAerDiff) * exp(-uDt / 25.0);
-    for (int k = 0; k < 12; k++) {
+    for (int k = 0; k < 16; k++) {
         if (k >= uNSplat) break;
         vec4 sp = uSplat[k];
         float dd = distance(p, sp.xy) / sp.z;
         if (dd < 1.0) { float w = sp.w * (1.0 - dd * dd); f += w; a = min(1.0, a + w * 0.5); }
     }
     if (solid) { v = 0.0; f = 0.0; a = 0.0; }
-    o = vec4(v, uc, min(f, 1.0), min(a, 1.0));
+    // never let a bad value live on: one NaN or runaway cell spreads over the whole grid in a second, and the water
+    // mesh displaced by it shoots up into black walls. Reset it, and keep heights physical (a wake is centimetres)
+    if (isnan(v) || isinf(v) || isnan(uc) || isinf(uc)) { v = 0.0; uc = 0.0; }
+    if (isnan(f) || isinf(f)) f = 0.0;
+    if (isnan(a) || isinf(a)) a = 0.0;
+    o = vec4(clamp(v, -1.0, 1.0), clamp(uc, -1.0, 1.0), clamp(f, 0.0, 1.0), clamp(a, 0.0, 1.0));
 }
 """
 
@@ -753,19 +795,84 @@ void main() {
     val SPRAY_FS = """#version 300 es
 precision highp float;
 $COMMON
+uniform sampler2D uFoamT;
 in float vA; in vec3 vW; in vec2 vC; in float vSize;
 out vec4 o;
 void main() {
     float r = dot(vC, vC);
-    float ragged = r * (0.85 + 0.4 * noise(vC * 2.5 + vW.xy * 9.0));
+    float ragged = r * (0.85 + 0.4 * texture(uFoamT, vC * 0.25 + vW.xy * 0.9).g);
     if (ragged > 1.0) discard;
     bool mist = vSize > 0.25;
-    float a = exp(-ragged * (mist ? 2.5 : 3.5)) * smoothstep(0.0, 0.3, vA) * (mist ? 0.08 : 0.38);
+    float near = smoothstep(1.2, 4.5, distance(vW, uCam));        // mist on the lens = full-screen overdraw: fade it
+    float a = exp(-ragged * (mist ? 2.5 : 3.5)) * smoothstep(0.0, 0.3, vA) * (mist ? 0.08 * near : 0.38);
+    if (a < 0.004) discard;
     float sh = sunShadow(vW, vec3(0, 0, 1));
     vec3 v = normalize(uCam - vW);
     float fwd = pow(max(dot(-v, uSunDir), 0.0), 6.0);       // droplets glow when backlit
     vec3 col = vec3(0.90, 0.94, 0.95) * (uSunCol * (0.55 + 1.4 * fwd) * sh + uSkyAmb * 1.25);
     o = vec4(fog(col, vW), a);
+}
+"""
+
+    // ------------------------------------------------------------------ ACTV exhaust smoke (instanced soft puffs)
+    const val SMOKE_VS = """#version 300 es
+layout(location=0) in vec3 aPos; layout(location=1) in vec3 aInfo; layout(location=3) in vec2 aCorner;
+uniform mat4 uVP; uniform vec3 uCam;
+out vec3 vW; out vec2 vC; out float vA; out float vDark; out vec2 vT;
+void main() {
+    float dist = distance(aPos, uCam);
+    // puffs right in front of the lens are the expensive ones (full-screen overdraw): fade them out and drop them
+    float a = aInfo.y * smoothstep(3.0, 9.0, dist);
+    if (a < 0.004) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+    vec3 view = (aPos - uCam) / dist;
+    vec3 side = normalize(cross(view, vec3(0.0, 0.0, 1.0)));
+    vec3 up = cross(side, view);
+    vec3 p = aPos + (side * aCorner.x + up * aCorner.y) * aInfo.x;
+    vW = p; vC = aCorner; vA = a; vDark = aInfo.z;
+    vT = aCorner * 0.18 + aPos.xy * 0.05;
+    gl_Position = uVP * vec4(p, 1.0);
+}
+"""
+    val SMOKE_FS = """#version 300 es
+precision highp float;
+$COMMON
+uniform sampler2D uFoamT;
+in vec3 vW; in vec2 vC; in float vA; in float vDark; in vec2 vT;
+out vec4 o;
+void main() {
+    float r = dot(vC, vC);
+    float d = r * (0.8 + 0.5 * texture(uFoamT, vT).b);
+    if (d > 1.0) discard;
+    float a = (1.0 - d) * (1.0 - d) * vA;
+    vec3 base = mix(vec3(0.62, 0.63, 0.64), vec3(0.16, 0.16, 0.17), vDark);
+    o = vec4(fog(base * (uSunCol * 0.55 + uSkyAmb * 1.2), vW), a);
+}
+"""
+
+    // ------------------------------------------------------------------ foam trails behind the ACTV boats
+    const val TRAIL_VS = """#version 300 es
+layout(location=0) in vec2 aPos; layout(location=1) in vec3 aInfo;
+uniform mat4 uVP;
+out vec3 vW; out vec3 vInfo;
+void main() { vW = vec3(aPos, 0.07); vInfo = aInfo; gl_Position = uVP * vec4(vW, 1.0); }
+"""
+    val TRAIL_FS = """#version 300 es
+precision highp float;
+$COMMON
+uniform sampler2D uFoamT;
+in vec3 vW; in vec3 vInfo;
+out vec4 o;
+void main() {
+    float age = vInfo.x, across = abs(vInfo.y), str = vInfo.z;
+    // churned core right behind the stern, breaking up into streaks and patches as it ages and spreads
+    float n1 = texture(uFoamT, vW.xy * 0.069).r, n2 = texture(uFoamT, vW.xy * 0.26 + 0.37).g;
+    float core = smoothstep(1.0, 0.25 + 0.4 * age, across);
+    float edge = smoothstep(0.55, 0.95, across) * smoothstep(1.0, 0.92, across) * 0.6;
+    float breakup = smoothstep(0.25 + 0.55 * age, 0.85, n1 * 0.6 + n2 * 0.4);
+    float a = (core + edge) * breakup * str * pow(1.0 - age, 1.6) * 0.75;
+    if (a < 0.01) discard;
+    vec3 col = vec3(0.93, 0.95, 0.96) * (uSunCol * 0.6 + uSkyAmb * 1.3);
+    o = vec4(fog(col, vW), min(a, 0.85));
 }
 """
 
@@ -848,6 +955,11 @@ layout(location=0) in vec2 aPos;
 out vec2 vUv;
 void main() { vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
 """
+    const val DIM_FS = """#version 300 es
+precision mediump float;
+uniform vec4 uCol; in vec2 vUv; out vec4 o;
+void main() { o = uCol; }
+"""
     const val BRIGHT_FS = """#version 300 es
 precision mediump float;
 in vec2 vUv; uniform sampler2D uTex; uniform vec2 uTexel;
@@ -859,6 +971,147 @@ void main() {
     float k = clamp((l - 2.2) / 2.5, 0.0, 1.0);
     o = vec4(c * k * k, 1.0);
 }
+"""
+    // ------------------------------------------------------------------ "Semplice" water (low-end phones)
+    // Self-contained on purpose: a flat plane at sea level (no wave displacement, nothing read from the wake
+    // simulation or the reflection pass, which don't run in this mode). Two lookups of the baked ripple map, the sky
+    // projected by the ripple normal (a gradient, not a second render of the city), an anti-aliased sun glint, fog.
+    const val WATER_FLAT_VS = """#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uVP; uniform vec3 uCenter;
+out vec3 vW;
+void main() { vW = vec3(aPos.xy + uCenter.xy, 0.0); gl_Position = uVP * vec4(vW, 1.0); }
+"""
+    val WATER_FLAT_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW;
+uniform sampler2D uWaterN; uniform float uWaveAmp;
+out vec4 o;
+void main() {
+    vec2 p = vW.xy;
+    // two scales of baked ripples drifting against each other: a calm canal surface
+    vec2 r = (texture(uWaterN, p * 0.045 + uTime * vec2(0.010, 0.006)).rg * 2.0 - 1.0) * 0.6
+           + (texture(uWaterN, p * 0.11 - uTime * vec2(0.012, 0.017)).rg * 2.0 - 1.0) * 0.4;
+    vec3 n = normalize(vec3(-r * 0.22, 1.0));
+    vec3 v = normalize(uCam - vW);
+    float nv = clamp(dot(n, v), 0.0, 1.0);
+    float fx5 = clamp(1.0 - nv, 0.0, 1.0); float fres = 0.03 + 0.97 * fx5 * fx5 * fx5 * fx5 * fx5;
+    vec3 rd = reflect(-v, n);
+    vec3 sky = mix(uFogCol, uSkyZenith, clamp(rd.z * 1.6, 0.0, 1.0));
+    // Venetian canal water: green-teal, a little milky
+    vec3 deep = vec3(0.045, 0.115, 0.095) * (uSkyAmb * 1.5 + uSunCol * 0.32);
+    vec3 col = mix(deep, sky * 0.9, clamp(fres, 0.0, 1.0) * 0.8);
+    // sun glint, widened where the ripples are finer than a pixel (no sparkle)
+    // glint widens with distance instead of with screen derivatives (no fwidth: undefined at triangle edges on some GPUs)
+    float pw = mix(260.0, 40.0, clamp(length(uCam - vW) / 150.0, 0.0, 1.0));
+    vec3 h = normalize(uSunDir + v);
+    col += uSunCol * pow(clamp(dot(n, h), 0.0, 1.0), pw) * 1.5 * (pw / 260.0);
+    o = vec4(fog(clamp(col, vec3(0.0), vec3(30.0)), vW), 1.0);
+}
+"""
+
+    // ------------------------------------------------------------------ barene grass (instanced clumps)
+    const val GRASS_VS = """#version 300 es
+layout(location=0) in vec3 aPos; layout(location=2) in vec4 aInst;
+uniform mat4 uVP; uniform vec3 uCam; uniform vec2 uWind; uniform float uTime; uniform float uRadius;
+out vec3 vW; out float vZ; out float vSeed; out float vBlade;
+void main() {
+    float s = aInst.w; float ang = s * 43.98;
+    float bl = fract(sin(float(gl_VertexID / 3) * 12.9898 + s * 78.233) * 43758.5453);   // this blade
+    float c = cos(ang), sn = sin(ang);
+    vec2 lp = vec2(aPos.x * c - aPos.y * sn, aPos.x * sn + aPos.y * c);
+    float d = distance(aInst.xy, uCam.xy);
+    float h = aInst.z * (1.0 - smoothstep(uRadius * 0.85, uRadius, d));    // sinks away at the hand-over edge
+    float z = aPos.z;
+    float w = length(uWind);
+    vec2 wd = w > 0.05 ? uWind / w : vec2(0.8, 0.6);
+    // gusts rolling across the field downwind + each blade's own flutter; stronger wind = bent further over
+    float gust = sin(dot(aInst.xy, wd) * 0.32 - uTime * (1.1 + w * 0.22)) * 0.5 + 0.5;
+    float flutter = sin(uTime * (2.2 + s * 1.9) + s * 40.0);
+    float bend = (0.06 + w * 0.045) * (0.45 + gust);
+    // the taller the stem, the further it bends and the more it waves
+    vec2 off = (wd * bend + vec2(-wd.y, wd.x) * flutter * (0.03 + w * 0.006)) * z * z * (0.2 + 1.5 * h);
+    vec3 p = vec3(aInst.xy + lp * (0.8 + 0.4 * h) + off, -0.18 + z * (h * (0.75 + 0.5 * bl) + 0.18));
+    vW = p; vZ = z; vSeed = s; vBlade = bl;
+    gl_Position = uVP * vec4(p, 1.0);
+}
+"""
+    val GRASS_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in float vZ; in float vSeed; in float vBlade;
+out vec4 o;
+void main() {
+    // the barene as they look most of the year: grey-green, straw, pale ochre, a little rust of salicornia
+    vec3 c0 = vec3(0.30, 0.33, 0.22), c1 = vec3(0.42, 0.43, 0.34), c2 = vec3(0.55, 0.50, 0.33), c3 = vec3(0.62, 0.53, 0.30), c4 = vec3(0.45, 0.26, 0.18);
+    float s = fract(vSeed * 0.7 + vBlade * 0.45);
+    vec3 col = s < 0.3 ? mix(c0, c1, s / 0.3) : (s < 0.62 ? mix(c1, c2, (s - 0.3) / 0.32) : (s < 0.93 ? mix(c2, c3, (s - 0.62) / 0.31) : c4));
+    col *= 0.85 + 0.3 * vBlade;                                // blade to blade
+    col *= 0.5 + 0.6 * vZ;                                     // darker, wet bases; sunlit tips
+    vec3 lit = col * (uSkyAmb * 1.25 + uSunCol * (0.35 + 0.45 * max(uSunDir.z, 0.0)));
+    lit += uSunCol * col * 0.25 * vZ * vZ;                       // light through the blades
+    o = vec4(fog(lit, vW), 1.0);
+}
+"""
+
+    // ------------------------------------------------------------------ gulls (instanced, wing beat in the vertex shader)
+    const val GULL_VS = """#version 300 es
+layout(location=0) in vec4 aPos; layout(location=2) in vec4 aI0; layout(location=4) in vec4 aI1;
+uniform mat4 uVP;
+out vec3 vW; out float vPart; out float vSpan;
+void main() {
+    vec3 p = aPos.xyz * 1.1; float part = aPos.w;
+    float phase = aI1.x, amp = aI1.y, fold = aI1.z, bank = aI1.w;
+    float span = abs(p.y); float sg = p.y < 0.0 ? -1.0 : 1.0;
+    if (part > 0.5 && part < 2.5) {
+        float sh = 0.06, el = 0.40;
+        // the arm about the shoulder, the hand about the elbow, a little behind it (the wing tip lags)
+        float a1 = amp * 0.75 * sin(phase);
+        float a2 = a1 + amp * 0.45 * sin(phase - 0.7);
+        float r1 = min(span, el) - sh;
+        float yy = sh + r1 * cos(a1); float zz = p.z + r1 * sin(a1);
+        if (span > el) { float r2 = span - el; yy += r2 * cos(a2); zz += r2 * sin(a2); }
+        vec3 spread = vec3(p.x, sg * yy, zz);
+        // folded: laid back along the body, the tips crossed over the tail
+        vec3 folded = vec3(p.x - (span - sh) * 0.62, sg * (sh + (span - sh) * 0.10), p.z + 0.03 + (span - sh) * 0.04);
+        p = mix(spread, folded, fold);
+    }
+    float cb = cos(bank), sb = sin(bank);
+    p = vec3(p.x, p.y * cb - p.z * sb, p.y * sb + p.z * cb);
+    float ch = cos(aI0.w), shh = sin(aI0.w);
+    vec3 w = vec3(aI0.x + p.x * ch - p.y * shh, aI0.y + p.x * shh + p.y * ch, aI0.z + p.z);
+    vW = w; vPart = part; vSpan = span;
+    gl_Position = uVP * vec4(w, 1.0);
+}
+"""
+    val GULL_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in float vPart; in float vSpan;
+out vec4 o;
+void main() {
+    vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
+    vec3 v = normalize(uCam - vW);
+    if (dot(n, v) < 0.0) n = -n;
+    vec3 col = vec3(0.88, 0.89, 0.88);                                   // white head and body
+    if (vPart > 0.5 && vPart < 2.5) {
+        col = n.z > 0.0 ? vec3(0.55, 0.60, 0.65) : vec3(0.82, 0.83, 0.83); // grey mantle above, white below
+        if (vSpan > 0.60) col = vec3(0.05);                              // black wing tips
+    }
+    if (vPart > 2.5) col = vec3(0.90, 0.72, 0.12);                       // yellow bill
+    col = lin(col);
+    float dif = max(dot(n, uSunDir), 0.0);
+    vec3 lit = col * (uSkyAmb * 1.2 + uSunCol * 0.5 * dif);
+    o = vec4(fog(lit, vW), 1.0);
+}
+"""
+
+    const val COPY_FS = """#version 300 es
+precision mediump float;
+in vec2 vUv; uniform sampler2D uTex; uniform vec3 uTint;
+out vec4 o;
+void main() { o = vec4(texture(uTex, vUv).rgb * uTint, 1.0); }
 """
     const val BLUR_FS = """#version 300 es
 precision mediump float;
@@ -895,13 +1148,17 @@ void main() {
         float amt = uSharpen * (1.0 - smoothstep(0.15, 0.6, range));     // less on hard edges (no halos)
         col = max(col + (col - avg) * amt * 1.6, vec3(0.0));
     }
-    col += texture(uBloom, vUv).rgb * 0.35 * uBloomK;
+    // a branch, not a multiply: with bloom off the bloom buffer may hold garbage, and NaN * 0 is still NaN
+    if (uBloomK > 0.0) { vec3 bl = texture(uBloom, vUv).rgb; if (!any(isnan(bl)) && !any(isinf(bl))) col += bl * 0.35 * uBloomK; }
+    // last line of defence: a NaN pixel (it would be black) takes its neighbours' colour
+    if (any(isnan(col)) || any(isinf(col))) { vec3 nb = (cN + cS + cE + cW) * 0.25; col = (any(isnan(nb)) || any(isinf(nb))) ? vec3(0.3, 0.32, 0.34) : nb; }
+    col = clamp(col, vec3(0.0), vec3(64.0));
     col = aces(col * uExposure);
     col = mix(vec3(luma(col)), col, 1.08);
     col *= vec3(1.02, 1.0, 0.97);
     vec2 vc = vUv - 0.5;
     col *= 1.0 - dot(vc, vc) * 0.35;
-    o = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+    o = vec4(pow(clamp(col, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2)), 1.0);
 }
 """
 }

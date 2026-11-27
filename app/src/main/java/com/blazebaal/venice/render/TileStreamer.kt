@@ -32,7 +32,8 @@ class GpuTile(
 private class Built(val t: TileData, val hasMarsh: Boolean, val fac: FloatBuffer?, val gen: FloatBuffer?, val det: FloatBuffer?, val veg: FloatBuffer?)
 
 /** On-disk cache of meshed tiles. Invalidated automatically when the map or the mesher version changes. */
-class TileCache(root: File, key: String) {
+/** Tile meshes, from (in order) the pre-baked assets in the APK (baker/), the phone's own cache, or nothing. */
+class TileCache(root: File, key: String, private val assets: android.content.res.AssetManager? = null) {
     private val dir = File(root, "tiles-$key")
     init {
         try {
@@ -44,7 +45,70 @@ class TileCache(root: File, key: String) {
     fun has(tx: Int, ty: Int) = file(tx, ty).exists()
 
     /** Returns (hasMarsh, facade, generic, detail, vegetation) or null. Buffers are direct, native order. */
+    /** the APK's pre-baked copy of a tile (deflated, little-endian); null if the build didn't bake it */
+    private fun readBaked(tx: Int, ty: Int): Array<Any?>? {
+        val am = assets ?: return null
+        return try {
+            val bytes = java.util.zip.InflaterInputStream(am.open("tiles/${tx}_$ty.gtc"), java.util.zip.Inflater(), 1 shl 16).use { it.readBytes() }
+            val head = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val size = if (head.getInt(0) == MAGIC3) 24 + (0 until 4).sumOf { head.getInt(8 + it * 4) } * 4 else bytes.size
+            val buf = ByteBuffer.allocateDirect(size).order(ByteOrder.LITTLE_ENDIAN)
+            if (head.getInt(0) == MAGIC3) {
+                // columns back to interleaved floats: positions from cm, normals from int8
+                buf.putInt(MAGIC); buf.putInt(head.getInt(4))
+                val n = IntArray(4) { head.getInt(8 + it * 4) }
+                for (k in 0 until 4) buf.putInt(n[k])
+                var src = 24 + 16
+                for (k in 0 until 4) {
+                    val sf = head.getInt(24 + k * 4); val s = sf and 0xff; val qz = sf and 0x100 != 0
+                    val verts = n[k] / s
+                    val out = FloatArray(n[k])
+                    for (c in 0 until s) {
+                        when {
+                            c < 3 && qz -> { for (v in 0 until verts) out[v * s + c] = head.getShort(src + v * 2) / 100f; src += verts * 2 }
+                            c in 3..5 -> { for (v in 0 until verts) out[v * s + c] = bytes[src + v] / 127f; src += verts }
+                            else -> { for (v in 0 until verts) out[v * s + c] = head.getFloat(src + v * 4); src += verts * 4 }
+                        }
+                    }
+                    buf.asFloatBuffer().put(out); buf.position(buf.position() + out.size * 4)
+                }
+                buf.flip()
+            } else if (head.getInt(0) == MAGIC2) {
+                // un-shuffle the byte planes back into little-endian floats
+                buf.put(bytes, 0, 24)
+                var src = 24
+                for (i in 0 until 4) {
+                    val n = head.getInt(8 + i * 4)
+                    val tmp = ByteArray(n * 4)
+                    for (k in 0 until n) { tmp[k * 4] = bytes[src + k]; tmp[k * 4 + 1] = bytes[src + n + k]; tmp[k * 4 + 2] = bytes[src + 2 * n + k]; tmp[k * 4 + 3] = bytes[src + 3 * n + k] }
+                    buf.put(tmp); src += n * 4
+                }
+                buf.flip(); buf.putInt(0, MAGIC)
+            } else { buf.put(bytes); buf.flip() }
+            parse(buf, ByteOrder.LITTLE_ENDIAN)
+        } catch (e: java.io.IOException) { null }
+    }
+
+    private fun parse(buf: ByteBuffer, order: ByteOrder): Array<Any?>? {
+        if (buf.int != MAGIC) return null
+        val hasMarsh = buf.int == 1
+        val n = IntArray(4) { buf.int }
+        var pos = buf.position()
+        val out = arrayOfNulls<Any>(5); out[0] = hasMarsh
+        for (i in 0 until 4) {
+            if (n[i] == 0) { out[i + 1] = null; continue }
+            buf.position(pos); buf.limit(pos + n[i] * 4)
+            out[i + 1] = buf.slice().order(order).asFloatBuffer()
+            buf.limit(buf.capacity()); pos += n[i] * 4
+        }
+        return out
+    }
+
+    /** true when this tile came pre-baked (nothing to build or to write) */
+    fun baked(tx: Int, ty: Int): Boolean = assets != null && try { assets.open("tiles/${tx}_$ty.gtc").close(); true } catch (e: java.io.IOException) { false }
+
     fun read(tx: Int, ty: Int): Array<Any?>? {
+        readBaked(tx, ty)?.let { return it }
         val f = file(tx, ty)
         if (!f.exists()) return null
         return try {
@@ -91,7 +155,7 @@ class TileCache(root: File, key: String) {
         return counted
     }
 
-    companion object { const val MAGIC = 0x47544331 }  // "GTC1"
+    companion object { const val MAGIC = 0x47544331; const val MAGIC2 = 0x47544332; const val MAGIC3 = 0x47544333 }  // "GTC1", "GTC2" (shuffled)
 }
 
 class TileStreamer(private val world: WorldMap, var radius: Float = 640f, private val cache: TileCache? = null) {
@@ -102,6 +166,7 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
     var wanted = 1; private set
     private val pending = HashSet<Int>()
     private val ready = ConcurrentLinkedQueue<Built>()
+    private val retry = ConcurrentLinkedQueue<Int>()
     private val pool = Executors.newFixedThreadPool(2) { r -> Thread(r, "tile-builder").apply { priority = Thread.MIN_PRIORITY + 1 } }
     private val meshers = ThreadLocal.withInitial { CityMesher() }
     private val map = world.map
@@ -109,13 +174,17 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
 
     private fun direct(a: FloatArray) = if (a.isEmpty()) null else floatBuffer(a)
 
+    private val failures = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+
     private fun buildTile(tx: Int, ty: Int): Built? {
         val t = world.tile(tx, ty) ?: return null
-        cache?.read(tx, ty)?.let { c ->
+        val k = ty * map.tilesX + tx
+        val minimal = (failures[k] ?: 0) >= 2
+        if (!minimal) cache?.read(tx, ty)?.let { c ->
             return Built(t, c[0] as Boolean, c[1] as FloatBuffer?, c[2] as FloatBuffer?, c[3] as FloatBuffer?, c[4] as FloatBuffer?)
         }
-        val m = meshers.get()!!.build(t)
-        cache?.write(tx, ty, m)
+        val m = meshers.get()!!.build(t, minimal)
+        if (!minimal) cache?.write(tx, ty, m)
         // vertex data copied into direct buffers here, off the GL thread
         return Built(t, m.hasMarsh, direct(m.facade), direct(m.generic), direct(m.detail), direct(m.vegetation))
     }
@@ -147,10 +216,17 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
             pending.add(k)
             val tx = k % map.tilesX; val ty = k / map.tilesX
             pool.execute {
-                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) }
-                catch (e: Throwable) { android.util.Log.e("Venice", "tile $tx,$ty failed", e) }
+                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) }      // null = no data there (open lagoon): done
+                catch (e: Throwable) {
+                    // never leave a hole: retry, and after two failures build it with ground and quays only
+                    android.util.Log.e("Venice", "tile $tx,$ty failed", e)
+                    failures[k] = (failures[k] ?: 0) + 1
+                    retry.add(k)
+                }
             }
         }
+        // failed builds go back in the queue
+        while (true) { val k = retry.poll() ?: break; pending.remove(k) }
         // uploads
         var n = 0
         while (n < maxUploads) {

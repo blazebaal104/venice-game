@@ -27,7 +27,18 @@ class TileData(
     val piers: List<LineData>,
     val pierPolys: List<PolyData>,
 ) {
-    /** bilinear coverage (0..1) of solid ground at tile-local metres */
+    /** bilinear coverage (0..1) of the barene (salt marsh, vegetation in shallow water) at tile-local metres */
+    fun marshAt(lx: Float, ly: Float): Float {
+        val m = marsh ?: return 0f
+        val fx = lx + 0.5f; val fy = ly + 0.5f
+        val i = fx.toInt().coerceIn(0, MASK_N - 2); val j = fy.toInt().coerceIn(0, MASK_N - 2)
+        val ax = (fx - i).coerceIn(0f, 1f); val ay = (fy - j).coerceIn(0f, 1f)
+        fun s(ii: Int, jj: Int) = (m[jj * MASK_N + ii].toInt() and 0xff) / 255f
+        return (s(i, j) * (1 - ax) + s(i + 1, j) * ax) * (1 - ay) + (s(i, j + 1) * (1 - ax) + s(i + 1, j + 1) * ax) * ay
+    }
+
+    /** bilinear coverage (0..1) of solid ground at tile-local metres. The barene are NOT solid: a boat can go into
+     *  them (and get its prop tangled), see marshAt */
     fun solidAt(lx: Float, ly: Float): Float {
         if (hard == null) return 0f
         val fx = lx + 0.5f; val fy = ly + 0.5f
@@ -35,7 +46,7 @@ class TileData(
         val ax = (fx - i).coerceIn(0f, 1f); val ay = (fy - j).coerceIn(0f, 1f)
         fun s(ii: Int, jj: Int): Float {
             val k = jj * MASK_N + ii
-            return maxOf(hard[k].toInt() and 0xff, marsh!![k].toInt() and 0xff) / 255f
+            return (hard[k].toInt() and 0xff) / 255f
         }
         val a = s(i, j) * (1 - ax) + s(i + 1, j) * ax
         val b = s(i, j + 1) * (1 - ax) + s(i + 1, j + 1) * ax

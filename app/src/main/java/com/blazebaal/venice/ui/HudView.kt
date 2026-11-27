@@ -84,16 +84,17 @@ class HudView(ctx: Context) : View(ctx) {
                         if (now - lastLeverTap < 300) { Controls.lever = 0f; haptic() } else { leverId = id; setLever(y) }   // double tap: neutral
                         lastLeverTap = now
                     }
-                    Settings.analogSteering && padRect().contains(x, y) -> { padId = id; setPad(x) }
-                    !Settings.analogSteering && leftArrow().contains(x, y) -> { leftId = id; Controls.leftHeld = true }
-                    !Settings.analogSteering && rightArrow().contains(x, y) -> { rightId = id; Controls.rightHeld = true }
-                    mapRect().contains(x, y) -> { Controls.screen = Screen.MAP; haptic() }
-                    hit(pauseBtn(), x, y) -> { Controls.screen = Screen.PAUSE; haptic() }
-                    hit(camBtn(), x, y) -> { Controls.cameraMode = (Controls.cameraMode + 1) % 3; haptic() }
+                    Settings.steerMode == 2 && hypot(x - wheelCx(), y - wheelCy()) < wheelR() * 1.15f -> { wheelId = id; wheelLast = atan2(y - wheelCy(), x - wheelCx()) }
+                    Settings.steerMode == 0 && padRect().contains(x, y) -> { padId = id; setPad(x) }
+                    Settings.steerMode == 1 && leftArrow().contains(x, y) -> { leftId = id; Controls.leftHeld = true }
+                    Settings.steerMode == 1 && rightArrow().contains(x, y) -> { rightId = id; Controls.rightHeld = true }
+                    mapRect().contains(x, y) -> { Controls.screen = Screen.MAP; haptic(); com.blazebaal.venice.audio.Audio.ui() }
+                    hit(pauseBtn(), x, y) -> { Controls.screen = Screen.PAUSE; haptic(); com.blazebaal.venice.audio.Audio.ui() }
+                    hit(camBtn(), x, y) -> { Controls.cameraMode = (Controls.cameraMode + 1) % 3; haptic(); com.blazebaal.venice.audio.Audio.ui() }
                     hit(engineBtn(), x, y) -> { Controls.engineOn = !Controls.engineOn; if (!Controls.engineOn) Controls.lever = 0f; haptic() }
                     hit(trimUp(), x, y) -> { trimId = id; trimDir = 1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(1); haptic() }
                     hit(trimDown(), x, y) -> { trimId = id; trimDir = -1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(-1); haptic() }
-                    camId < 0 -> { camId = id; camLx = x; camLy = y }
+                    camId < 0 -> { camId = id; camLx = x; camLy = y; Controls.camHeld = true }
                 }
                 invalidate()
             }
@@ -102,6 +103,7 @@ class HudView(ctx: Context) : View(ctx) {
                 when (id) {
                     leverId -> setLever(y)
                     padId -> setPad(x)
+                    wheelId -> turnWheel(x, y)
                     camId -> {
                         Controls.camYawDelta += -(x - camLx) * 0.006f
                         Controls.camPitchDelta += (y - camLy) * 0.004f
@@ -133,6 +135,35 @@ class HudView(ctx: Context) : View(ctx) {
         Controls.lever = v.coerceIn(-0.6f, 1f)
     }
 
+    // ---- steering wheel: grab it anywhere on the rim, turn; it stops at ±90° (no endless circling), springs back
+    private var wheelId = -1; private var wheelAngle = 0f; private var wheelLast = 0f; private var wheelNs = 0L
+    private fun wheelR() = 74 * s
+    private fun wheelCx() = margin + wheelR() + 8 * s
+    private fun wheelCy() = height - margin - wheelR() - 6 * s
+    private fun turnWheel(x: Float, y: Float) {
+        val a = atan2(y - wheelCy(), x - wheelCx())
+        var d = a - wheelLast
+        while (d > PI) d -= (2 * PI).toFloat(); while (d < -PI) d += (2 * PI).toFloat()
+        wheelLast = a
+        wheelAngle = (wheelAngle + d).coerceIn(-PI.toFloat() / 2, PI.toFloat() / 2)
+        Controls.steerAnalog = wheelAngle / (PI.toFloat() / 2)
+    }
+    private fun drawWheel() {
+        val now = System.nanoTime(); val dt = if (wheelNs == 0L) 0f else ((now - wheelNs) / 1e9f).coerceAtMost(0.05f); wheelNs = now
+        if (wheelId < 0) { wheelAngle *= exp(-dt * 9f); if (abs(wheelAngle) < 0.002f) wheelAngle = 0f; else invalidate() }
+        val cx = wheelCx(); val cy = wheelCy(); val r = wheelR()
+        c.save(); c.rotate(Math.toDegrees(wheelAngle.toDouble()).toFloat(), cx, cy)
+        ink.glassCircle(cx, cy, r * 0.42f, Theme.GLASS)
+        ink.stroke.color = Color.argb(225, 22, 26, 34); ink.stroke.strokeWidth = 16 * s; c.drawCircle(cx, cy, r - 8 * s, ink.stroke)
+        ink.stroke.color = if (wheelId >= 0) Theme.YELLOW else Theme.TEXT; ink.stroke.strokeWidth = 3 * s; c.drawCircle(cx, cy, r - 8 * s, ink.stroke)
+        ink.stroke.color = Color.argb(200, 22, 26, 34); ink.stroke.strokeWidth = 9 * s
+        for (k in 0 until 3) { val a = (PI / 2 + k * 2 * PI / 3).toFloat(); c.drawLine(cx + cos(a) * r * 0.3f, cy + sin(a) * r * 0.3f, cx + cos(a) * (r - 14 * s), cy + sin(a) * (r - 14 * s), ink.stroke) }
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW
+        c.drawRoundRect(RectF(cx - 7 * s, cy - r - 2 * s, cx + 7 * s, cy - r + 14 * s), 3 * s, 3 * s, ink.fill)     // top mark
+        c.restore()
+        ink.label("VOLANTE", cx, cy + 4 * s, 9f, Theme.TEXT, Paint.Align.CENTER, spacing = 0.12f)
+    }
+
     private fun setPad(x: Float) {
         val r = padRect()
         Controls.steerAnalog = ((x - r.centerX()) / (r.width() / 2 - 20 * s)).coerceIn(-1f, 1f)
@@ -142,14 +173,25 @@ class HudView(ctx: Context) : View(ctx) {
         if (id == leftId || id == -2) { leftId = -1; Controls.leftHeld = false }
         if (id == rightId || id == -2) { rightId = -1; Controls.rightHeld = false }
         if (id == leverId || id == -2) leverId = -1
-        if (id == camId || id == -2) camId = -1
+        if (id == camId || id == -2) { camId = -1; Controls.camHeld = false }
         if (id == padId || id == -2) { padId = -1; Controls.steerAnalog = Float.NaN }
+        if (id == wheelId || id == -2) { wheelId = -1; Controls.steerAnalog = Float.NaN; invalidate() }
         if (id == trimId || id == -2) { trimId = -1; trimDir = 0 }
     }
 
     // ---------------------------------------------------------------- drawing
+    private var hudBlurred = false
     override fun onDraw(canvas: Canvas) {
         if (Controls.screen == Screen.MENU) return
+        // a page is open over the game: the HUD is blurred with everything else (dimmed too), not drawn sharp on top
+        val overlay = Controls.screen != Screen.NONE
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            if (overlay != hudBlurred) {
+                hudBlurred = overlay
+                setRenderEffect(if (overlay) android.graphics.RenderEffect.createBlurEffect(22 * s, 22 * s, android.graphics.Shader.TileMode.CLAMP) else null)
+                alpha = if (overlay) 0.55f else 1f
+            }
+        } else if (overlay) return
         c = canvas; ink.c = canvas; ink.dp = s
         drawSpeedStreaks()
         drawSpeedo()
@@ -157,7 +199,7 @@ class HudView(ctx: Context) : View(ctx) {
         drawTopCentre()
         drawTopRight()
         drawRightColumn()
-        if (Settings.analogSteering) drawPad() else drawArrows()
+        when (Settings.steerMode) { 0 -> drawPad(); 1 -> drawArrows(); else -> drawWheel() }
         if (GameState.hasWaypoint()) drawWaypointArrow()
         drawEvents()
         if (Settings.showFps) ink.label("${GameState.fps.roundToInt()} FPS · ${(GameState.renderScale * 100).roundToInt()}% · ${GameState.tilesLoaded} chunk", margin + 2 * s, margin + 118 * s, 10f, Theme.TEXT_DIM, face = Theme.condensed)
@@ -217,8 +259,11 @@ class HudView(ctx: Context) : View(ctx) {
         ink.path.reset(); ink.path.addRoundRect(RectF(r.left + 3 * s, r.top + 3 * s, r.right - 3 * s, r.bottom - 3 * s), rad - 3 * s, rad - 3 * s, Path.Direction.CW)
         c.clipPath(ink.path)
         val cx = r.centerX(); val cy = r.centerY()
-        // zoom out as the speed builds up: ~250 m across standing still, ~600 m flat out
-        val across = 250f + 350f * (GameState.speedKmh / 140f).coerceIn(0f, 1f)
+        // zoom to the water around you: in the Canal Grande both banks stay in view (you see if you're in the
+        // middle or near one side), in a narrow rio it zooms right in; some look-ahead when fast
+        val want = (GameState.canalWidth * 1.35f + 45f).coerceIn(110f, 720f) + 120f * (GameState.speedKmh / 140f).coerceIn(0f, 1f)
+        miniAcross += (want - miniAcross) * 0.06f
+        val across = miniAcross
         val pxPerM = r.width() / across
         val rot = if (Settings.minimapNorthUp) 0f else Math.toDegrees(GameState.heading.toDouble()).toFloat() - 90f
         c.translate(cx, cy)
@@ -234,14 +279,15 @@ class HudView(ctx: Context) : View(ctx) {
             ink.stroke.color = Theme.INK; ink.stroke.strokeWidth = 1.2f * s; c.drawCircle(q.x, q.y, 6.5f * s, ink.stroke)
             ink.label(v.line, q.x, q.y + 2.8f * s, if (v.line.length > 2) 6f else 7.5f, Theme.INK, Paint.Align.CENTER)
         }
-        // waypoint: line from the boat + pin (clamped to the rim when off-map)
+        // canal names on the water
+        Canals.draw(ink, 7.5f, 0f, 70 * s, { x, y -> MapLayer.toScreen(x, y, GameState.x, GameState.y, pxPerM, rot) }, { q -> abs(q.x) < r.width() / 2 + 20 * s && abs(q.y) < r.height() / 2 + 10 * s })
+        // waypoint: the navigator's route along the canals (no straight line through the houses) + pin
         if (GameState.hasWaypoint()) {
+            GameState.route?.let { rt -> routePath(rt, pxPerM, rot); ink.stroke.color = Color.argb(200, 10, 30, 50); ink.stroke.strokeWidth = 5.5f * s; c.drawPath(ink.path, ink.stroke)
+                ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 3 * s; c.drawPath(ink.path, ink.stroke) }
             val p = MapLayer.toScreen(GameState.wpX, GameState.wpY, GameState.x, GameState.y, pxPerM, rot)
             val lim = r.width() / 2 - 12 * s
             val d = hypot(p.x, p.y); val k = if (d > lim) lim / d else 1f
-            ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 2 * s
-            ink.stroke.pathEffect = DashPathEffect(floatArrayOf(5 * s, 4 * s), 0f)
-            c.drawLine(0f, 0f, p.x * k, p.y * k, ink.stroke); ink.stroke.pathEffect = null
             ink.icon("pin", p.x * k, p.y * k - 6 * s, Theme.YELLOW, 0.9f)
         }
         c.restoreToCount(save)
@@ -260,6 +306,17 @@ class HudView(ctx: Context) : View(ctx) {
         ink.label("N", nx, ny + 3.5f * s, 10f, Theme.YELLOW, Paint.Align.CENTER)
         // expand hint
         ink.label("MAPPA", r.right - 8 * s, r.bottom - 7 * s, 8f, Theme.TEXT_DIM, Paint.Align.RIGHT, spacing = 0.1f)
+    }
+
+    private var miniAcross = 250f
+    /** the route as a path in minimap space (into ink.path) */
+    private fun routePath(rt: FloatArray, pxPerM: Float, rot: Float) {
+        ink.path.reset()
+        ink.stroke.strokeJoin = Paint.Join.ROUND; ink.stroke.strokeCap = Paint.Cap.ROUND
+        for (i in 0 until rt.size / 2) {
+            val q = MapLayer.toScreen(rt[i * 2], rt[i * 2 + 1], GameState.x, GameState.y, pxPerM, rot)
+            if (i == 0) ink.path.moveTo(q.x, q.y) else ink.path.lineTo(q.x, q.y)
+        }
     }
 
     private fun drawTopCentre() {
@@ -291,7 +348,10 @@ class HudView(ctx: Context) : View(ctx) {
     /** Floating arrow under the top-centre pill pointing where to steer for the waypoint (relative to the boat). */
     private var arrowRot = Float.NaN
     private fun drawWaypointArrow() {
-        val bearing = atan2(GameState.wpY - GameState.y, GameState.wpX - GameState.x)
+        // along the navigator's route when there is one (it points where to steer now), straight at the pin otherwise
+        val tx = if (GameState.route != null && !GameState.aimX.isNaN()) GameState.aimX else GameState.wpX
+        val ty = if (GameState.route != null && !GameState.aimY.isNaN()) GameState.aimY else GameState.wpY
+        val bearing = atan2(ty - GameState.y, tx - GameState.x)
         var rel = Math.toDegrees((GameState.heading - bearing).toDouble()).toFloat()
         while (rel > 180f) rel -= 360f; while (rel < -180f) rel += 360f
         // smooth the rotation so it doesn't twitch with every wave
@@ -316,20 +376,36 @@ class HudView(ctx: Context) : View(ctx) {
 
     /** Event texts: big coloured words that fade + slide in, hold, and fade out. No boxes. */
     private fun drawEvents() {
-        val ev = Events.live(); if (ev.isEmpty()) return
         val now = System.currentTimeMillis()
-        var y = height * 0.34f
-        for (e in ev.reversed()) {
-            val t = (now - e.t0).toFloat()
-            val a = when { t < 180f -> t / 180f; t > Events.LIFE_MS - 450f -> ((Events.LIFE_MS - t) / 450f).coerceAtLeast(0f); else -> 1f }
-            val slide = (1f - min(1f, t / 220f)) * 14 * s
-            val alpha = (a * 255).toInt()
-            ink.text.setShadowLayer(6 * s, 0f, 2 * s, Color.argb((a * 200).toInt(), 0, 0, 0))
-            ink.label(e.text, width / 2f, y + slide, 26f, Color.argb(alpha, Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.04f)
-            if (e.sub.isNotEmpty()) ink.label(e.sub, width / 2f, y + slide + 18 * s, 11f, Color.argb((alpha * 0.85f).toInt(), 255, 255, 255), Paint.Align.CENTER, spacing = 0.1f)
-            ink.text.clearShadowLayer()
-            y -= (if (e.sub.isNotEmpty()) 52 else 38) * s
+        val (cur, out, outT0) = Events.snapshot(now)
+        if (cur == null && out == null) return
+        val y = height * 0.30f
+        // the one being replaced: lifts up a little, grows and fades out quickly
+        if (out != null) {
+            val k = ((now - outT0).toFloat() / Events.OUT_MS).coerceIn(0f, 1f)
+            eventText(out, y - 6 * s * k, 1f + 0.12f * k, (1f - k) * (1f - k))
         }
+        if (cur != null) {
+            val t = (now - cur.t0).toFloat()
+            // pops in from small to big (ease-out with a slight overshoot), then fades and shrinks a touch at the end
+            val inK = (t / 240f).coerceIn(0f, 1f)
+            val pop = 1f + 1.7f * (inK - 1f).let { it * it * it } + 0.7f * (inK - 1f).let { it * it }      // easeOutBack
+            val endK = ((t - (Events.LIFE_MS - 320f)) / 320f).coerceIn(0f, 1f)
+            val scale = (0.45f + 0.55f * pop) * (1f - 0.08f * endK)
+            val alpha = min(1f, t / 120f) * (1f - endK) * (if (out != null) 0.4f + 0.6f * ((now - outT0).toFloat() / Events.OUT_MS).coerceIn(0f, 1f) else 1f)
+            eventText(cur, y, scale, alpha)
+        }
+    }
+
+    private fun eventText(e: Events.E, y: Float, scale: Float, a: Float) {
+        if (a <= 0.01f) return
+        val c = ink.c
+        c.save(); c.scale(scale, scale, width / 2f, y - 5 * s)
+        ink.text.textScaleX = 1.18f                     // stretched a little horizontally
+        ink.text.setShadowLayer(6 * s, 0f, 2 * s, Color.argb((a * 190).toInt(), 0, 0, 0))
+        ink.label(e.text, width / 2f, y, 13.6f, Color.argb((a * 255).toInt(), Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.06f)
+        ink.text.clearShadowLayer(); ink.text.textScaleX = 1f
+        c.restore()
     }
 
     private fun dist(d: Float) = if (d < 1000f) "${d.roundToInt()} m" else String.format("%.1f km", d / 1000f).replace('.', ',')

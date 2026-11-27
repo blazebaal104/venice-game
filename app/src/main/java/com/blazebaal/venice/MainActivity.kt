@@ -30,6 +30,19 @@ class MainActivity : Activity(), GameActions {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // crash reporter: the last crash is saved and shown once on the next launch (top of the main menu)
+        val crashFile = java.io.File(filesDir, "last_crash.txt")
+        if (crashFile.exists()) { GameState.lastCrash = try { crashFile.readText().take(400) } catch (_: Exception) { "" }; crashFile.delete() }
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val rt = Runtime.getRuntime()
+                val mem = "heap ${(rt.totalMemory() - rt.freeMemory()) / 1048576}/${rt.maxMemory() / 1048576} MB"
+                val frames = e.stackTrace.take(4).joinToString(" < ") { "${it.fileName}:${it.lineNumber}" }
+                crashFile.writeText("${e.javaClass.simpleName}: ${e.message ?: ""} · thread ${t.name} · $mem · $frames")
+            } catch (_: Throwable) { }
+            prev?.uncaughtException(t, e)
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Settings.load(this)
         Controls.screen = Screen.MENU
@@ -54,11 +67,24 @@ class MainActivity : Activity(), GameActions {
         })
         val root = FrameLayout(this)
         root.addView(glView)
-        root.addView(HudView(this))
+        val hud = HudView(this); root.addView(hud)
         screens = ScreenView(this, this)
         root.addView(screens)
         setContentView(root)
         hideSystemUi()
+        // while a page is open and the renderer has frozen on its blurred frame, stop the GL loop entirely (no GPU,
+        // no CPU in the background); restart it the moment the page closes
+        val h = android.os.Handler(mainLooper)
+        var lastOverlay = false
+        h.post(object : Runnable {
+            override fun run() {
+                val overlay = Controls.screen == Screen.PAUSE || Controls.screen == Screen.SETTINGS || Controls.screen == Screen.CREDITS || Controls.screen == Screen.MAP
+                val want = if (overlay && GameState.frozen) GLSurfaceView.RENDERMODE_WHEN_DIRTY else GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                if (overlay != lastOverlay) { lastOverlay = overlay; hud.invalidate() }      // blur / un-blur the HUD
+                if (glView.renderMode != want) glView.renderMode = want
+                h.postDelayed(this, 50)
+            }
+        })
     }
 
     /** Pick the display mode with the highest refresh rate at the current resolution. */
@@ -103,7 +129,7 @@ class MainActivity : Activity(), GameActions {
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) { super.onWindowFocusChanged(hasFocus); if (hasFocus) hideSystemUi() }
-    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start(); Vaporetti.start(this); Audio.start() }
+    override fun onResume() { super.onResume(); glView.onResume(); if (Settings.liveWeather) Weather.start(); Vaporetti.start(this); Audio.start(this) }
     override fun onPause() {
         super.onPause(); glView.onPause(); Settings.save(this); Weather.stop(); Vaporetti.stop(); Audio.stop()
         // leaving the app mid-run opens the pause menu, so you don't come back to a boat already moving

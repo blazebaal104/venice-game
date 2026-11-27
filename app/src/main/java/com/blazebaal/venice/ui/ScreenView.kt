@@ -47,8 +47,9 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     })
 
     init {
-        gui.onFeedback = { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY) }
-        val tick = object : Runnable { override fun run() { if (Controls.screen != Screen.NONE) invalidate(); postDelayed(this, 33) } }
+        gui.onFeedback = { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); com.blazebaal.venice.audio.Audio.ui() }
+        // 60 fps while a page scrolls or glides (the GL view is frozen meanwhile, so this is the only work), 30 otherwise
+        val tick = object : Runnable { override fun run() { if (Controls.screen != Screen.NONE) invalidate(); postDelayed(this, if (Controls.screen == Screen.SETTINGS || gui.gliding) 16 else 33) } }
         post(tick)
     }
 
@@ -62,6 +63,9 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             else -> {}
         }
         if (s != Screen.MAP) MapLayer.dropRegion()
+        if (s == Screen.MENU) Controls.menuContext = true
+        if (s == Screen.NONE) Controls.menuContext = false
+        if (s != Screen.MENU) Controls.menuBoatRect = IntArray(4)
         teleportOpen = false
         gui.consumeScroll()
         Controls.screen = s
@@ -83,6 +87,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        if (!GameState.booted) return true
         if (Controls.screen == Screen.NONE) return false
         if (Controls.screen == Screen.MAP) {
             scaleDet.onTouchEvent(e)
@@ -102,7 +107,36 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     }
 
     // ---------------------------------------------------------------- drawing
+    private val loadingScreen by lazy { LoadingScreen(dp) }
+    private var loadLastNs = 0L; private var loadFade = 0f; private var loadShown = 0f
+
     override fun onDraw(canvas: Canvas) {
+        if (!GameState.booted) {
+            // the animated loading screen over everything; the menu fades in underneath once Venice is ready
+            val now = System.nanoTime(); val dt = if (loadLastNs == 0L) 0.016f else ((now - loadLastNs) / 1e9f).coerceIn(0f, 0.1f); loadLastNs = now
+            loadShown += dt
+            c = canvas; ink.c = canvas
+            val glReady = GameState.bootProgress >= 1f
+            if (!glReady && loadFade > 0f) { loadFade = 0f; loadShown = 0f }      // GL context rebuilt after a resume: show it again
+            val tiles = if (glReady) (GameState.tilesLoaded.toFloat() / max(1, min(4, GameState.tilesWanted))).coerceIn(0f, 1f) else 0f
+            val p = 0.85f * GameState.bootProgress + 0.15f * tiles
+            if (glReady && !GameState.loading && loadShown > 2.2f) loadFade += dt
+            val stage = if (glReady) (if (GameState.loading) "Costruisco i quartieri intorno a te" else "Venezia è pronta") else GameState.bootStage
+            // transition: the sunset fades to black (0.6 s), a beat of black while the menu settles behind,
+            // then the menu comes up out of the black (0.7 s) - nothing pops in on screen
+            ink.fill.style = Paint.Style.FILL
+            if (loadFade < 0.6f) {
+                if (loadFade > 0f) { ink.fill.color = Color.BLACK; c.drawRect(0f, 0f, W, H, ink.fill) }
+                loadingScreen.draw(canvas, W, H, dt, p, stage, 1f - loadFade / 0.6f, GameState.bootError)
+            } else {
+                drawMenu(); gui.endFrame()
+                ink.fill.color = Color.argb(((1f - ((loadFade - 0.9f) / 0.7f)).coerceIn(0f, 1f) * 255).toInt(), 0, 0, 0)
+                c.drawRect(0f, 0f, W, H, ink.fill)
+            }
+            if (loadFade >= 1.6f) GameState.booted = true
+            postInvalidateOnAnimation()
+            return
+        }
         val sc = Controls.screen
         if (sc != lastScreen) {
             // pages opened straight from the HUD (minimap tap, pause button) return to the game
@@ -139,42 +173,58 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     // the panels, text and buttons, and leaves the boat's window transparent.
     private var boatDrag = false; private var boatLastX = 0f
     private val boatWin = RectF()
+    private val cardPath = Path()
 
+    private val version: String by lazy { try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?" } catch (_: Exception) { "?" } }
     private fun drawMenu() {
         // gentle darkening behind the title column and the bottom line, never over the boat window
         ink.fill.shader = LinearGradient(W * 0.5f, 0f, W, 0f, intArrayOf(Color.argb(0, 6, 9, 14), Color.argb(170, 6, 9, 14)), null, Shader.TileMode.CLAMP)
         c.drawRect(W * 0.5f, 0f, W, H, ink.fill); ink.fill.shader = null
 
-        // ---- boat card (left): header, transparent 3D window, specs
-        val cardW = min(320 * dp, W * 0.34f)
+        // ---- boat card (left): one full-height panel - name, the 3D model floating in the middle, the specs
+        val cardW = min(470 * dp, W * 0.42f)
         val x0 = m; val x1 = m + cardW
-        val header = RectF(x0, m, x1, m + 64 * dp)
-        ink.glass(header, 16 * dp)
-        ink.label("LA TUA BARCA", header.left + 18 * dp, header.top + 24 * dp, 10.5f, Theme.YELLOW, spacing = 0.16f)
-        ink.label("Lampo 5.4", header.left + 18 * dp, header.top + 50 * dp, 22f, Theme.TEXT, face = Theme.black)
-        ink.label("1 / 1", header.right - 18 * dp, header.top + 50 * dp, 12f, Theme.TEXT_FAINT, Paint.Align.RIGHT)
-        val specsH = 132 * dp
-        val specs = RectF(x0, H - m - specsH, x1, H - m)
-        boatWin.set(x0, header.bottom + 8 * dp, x1, specs.top - 8 * dp)
-        if (boatWin.height() > 60 * dp) {
-            Controls.menuBoatRect = intArrayOf(boatWin.left.toInt(), boatWin.top.toInt(), boatWin.right.toInt(), boatWin.bottom.toInt())
-            ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1.5f * dp
-            c.drawRoundRect(boatWin, 16 * dp, 16 * dp, ink.stroke)
-            ink.label(if (boatDrag) "" else "TRASCINA PER RUOTARE", boatWin.centerX(), boatWin.bottom - 12 * dp, 9f, Theme.TEXT_FAINT, Paint.Align.CENTER, spacing = 0.14f)
-        } else Controls.menuBoatRect = IntArray(4)
-        ink.glass(specs, 16 * dp)
-        ink.label("Barchino in vetroresina · fuoribordo 115 cv", specs.left + 18 * dp, specs.top + 24 * dp, 11f, Theme.TEXT_DIM, face = Theme.condensed)
-        val stats = listOf(Triple("VELOCITÀ", 0.92f, "140 km/h"), Triple("ACCELERAZIONE", 0.72f, "0-100 in 9 s"), Triple("MANOVRABILITÀ", 0.8f, ""))
+        val card = RectF(x0, m, x1, H - m)
+        val headH = 74 * dp
+        val specsH = min(150 * dp, card.height() * 0.36f)
+        val header = RectF(x0, card.top, x1, card.top + headH)
+        val specs = RectF(x0, card.bottom - specsH, x1, card.bottom)
+        // glass top and bottom; the middle is dimmed by the renderer behind the model, so the card reads as one piece
+        val rr = 18 * dp
+        cardPath.reset(); cardPath.addRoundRect(header, floatArrayOf(rr, rr, rr, rr, 0f, 0f, 0f, 0f), Path.Direction.CW)
+        cardPath.addRoundRect(specs, floatArrayOf(0f, 0f, 0f, 0f, rr, rr, rr, rr), Path.Direction.CW)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.GLASS; c.drawPath(cardPath, ink.fill)
+        boatWin.set(x0, header.bottom, x1, specs.top)
+        Controls.menuBoatRect = if (boatWin.height() > 60 * dp) intArrayOf(boatWin.left.toInt(), boatWin.top.toInt(), boatWin.right.toInt(), boatWin.bottom.toInt()) else IntArray(4)
+        ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1.2f * dp
+        c.drawRoundRect(card, 18 * dp, 18 * dp, ink.stroke)
+        ink.label("LA TUA BARCA", header.left + 22 * dp, header.top + 26 * dp, 10f, Theme.YELLOW, spacing = 0.22f)
+        ink.label("LAMPO 5.4", header.left + 21 * dp, header.top + 58 * dp, 28f, Theme.TEXT, face = Theme.black, spacing = 0.01f)
+        // three spec tiles: big figure, unit, label, a 10-segment rating
+        val stats = arrayOf(
+            arrayOf("140", "KM/H", "VELOCITÀ MAX", "9"),
+            arrayOf("9,0", "S", "0-100 KM/H", "7"),
+            arrayOf("115", "CV", "FUORIBORDO", "8"))
+        val pad = 22 * dp; val gap = 12 * dp
+        val tw = (specs.width() - 2 * pad - 2 * gap) / 3
         for ((i, st) in stats.withIndex()) {
-            val y = specs.top + 50 * dp + i * 26 * dp
-            ink.label(st.first, specs.left + 18 * dp, y + 4 * dp, 9.5f, Theme.TEXT_DIM, spacing = 0.1f)
-            val valueW = if (st.third.isEmpty()) 0f else ink.width(st.third, 10.5f) + 10 * dp
-            val bar = RectF(specs.left + 120 * dp, y - 2 * dp, specs.right - 18 * dp - valueW, y + 4 * dp)
-            ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(50, 255, 255, 255); c.drawRoundRect(bar, 3 * dp, 3 * dp, ink.fill)
-            ink.fill.color = Theme.YELLOW; c.drawRoundRect(RectF(bar.left, bar.top, bar.left + bar.width() * st.second, bar.bottom), 3 * dp, 3 * dp, ink.fill)
-            if (st.third.isNotEmpty()) ink.label(st.third, specs.right - 18 * dp, y + 4 * dp, 10.5f, Theme.TEXT, Paint.Align.RIGHT)
+            val tx = specs.left + pad + i * (tw + gap)
+            val base = specs.top + specs.height() * 0.42f
+            var fs = 34f; while (fs > 18f && ink.width(st[0], fs, Theme.black) + ink.width(st[1], 11f) + 4 * dp > tw) fs -= 1f
+            ink.label(st[0], tx, base, fs, Theme.TEXT, face = Theme.black)
+            ink.label(st[1], tx + ink.width(st[0], fs, Theme.black) + 4 * dp, base, 11f, Theme.YELLOW, spacing = 0.08f)
+            ink.label(st[2], tx, base + 20 * dp, 9f, Theme.TEXT_DIM, spacing = 0.14f)
+            val segs = 10; val sg = 2.5f * dp; val sw = (tw - (segs - 1) * sg) / segs
+            val by = base + 32 * dp
+            for (k in 0 until segs) {
+                ink.fill.style = Paint.Style.FILL
+                ink.fill.color = if (k < st[3].toInt()) Theme.YELLOW else Color.argb(45, 255, 255, 255)
+                c.drawRoundRect(RectF(tx + k * (sw + sg), by, tx + k * (sw + sg) + sw, by + 5 * dp), 1.5f * dp, 1.5f * dp, ink.fill)
+            }
         }
-        ink.label("Altre barche in arrivo", specs.left + 18 * dp, specs.bottom - 12 * dp, 9.5f, Theme.TEXT_FAINT, face = Theme.condensed)
+        // thin separators between the tiles
+        ink.fill.color = Color.argb(30, 255, 255, 255)
+        for (i in 1..2) { val sx = specs.left + pad + i * (tw + gap) - gap / 2; c.drawRect(sx, specs.top + 14 * dp, sx + 1 * dp, specs.bottom - 16 * dp, ink.fill) }
 
         // ---- title + buttons (right), sized to fit the height
         val colW = min(330 * dp, W * 0.34f)
@@ -188,6 +238,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         ink.text.setShadowLayer(8 * dp, 0f, 2 * dp, Color.argb(160, 0, 0, 0))
         ink.label("GTACTV", cx0 - 2 * dp, y, titleSize, Theme.TEXT, face = Theme.black, spacing = -0.01f)
         ink.label("VENEZIA · LAGUNA · SCALA 1:1", cx0, y + 20 * dp, 10.5f, Theme.YELLOW, spacing = 0.2f)
+        // which build this is (so it's obvious when a new APK is really installed)
+        ink.label("versione $version", W - m - 4 * dp, H - m + 4 * dp, 10f, Theme.TEXT_DIM, Paint.Align.RIGHT, spacing = 0.1f)
         ink.text.clearShadowLayer()
         y += 40 * dp
         val loaded = !GameState.loading
@@ -197,6 +249,23 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         val half = (colW - 10 * dp) / 2
         if (gui.button(RectF(cx0, y, cx0 + half, y + bh * 0.85f), "IMPOSTAZIONI", 0, "gear")) open(Screen.SETTINGS)
         if (gui.button(RectF(cx0 + half + 10 * dp, y, cx0 + colW, y + bh * 0.85f), "CREDITI", 0, "info")) open(Screen.CREDITS)
+
+        // ---- the previous session crashed: show what happened, once, so it can be reported (screenshot)
+        if (GameState.lastCrash.isNotEmpty()) {
+            val msg = "ULTIMO CRASH · " + GameState.lastCrash
+            var cs = 9f; while (cs > 6.5f && ink.width(msg, cs, Theme.condensed) > W - x1 - colW - 4 * m) cs -= 0.5f
+            val cx = (x1 + cx0) / 2
+            ink.text.setShadowLayer(4 * dp, 0f, 1 * dp, Color.BLACK)
+            // wrapped over up to 3 lines
+            val words = msg.split(' '); var line = ""; var ly = m + 12 * dp; var lines = 0
+            val maxW = cx0 - x1 - 24 * dp
+            for (w in words) {
+                val t = if (line.isEmpty()) w else "$line $w"
+                if (ink.width(t, cs, Theme.condensed) > maxW && line.isNotEmpty()) { ink.label(line, cx, ly, cs, Theme.RED, Paint.Align.CENTER, Theme.condensed); line = w; ly += 13 * dp; if (++lines >= 3) break } else line = t
+            }
+            if (lines < 3 && line.isNotEmpty()) ink.label(line, cx, ly, cs, Theme.RED, Paint.Align.CENTER, Theme.condensed)
+            ink.text.clearShadowLayer()
+        }
 
         // ---- bottom right: live Venice weather + vaporetti status
         val wtxt = if (Weather.live) "VENEZIA ORA · ${Weather.temperature.roundToInt()}° · ${Weather.label()} · VENTO ${Weather.windKmh.roundToInt()} KM/H ${compass(Weather.windDirDeg)}"
@@ -208,11 +277,19 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         ink.text.clearShadowLayer()
     }
 
-    /** drag on the boat window turns the boat (handled before the widget kit) */
+    /** drag on the boat window spins the boat: the finger sets its angular speed (gently), released it keeps turning
+     *  and slows to a stop (handled before the widget kit; the renderer integrates the spin) */
+    private var boatLastT = 0L
     private fun menuTouch(e: MotionEvent): Boolean {
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> if (boatWin.contains(e.x, e.y)) { boatDrag = true; boatLastX = e.x; Controls.menuBoatDragging = true; return true }
-            MotionEvent.ACTION_MOVE -> if (boatDrag) { Controls.menuBoatYaw += (e.x - boatLastX) * 0.012f; boatLastX = e.x; return true }
+            MotionEvent.ACTION_DOWN -> if (boatWin.contains(e.x, e.y)) { boatDrag = true; boatLastX = e.x; boatLastT = e.eventTime; Controls.menuBoatDragging = true; return true }
+            MotionEvent.ACTION_MOVE -> if (boatDrag) {
+                val dt = max(8L, e.eventTime - boatLastT) / 1000f
+                val w = ((e.x - boatLastX) / dp * 0.006f / dt).coerceIn(-5f, 5f)
+                Controls.menuBoatSpin = Controls.menuBoatSpin * 0.65f + w * 0.35f
+                Controls.menuBoatTouchT = System.nanoTime()
+                boatLastX = e.x; boatLastT = e.eventTime; return true
+            }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (boatDrag) { boatDrag = false; Controls.menuBoatDragging = false; return true }
         }
         return boatDrag
@@ -222,7 +299,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     // ================================================================ PAUSE
     private fun drawPause() {
-        dim(150)
+        dim(80)
         val colW = min(300 * dp, W * 0.36f)
         val x0 = m + 10 * dp
         title("PAUSA", x0, m + 34 * dp, 28f)
@@ -298,28 +375,29 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     private val tabs = listOf("GRAFICA", "CONTROLLI", "AUDIO", "HUD E MAPPA", "METEO E MONDO", "ARCHIVIO", "INFO")
 
     private fun drawSettings() {
-        if (settingsReturn == Screen.MENU) { drawMenuBackdrop() } else dim(185)
-        if (gui.iconButton(m + 22 * dp, m + 22 * dp, 22 * dp, "back")) { Settings.save(context); open(settingsReturn); return }
-        title("IMPOSTAZIONI", m + 58 * dp, m + 32 * dp, 24f)
-        // tabs
-        val tabW = min(190 * dp, W * 0.24f)
-        val tabTop = m + 60 * dp
-        val th = min(44 * dp, (H - tabTop - m) / tabs.size - 6 * dp)
+        if (settingsReturn == Screen.MENU) { drawMenuBackdrop() } else dim(70)
+        // same layout as the pause page: title, a column of compact buttons (the sections), a glass panel on the right
+        val colW = min(300 * dp, W * 0.36f)
+        val x0 = m + 10 * dp
+        title("IMPOSTAZIONI", x0, m + 34 * dp, 28f)
+        if (gui.iconButton(x0 + colW - 20 * dp, m + 22 * dp, 20 * dp, "back")) { Settings.save(context); open(settingsReturn); return }
+        val top = m + 54 * dp; val avail = H - top - m
+        val bh = min(48 * dp, avail / tabs.size - 8 * dp)
         for ((i, t) in tabs.withIndex()) {
-            val r = RectF(m, tabTop + i * (th + 6 * dp), m + tabW, tabTop + i * (th + 6 * dp) + th)
-            val on = i == tab
-            if (on) { ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW; c.drawRoundRect(r, 10 * dp, 10 * dp, ink.fill) }
-            else ink.glass(r, 10 * dp)
-            ink.label(t, r.left + 14 * dp, r.centerY() + 5 * dp, 13f, if (on) Theme.INK else Theme.TEXT, spacing = 0.06f)
-            if (!on && gui.tapped(r)) { tab = i; scrollY = 0f }
+            val r = RectF(x0, top + i * (bh + 8 * dp), x0 + colW, top + i * (bh + 8 * dp) + bh)
+            if (gui.button(r, t, if (i == tab) 1 else 0) && i != tab) { tab = i; scrollY = 0f; gui.stopFling() }
         }
-        // content panel (scrollable)
-        val panel = RectF(m + tabW + 16 * dp, tabTop, W - m, H - m)
+        val panel = RectF(x0 + colW + 20 * dp, top, W - m, H - m)
         ink.glass(panel, 16 * dp)
-        if (!gui.isDraggingSlider) scrollY = (scrollY + gui.consumeScroll()).coerceIn(min(0f, panel.height() - contentH - 20 * dp), 0f) else gui.consumeScroll()
+        val d = gui.consumeScroll()
+        if (!gui.isDraggingSlider) {
+            val lo = min(0f, panel.height() - contentH - 24 * dp)
+            scrollY = (scrollY + d).coerceIn(lo, 0f)
+            if (scrollY <= lo || scrollY >= 0f) gui.stopFling()
+        }
         val save = c.save(); c.clipRect(panel)
         var y = panel.top + 18 * dp + scrollY
-        val x = panel.left + 20 * dp; val w = panel.width() - 40 * dp
+        val x = panel.left + 22 * dp; val w = panel.width() - 44 * dp
         val start = y
         y = when (tab) {
             0 -> graphics(x, y, w)
@@ -334,12 +412,13 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         c.restoreToCount(save)
     }
 
-    private fun drawMenuBackdrop() { dim(175) }
+    private fun drawMenuBackdrop() { dim(60) }
 
-    private val ROW get() = 70 * dp
+    private val ROW get() = 68 * dp
+    private var tabScroll = 0f
     /** One settings row: label + wrapped description on the left, the control's rect on the right (never overlapping). */
-    private fun row(x: Float, y: Float, w: Float, label: String, desc: String? = null, h: Float = 70f): RectF {
-        val cw = min(w * 0.46f, 340 * dp)
+    private fun row(x: Float, y: Float, w: Float, label: String, desc: String? = null, h: Float = 68f): RectF {
+        val cw = min(w * 0.46f, 330 * dp)
         val textW = w - cw - 20 * dp
         var ls = 15f; while (ls > 11f && ink.width(label, ls) > textW) ls -= 0.5f
         ink.label(label, x, y + (if (desc == null) 39f else 27f) * dp, ls, Theme.TEXT)
@@ -363,6 +442,10 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     private fun graphics(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "QUALITÀ")
+        val mode = gui.segmented(row(x, y, w, "Grafica", if (Settings.simple) "Semplice: acqua leggera, niente riflessi calcolati, niente ombre: per telefoni meno potenti" else "Realistica: acqua simulata, riflessi, ombre, luci HDR"),
+            listOf("Realistica", "Semplice"), if (Settings.simple) 1 else 0)
+        if ((mode == 1) != Settings.simple) Settings.applyMode(mode == 1)
+        y += ROW
         val q = gui.segmented(row(x, y, w, "Preimpostazione", "Imposta tutto il resto in un colpo"), listOf("Prestazioni", "Bilanciata", "Qualità", "Ultra"), Settings.quality)
         if (q != Settings.quality) Settings.applyPreset(q)
         y += ROW
@@ -395,7 +478,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     private fun controls(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "GUIDA")
-        Settings.analogSteering = gui.segmented(row(x, y, w, "Sterzo", if (Settings.analogSteering) "Trascina il timone: sterzata progressiva" else "Due frecce: tutto a destra o a sinistra"), listOf("Timone", "Frecce"), if (Settings.analogSteering) 0 else 1) == 0
+        Settings.steerMode = gui.segmented(row(x, y, w, "Sterzo", when (Settings.steerMode) { 0 -> "Trascina il timone: sterzata progressiva"; 1 -> "Due frecce: tutto a destra o a sinistra"; else -> "Volante: giralo, si ferma a 90° per lato" }), listOf("Timone", "Frecce", "Volante"), Settings.steerMode)
+        Settings.analogSteering = Settings.steerMode != 1
         y += ROW
         Settings.steerSensitivity = gui.slider("ss", row(x, y, w, "Sensibilità sterzo", "${(Settings.steerSensitivity * 100).roundToInt()}%"), Settings.steerSensitivity, 0.5f, 1.5f, 0.05f); y += ROW
         Settings.cameraSensitivity = gui.slider("cs", row(x, y, w, "Sensibilità telecamera", "${(Settings.cameraSensitivity * 100).roundToInt()}%"), Settings.cameraSensitivity, 0.4f, 2f, 0.1f); y += ROW
@@ -554,11 +638,18 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             if (abs(q.x) > W / 2 + 30 * dp || abs(q.y) > H / 2 + 30 * dp) continue
             vaporettoMark(q.x, q.y, v.h, v.line, z > 0.25f)
         }
-        // waypoint + route line
+        // canal names
+        Canals.draw(ink, 11f, 0f, 160 * dp, { x, y -> sp(x, y) }, { q -> abs(q.x) < W / 2 + 60 * dp && abs(q.y) < H / 2 + 30 * dp })
+        // waypoint + the navigator's route along the canals
         if (GameState.hasWaypoint()) {
-            val b = sp(GameState.x, GameState.y); val w = sp(GameState.wpX, GameState.wpY)
-            ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 3 * dp; ink.stroke.pathEffect = DashPathEffect(floatArrayOf(8 * dp, 6 * dp), 0f)
-            c.drawLine(b.x, b.y, w.x, w.y, ink.stroke); ink.stroke.pathEffect = null
+            val w = sp(GameState.wpX, GameState.wpY)
+            GameState.route?.let { rt ->
+                ink.path.reset()
+                for (i in 0 until rt.size / 2) { val q = sp(rt[i * 2], rt[i * 2 + 1]); if (i == 0) ink.path.moveTo(q.x, q.y) else ink.path.lineTo(q.x, q.y) }
+                ink.stroke.strokeJoin = Paint.Join.ROUND; ink.stroke.strokeCap = Paint.Cap.ROUND
+                ink.stroke.color = Color.argb(200, 10, 30, 50); ink.stroke.strokeWidth = 7 * dp; c.drawPath(ink.path, ink.stroke)
+                ink.stroke.color = Theme.YELLOW; ink.stroke.strokeWidth = 4 * dp; c.drawPath(ink.path, ink.stroke)
+            }
             ink.icon("pin", w.x, w.y - 10 * dp, Theme.YELLOW, 1.4f)
         }
         // selection

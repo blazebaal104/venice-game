@@ -22,7 +22,17 @@ object Vaporetti {
         val id: String, val line: String, val headsign: String,
         val lat: Double, val lon: Double, val bearing: Float, val speed: Float, val time: Long,
         val status: Int, val stopName: String,
+        /** the stops of its trip in order (its whole route today, GTFS coordinates), empty if the trip is unknown */
+        val tripStops: List<StopRef> = emptyList(),
+        /** GTFS coordinates of the stop in `stopName` (each pontoon - Rialto A, B, C... - is its own stop), NaN if none */
+        val stopLat: Double = Double.NaN, val stopLon: Double = Double.NaN,
+        val tripId: String = "",
     )
+    /** one scheduled trip running today: stops with absolute times (seconds since today's midnight) */
+    class Sched(val id: String, val line: String, val headsign: String, val stops: List<StopRef>, val arr: IntArray, val dep: IntArray)
+    /** today's trips (plus last night's past midnight), from the timetable; refreshed daily */
+    @Volatile var today: List<Sched> = emptyList(); private set
+    @Volatile var tripById: Map<String, Sched> = emptyMap(); private set
     class StopRef(val name: String, val lat: Double, val lon: Double, val arr: Int, val dep: Int)
     /** one line in one direction: its stops with times relative to the first departure, and the day's departures */
     class Route(val line: String, val headsign: String, val stops: List<StopRef>, val starts: IntArray)
@@ -40,13 +50,19 @@ object Vaporetti {
     private val tripHead = HashMap<String, String>()
     private val tripDir = HashMap<String, String>()
     private val stopInfo = HashMap<String, StopRef>()
+    /** trip id -> its stop names in order (shared lists: one per distinct stop pattern) */
+    private val tripPattern = java.util.concurrent.ConcurrentHashMap<String, List<StopRef>>()
 
     fun start(ctx: Context) {
         if (thread != null) return
         val dir = ctx.filesDir
         thread = Thread({
             try { loadStatic(dir) } catch (e: Throwable) { status = "Orari ACTV non disponibili" }
+            var day = java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR)
             while (!Thread.currentThread().isInterrupted) {
+                // a new day: that day's trips (and a fresh timetable if the cached one is a day old)
+                val d = java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR)
+                if (d != day) { day = d; try { loadStatic(dir) } catch (_: Throwable) { } }
                 if (enabled) try { poll() } catch (e: Exception) { status = "Posizioni ACTV non raggiungibili · simulazione orari" }
                 try { Thread.sleep(15_000) } catch (_: InterruptedException) { break }
             }
@@ -58,7 +74,7 @@ object Vaporetti {
     // ---------------------------------------------------------------- static GTFS
     private fun loadStatic(dir: File) {
         val f = File(dir, "actv_nav.zip")
-        if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 7L * 24 * 3600 * 1000) {
+        if (!f.exists() || System.currentTimeMillis() - f.lastModified() > 20L * 3600 * 1000) {      // fresh timetable every day
             try {
                 val c = open(GTFS_URL)
                 try { if (c.responseCode == 200) { val tmp = File(dir, "actv_nav.zip.tmp"); c.inputStream.use { i -> tmp.outputStream().use { i.copyTo(it) } }; tmp.renameTo(f) } }
@@ -68,6 +84,9 @@ object Vaporetti {
         if (!f.exists()) return
         // stop_times grouped by trip: stop ids + arrival/departure seconds
         val tripStops = HashMap<String, ArrayList<String>>(); val tripArr = HashMap<String, ArrayList<Int>>(); val tripDep = HashMap<String, ArrayList<Int>>()
+        val tripService = HashMap<String, String>()
+        // service calendars: which service ids run on a given date (yyyymmdd)
+        val weekly = HashMap<String, Triple<BooleanArray, Int, Int>>(); val except = HashMap<Int, HashMap<String, Int>>()
         ZipInputStream(f.inputStream().buffered()).use { z ->
             while (true) {
                 val e = z.nextEntry ?: break
@@ -81,6 +100,17 @@ object Vaporetti {
                         r.getOrNull(h["route_id"] ?: -1)?.let { tripRoute[id] = it }
                         r.getOrNull(h["trip_headsign"] ?: -1)?.takeIf { it.isNotEmpty() }?.let { tripHead[id] = it }
                         tripDir[id] = r.getOrNull(h["direction_id"] ?: -1).orEmpty()
+                        r.getOrNull(h["service_id"] ?: -1)?.let { tripService[id] = it }
+                    }
+                    "calendar.txt" -> csv(z) { h, r ->
+                        val id = r.getOrNull(h["service_id"] ?: -1) ?: return@csv
+                        val days = BooleanArray(7) { d -> r.getOrNull(h[arrayOf("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")[d]] ?: -1) == "1" }
+                        weekly[id] = Triple(days, r.getOrNull(h["start_date"] ?: -1)?.toIntOrNull() ?: 0, r.getOrNull(h["end_date"] ?: -1)?.toIntOrNull() ?: 99999999)
+                    }
+                    "calendar_dates.txt" -> csv(z) { h, r ->
+                        val id = r.getOrNull(h["service_id"] ?: -1) ?: return@csv
+                        val date = r.getOrNull(h["date"] ?: -1)?.toIntOrNull() ?: return@csv
+                        except.getOrPut(date) { HashMap() }[id] = r.getOrNull(h["exception_type"] ?: -1)?.toIntOrNull() ?: 0
                     }
                     "stops.txt" -> csv(z) { h, r ->
                         val id = r.getOrNull(h["stop_id"] ?: -1) ?: return@csv
@@ -98,6 +128,8 @@ object Vaporetti {
                 }
             }
         }
+        val patterns = HashMap<List<String>, List<StopRef>>()
+        for ((t, ids) in tripStops) tripPattern[t] = patterns.getOrPut(ids) { ids.mapNotNull { stopInfo[it] } }
         // one stop pattern per line + direction (the trip with the most stops), plus every departure of that pattern
         val groups = HashMap<String, ArrayList<String>>()
         for (t in tripStops.keys) { val r = tripRoute[t] ?: continue; groups.getOrPut(r + "|" + tripDir[t].orEmpty()) { ArrayList() }.add(t) }
@@ -114,6 +146,28 @@ object Vaporetti {
             out.add(Route(line, tripHead[rep].orEmpty(), stops, starts.toIntArray()))
         }
         routes = out
+        // ---- the trips running today (and last night's still running after midnight), absolute times
+        fun ymd(c: java.util.Calendar) = c.get(java.util.Calendar.YEAR) * 10000 + (c.get(java.util.Calendar.MONTH) + 1) * 100 + c.get(java.util.Calendar.DAY_OF_MONTH)
+        fun runs(service: String, c: java.util.Calendar): Boolean {
+            val d = ymd(c)
+            except[d]?.get(service)?.let { return it == 1 }
+            val w = weekly[service] ?: return weekly.isEmpty()                 // no calendar at all: assume every trip runs
+            val dow = (c.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7           // Monday = 0
+            return w.first[dow] && d in w.second..w.third
+        }
+        val now = java.util.Calendar.getInstance(); val yday = (now.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_YEAR, -1) }
+        val list = ArrayList<Sched>()
+        for ((t, ids) in tripStops) {
+            if (ids.size < 2) continue
+            val svc = tripService[t].orEmpty()
+            val line = routeName[tripRoute[t]] ?: continue
+            val stops = ids.mapNotNull { stopInfo[it] }; if (stops.size != ids.size) continue
+            val a = tripArr[t]!!.toIntArray(); val d = tripDep[t]!!.toIntArray()
+            val head = tripHead[t] ?: stops.last().name
+            if (runs(svc, now)) list.add(Sched(t, line, head, stops, a, d))
+            if (d.last() >= 86400 && runs(svc, yday)) list.add(Sched(t, line, head, stops, IntArray(a.size) { a[it] - 86400 }, IntArray(d.size) { d[it] - 86400 }))
+        }
+        today = list; tripById = list.associateBy { it.id }
     }
 
     private fun secs(s: String?): Int {
@@ -192,7 +246,8 @@ object Vaporetti {
         val rid = routeId.ifEmpty { tripRoute[tripId] ?: "" }
         val line = routeName[rid] ?: rid.ifEmpty { "?" }
         return Vessel(label.ifEmpty { id }, line, tripHead[tripId] ?: "", lat, lon, bearing, speed,
-            if (time > 0) time * 1000 else System.currentTimeMillis(), st, stopInfo[stopId]?.name ?: "")
+            if (time > 0) time * 1000 else System.currentTimeMillis(), st, stopInfo[stopId]?.name ?: "", tripPattern[tripId] ?: emptyList(),
+            stopInfo[stopId]?.lat ?: Double.NaN, stopInfo[stopId]?.lon ?: Double.NaN, tripId)
     }
 
     private fun open(url: String): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {

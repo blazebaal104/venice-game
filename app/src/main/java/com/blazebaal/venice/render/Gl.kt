@@ -100,12 +100,41 @@ object Aniso {
 }
 
 /** Texture arrays for the photo materials: albedo (RGBA, non-premultiplied) and normal/roughness. */
+/** Pre-compressed ETC2 RGB textures (tools/textures/etc2.py): 4 bits per pixel on the GPU instead of 32, uploaded
+ *  straight from the APK with no Bitmap decode (no big RAM spike while loading). */
+object Etc {
+    const val RGB8 = 0x9274          // GL_COMPRESSED_RGB8_ETC2
+    class Data(val w: Int, val h: Int, val levels: List<ByteBuffer>)
+    fun read(ctx: android.content.Context, asset: String): Data? = try {
+        java.io.DataInputStream(ctx.assets.open(asset).buffered(1 shl 16)).use { d ->
+            val magic = ByteArray(4); d.readFully(magic)
+            if (String(magic) != "ETC2") null else {
+                val w = d.readInt(); val h = d.readInt(); val n = d.readInt()
+                Data(w, h, List(n) { val len = d.readInt(); val b = ByteArray(len); d.readFully(b); ByteBuffer.allocateDirect(len).order(ByteOrder.nativeOrder()).put(b).also { it.position(0) } })
+            }
+        }
+    } catch (e: java.io.IOException) { null }
+    /** a mipmapped 2D texture from an .etc asset; 0 if the asset is missing */
+    fun load2D(ctx: android.content.Context, asset: String, repeat: Boolean = false, aniso: Float = 4f): Int {
+        val e = read(ctx, asset) ?: return 0
+        val t = IntArray(1); glGenTextures(1, t, 0); glBindTexture(GL_TEXTURE_2D, t[0])
+        var w = e.w; var h = e.h
+        for ((lv, b) in e.levels.withIndex()) { glCompressedTexImage2D(GL_TEXTURE_2D, lv, RGB8, w, h, 0, b.capacity(), b); w = maxOf(1, w / 2); h = maxOf(1, h / 2) }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, if (e.levels.size > 1) GL_LINEAR_MIPMAP_LINEAR else GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        val wrap = if (repeat) GL_REPEAT else GL_CLAMP_TO_EDGE
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap)
+        Aniso.apply(GL_TEXTURE_2D, aniso)
+        return t[0]
+    }
+}
+
 object TexArrays {
     fun load(ctx: android.content.Context, count: Int): IntArray {
         val ids = IntArray(2); glGenTextures(2, ids, 0)
         val size = 512
         for ((k, prefix) in listOf(Pair("c_", "png"), Pair("n_", "jpg")).withIndex()) {
             glBindTexture(GL_TEXTURE_2D_ARRAY, ids[k])
+            if (k == 1 && loadEtcArray(ctx, count)) continue
             glTexStorage3D(GL_TEXTURE_2D_ARRAY, 10, GL_RGBA8, size, size, count)
             val buf = ByteBuffer.allocateDirect(size * size * 4).order(ByteOrder.nativeOrder())
             for (i in 0 until count) {
@@ -122,6 +151,22 @@ object TexArrays {
             Aniso.apply(GL_TEXTURE_2D_ARRAY, 8f)
         }
         return ids
+    }
+
+    /** the normal/roughness layers pre-compressed (n_XX.etc): 8x less GPU memory than RGBA8 */
+    private fun loadEtcArray(ctx: android.content.Context, count: Int): Boolean {
+        val first = Etc.read(ctx, "tex/n_00.etc") ?: return false
+        glTexStorage3D(GL_TEXTURE_2D_ARRAY, first.levels.size, Etc.RGB8, first.w, first.h, count)
+        for (i in 0 until count) {
+            val e = if (i == 0) first else (Etc.read(ctx, "tex/n_${"%02d".format(i)}.etc") ?: return false)
+            var w = e.w; var h = e.h
+            for ((lv, b) in e.levels.withIndex()) { glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY, lv, 0, 0, i, w, h, 1, Etc.RGB8, b.capacity(), b); w = maxOf(1, w / 2); h = maxOf(1, h / 2) }
+        }
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT); glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        Aniso.apply(GL_TEXTURE_2D_ARRAY, 8f)
+        return true
     }
 }
 
@@ -147,6 +192,8 @@ class Target(val w: Int, val h: Int, hdr: Boolean, depth: Boolean) {
         }
         if (hdr) { alloc(GL_RGBA16F, GL_HALF_FLOAT); isHdr = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE }
         if (!isHdr) alloc(GL_RGBA8, GL_UNSIGNED_BYTE)
+        // never leave fresh video memory uninitialised (it can hold NaNs that leak into later passes)
+        glViewport(0, 0, w, h); glClearColor(0f, 0f, 0f, 1f); glClear(GL_COLOR_BUFFER_BIT or (if (depth) GL_DEPTH_BUFFER_BIT else 0))
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
     }
     fun bind() { glBindFramebuffer(GL_FRAMEBUFFER, fbo); glViewport(0, 0, w, h) }
@@ -172,7 +219,10 @@ class DynMesh(val stride: Int, layout: IntArray, capacityFloats: Int) {
     fun upload(data: FloatArray, floats: Int) {
         val n = minOf(floats, buf.capacity())
         buf.position(0); buf.put(data, 0, n); buf.position(0)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo); glBufferSubData(GL_ARRAY_BUFFER, 0, n * 4, buf)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        // orphan first: rewriting a buffer the GPU may still be reading from last frame stalls on mobile drivers
+        glBufferData(GL_ARRAY_BUFFER, buf.capacity() * 4, null, GL_STREAM_DRAW)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, n * 4, buf)
         count = n / stride
     }
     fun draw(mode: Int) { if (count == 0) return; glBindVertexArray(vao); glDrawArrays(mode, 0, count) }

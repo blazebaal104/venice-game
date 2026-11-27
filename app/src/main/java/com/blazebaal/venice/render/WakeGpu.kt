@@ -1,5 +1,5 @@
-// The wake simulation on the GPU: a 256 m x 256 m wave-equation heightfield (0.5 m cells) that follows the boat,
-// stepped at a fixed 60 Hz in a fragment shader (ping-pong RGBA16F: height, previous height, foam, aeration).
+// The wake simulation on the GPU: a 192 m x 192 m wave-equation heightfield (0.5 m cells) that follows the boat,
+// stepped at a fixed 30 Hz in a fragment shader (ping-pong RGBA16F: height, previous height, foam, aeration).
 // The CPU only describes the boat pose and the foam sources each step, so the simulation costs no CPU time and
 // nothing is uploaded per frame (the old CPU version took several ms per step and stalled on a 1.6 MB upload).
 package com.blazebaal.venice.render
@@ -12,7 +12,7 @@ import java.nio.ByteOrder
 import kotlin.math.*
 
 class WakeGpu(private val tri: Mesh) {
-    val n = 512
+    val n = 384
     val cell = 0.5f
     val size = n * cell
     /** world position of the grid's (0,0) corner, always on whole cells */
@@ -28,11 +28,15 @@ class WakeGpu(private val tri: Mesh) {
     private val solidTex: Int
     private var started = false
     private var acc = 0f
-    private val stepDt = 1f / 60f
+    private val stepDt = 1f / 30f
     private val c = 3.6f
     private val drv = com.blazebaal.venice.core.WakeDriver()
     // previous step's pose (for the hull's change of footprint)
     private val prevB = FloatArray(4); private val prevBb = FloatArray(4)
+    /** the ACTV fleet, whose hulls disturb the same water */
+    var fleet: LiveBoats? = null
+    private val vPose = FloatArray(16); private val vInfo = FloatArray(16); private val vSize = FloatArray(8); private val vPrev = FloatArray(16)
+    private val splats = FloatArray(64)
 
     init {
         solidTex = Tex.create(n, n, GL_RED, solid, false, GL_R8)
@@ -48,7 +52,7 @@ class WakeGpu(private val tri: Mesh) {
     /** Returns the shift (cells) the next step must apply when the window moved. */
     private fun recentre(b: Boat, world: WorldMap): IntArray {
         // most of the window behind the boat: the trail lasts much longer than the water ahead matters
-        val bx = b.x - dirX * 70f; val by = b.y - dirY * 70f
+        val bx = b.x - dirX * 45f; val by = b.y - dirY * 45f
         val nx = floor((bx - size / 2) / cell) * cell; val ny = floor((by - size / 2) / cell) * cell
         if (!started) {
             started = true; ox = nx; oy = ny; refreshSolid(world, 0, n, 0, n); uploadSolid(); return intArrayOf(0, 0)
@@ -74,13 +78,13 @@ class WakeGpu(private val tri: Mesh) {
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RED, GL_UNSIGNED_BYTE, solidBuf)
     }
 
-    /** Advance the simulation (fixed 60 Hz steps, at most 3 per frame). Leaves the default framebuffer bound. */
+    /** Advance the simulation (fixed 30 Hz steps, at most 2 per frame). Leaves the default framebuffer bound. */
     fun update(dt: Float, b: Boat, throttle: Float, world: WorldMap) {
         if (!ok) return
         acc += min(dt, 0.1f)
         var steps = 0
-        while (acc >= stepDt && steps < 3) { acc -= stepDt; step(b, throttle, world); steps++ }
-        if (steps == 3) acc = 0f
+        while (acc >= stepDt && steps < 2) { acc -= stepDt; step(b, throttle, world); steps++ }
+        if (steps == 2) acc = 0f
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
     }
 
@@ -102,13 +106,36 @@ class WakeGpu(private val tri: Mesh) {
         prog.f("uK", (c * dt / cell).let { it * it })
         prog.f("uBeta", 0.10f * dt * dt / (cell * cell * cell * cell))
         prog.f("uNu", 0.18f * dt)
-        prog.f("uDamp", 0.99835f)          // = 0.9967 per 1/30 s: the V fades over ~10 s
-        prog.f("uSpongeMin", 0.927f)
-        prog.f("uFoamDiff", 0.0075f); prog.f("uAerDiff", 0.015f)
+        prog.f("uDamp", 0.9967f)           // per 1/30 s step: the V fades over ~10 s
+        prog.f("uSpongeMin", 0.86f)
+        prog.f("uFoamDiff", 0.015f); prog.f("uAerDiff", 0.03f)
         glUniform4fv(prog.loc("uB0"), 1, drv.b0, 0); glUniform4fv(prog.loc("uB0b"), 1, drv.b0b, 0)
         glUniform4fv(prog.loc("uB1"), 1, prevB, 0); glUniform4fv(prog.loc("uB1b"), 1, prevBb, 0)
         glUniform2f(prog.loc("uHull"), Boat.HALF_LEN, Boat.HALF_BEAM)
-        glUniform4fv(prog.loc("uSplat"), 12, drv.splats, 0); prog.i("uNSplat", drv.nSplat)
+        // ACTV boats in the window: hull displacement (their own V wake) + prop wash foam, astern = white churn
+        val nv = fleet?.wakeHulls(ox + size / 2, oy + size / 2, size * 0.75f, vPose, vInfo, vSize) ?: 0
+        drv.splats.copyInto(splats, 0, 0, drv.nSplat * 4)
+        var ns = drv.nSplat
+        for (k in 0 until nv) {
+            val h = vPose[k * 4 + 2]; val sp = vInfo[k * 4 + 2]
+            vPrev[k * 4] = vPose[k * 4] - cos(h) * sp * dt; vPrev[k * 4 + 1] = vPose[k * 4 + 1] - sin(h) * sp * dt
+            vPrev[k * 4 + 2] = h; vPrev[k * 4 + 3] = vPose[k * 4 + 3]
+            val thr = vInfo[k * 4]
+            if (ns < 16 && abs(thr) > 0.15f) {
+                val back = vSize[k * 2] + (if (thr < 0f) -1.5f else 1.5f)
+                val o = ns * 4
+                splats[o] = vPose[k * 4] - cos(h) * back; splats[o + 1] = vPose[k * 4 + 1] - sin(h) * back
+                splats[o + 2] = vSize[k * 2 + 1] * (if (thr < 0f) 1.1f else 0.6f)
+                splats[o + 3] = abs(thr) * dt * (if (thr < 0f) 1.6f else 0.45f) * (0.5f + 0.15f * sp)
+                ns++
+            }
+        }
+        glUniform4fv(prog.loc("uSplat"), 16, splats, 0); prog.i("uNSplat", ns)
+        prog.i("uNV", nv)
+        if (nv > 0) {
+            glUniform4fv(prog.loc("uV0"), 4, vPose, 0); glUniform4fv(prog.loc("uV0b"), 4, vInfo, 0)
+            glUniform4fv(prog.loc("uV1"), 4, vPrev, 0); glUniform2fv(prog.loc("uVH"), 4, vSize, 0)
+        }
         glDisable(GL_DEPTH_TEST)
         tri.draw()
         glEnable(GL_DEPTH_TEST)

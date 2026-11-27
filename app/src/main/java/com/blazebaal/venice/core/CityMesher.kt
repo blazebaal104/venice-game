@@ -5,7 +5,7 @@ import kotlin.math.*
 
 object Z {
     const val GROUND = 1.1f      // fondamenta / campi height above mean water
-    const val MARSH = 0.32f      // barene
+    const val MARSH = 0.05f      // barene: a carpet of vegetation just above the water (far away; up close: MarshGrass)
     const val WALL_BOTTOM = -1.8f
 }
 
@@ -33,6 +33,10 @@ object Palette {
 }
 
 /** How one building looks: architectural type, rhythm of floors and openings, materials, roof. */
+/** close-up detail / vegetation vertex budgets per tile (memory: 12 floats per vertex) */
+private const val DET_MAX = 380_000
+private const val VEG_MAX = 260_000
+
 private class Style(
     val type: Int,                 // 0 casa popolare, 1 gothic palazzo, 2 renaissance, 3 baroque, 4 19th century
     val groundH: Float, val floorH: Float, val pn: Boolean,
@@ -52,19 +56,26 @@ class CityMesher {
     private val det = MeshBuilder(32768)
     private val occ = ShortArray(TILE_SIZE * TILE_SIZE)
 
-    fun build(t: TileData): TileMeshes {
+    /** Every item is built on its own: if one building, boat or prop fails (bad data, a bug), only that item is
+     *  skipped - never the whole tile (a failed tile used to leave a hole in the city until the app restarted).
+     *  minimal = quays and ground only, the last-resort build for a tile that keeps failing. */
+    fun build(t: TileData, minimal: Boolean = false): TileMeshes {
         gen = genMain
         fac.clear(); genMain.clear(); veg.clear(); det.clear()
-        rasterOccupancy(t)
-        for ((i, b) in t.buildings.withIndex()) building(b, i, t)
+        fun safe(what: String, f: () -> Unit) { try { f() } catch (e: Throwable) { gen = genMain; android.util.Log.w("Venice", "tile ${t.tx},${t.ty}: $what failed", e) } }
+        safe("occupancy") { rasterOccupancy(t) }
+        if (!minimal) for ((i, b) in t.buildings.withIndex()) safe("building $i") { building(b, i, t) }
         fac.style(0f, 0f, 0f, 0f)
-        for (w in t.walls) quay(w)
-        for (w in t.walls) mooredBoats(w, t)
-        // bridges are hand-built models placed by GameRenderer.loadBridges (assets/bridges), nothing generic is meshed here
-        for (p in t.piers) linePier(p)
-        for (p in t.pierPolys) polyPier(p)
-        for (p in t.points) prop(p, t)
-        parkTrees(t)
+        for (w in t.walls) safe("quay") { quay(w) }
+        if (!minimal) {
+            for (w in t.walls) safe("moorings") { mooredBoats(w, t) }
+            // bridges are hand-built models placed by GameRenderer.loadBridges (assets/bridges), nothing generic is meshed here
+            for (p in t.piers) safe("pier") { linePier(p) }
+            for (p in t.pierPolys) safe("pier polygon") { polyPier(p) }
+            for (p in t.points) safe("prop") { prop(p, t) }
+            safe("parks") { parkTrees(t) }
+            safe("courtyards") { courtyardTrees(t) }
+        }
         val hasMarsh = t.marsh?.any { it != 0.toByte() } ?: false
         return TileMeshes(fac.floats(), genMain.floats(), det.floats(), veg.floats(), t.hard != null, hasMarsh)
     }
@@ -120,20 +131,20 @@ class CityMesher {
             1 -> Style(1, 3.7f + r(1) * 0.8f, 3.6f + r(2) * 0.6f, true, if (r(3) < 0.5f) 3 else if (r(3) < 0.8f) 2 else 6,
                 pick(r(4), 0.5f, 0.3f, 0.2f, 0f), 1, 0.9f + r(5) * 0.25f, 2.0f + r(6) * 0.45f,
                 pick(r(7), 0.5f, 0.15f, 0.35f, 0f), if (r(8) < 0.7f) 1 else 2, false,
-                if (r(9) < 0.75f) 0 else 1, 0.38f + r(10) * 0.08f, 0.1f, 0.15f)
+                if (r(9) < 0.75f) 0 else 1, 0.38f + r(10) * 0.08f, 0.1f, 0.28f)
             2 -> Style(2, 3.9f + r(1) * 0.7f, 3.8f + r(2) * 0.6f, true, if (r(3) < 0.7f) 1 else 0,
                 if (r(4) < 0.6f) 0 else 1, 1, 0.95f + r(5) * 0.2f, 2.1f + r(6) * 0.4f,
-                if (r(7) < 0.55f) 3 else 0, 1, r(8) < 0.7f, 0, 0.38f + r(10) * 0.06f, 0.05f, 0.3f)
+                if (r(7) < 0.55f) 3 else 0, 1, r(8) < 0.7f, 0, 0.38f + r(10) * 0.06f, 0.05f, 0.38f)
             3 -> Style(3, 3.9f + r(1) * 0.6f, 3.8f + r(2) * 0.5f, true, if (r(3) < 0.5f) 4 else 5,
                 if (r(4) < 0.5f) 0 else 1, 1, 1.0f + r(5) * 0.2f, 2.1f + r(6) * 0.3f,
-                if (r(7) < 0.5f) 3 else 0, 1, r(8) < 0.5f, 0, 0.36f + r(10) * 0.06f, 0.05f, 0.35f)
+                if (r(7) < 0.5f) 3 else 0, 1, r(8) < 0.5f, 0, 0.36f + r(10) * 0.06f, 0.05f, 0.42f)
             4 -> Style(4, 3.3f + r(1) * 0.6f, 3.1f + r(2) * 0.4f, false, if (r(3) < 0.65f) 0 else 5,
                 pick(r(4), 0.1f, 0.7f, 0.15f, 0.05f), if (r(5) < 0.8f) 1 else 0, 0.85f + r(6) * 0.2f, 1.65f + r(7) * 0.3f,
-                if (r(8) < 0.85f) 0 else 1, if (r(9) < 0.7f) 1 else 2, r(10) < 0.25f, if (r(11) < 0.8f) 0 else 1, 0.36f + r(12) * 0.08f, 0.3f, 0.4f)
+                if (r(8) < 0.85f) 0 else 1, if (r(9) < 0.7f) 1 else 2, r(10) < 0.25f, if (r(11) < 0.8f) 0 else 1, 0.36f + r(12) * 0.08f, 0.3f, 0.45f)
             else -> Style(0, 2.7f + r(1) * 0.7f, 2.75f + r(2) * 0.4f, false, pick(r(3), 0.74f, 0.16f, 0.10f),
                 pick(r(4), 0.12f, 0.55f, 0.25f, 0.08f), pick(r(5), 0.3f, 0.6f, 0.0f, 0.1f), 0.72f + r(6) * 0.3f, 1.3f + r(7) * 0.35f,
                 pick(r(8), 0.55f, 0.35f, 0.10f), if (r(9) < 0.6f) 0 else 2, false,
-                pick(r(10), 0.72f, 0.2f, 0.08f), 0.36f + r(11) * 0.12f, 0.28f, 0.12f)
+                pick(r(10), 0.72f, 0.2f, 0.08f), 0.36f + r(11) * 0.12f, 0.28f, 0.22f)
         }
     }
 
@@ -232,13 +243,14 @@ class CityMesher {
             val ws = w.sum()
             var u = 0f
             val doorAt = if (water) -1 else (rnd(es, 5) * nb).toInt().coerceAtMost(nb - 1)
-            val waterDoorAt = if (water && nb >= 2 && rnd(es, 6) < 0.6f) nb / 2 else -1
+            val waterDoorAt = if (water && nb >= 2 && rnd(es, 6) < 0.8f) nb / 2 else -1
+            val waterDoor2 = if (water && nb >= 6 && rnd(es, 9) < 0.5f) (if (rnd(es, 10) < 0.5f) 1 else nb - 2) else -1
             for (k in 0 until nb) {
                 val bw = len * w[k] / ws
                 val blank = st.type == 0 && !court && rnd(es, 70 + k) < 0.10f
                 val ground = when {
                     court -> 0
-                    k == waterDoorAt -> 3
+                    k == waterDoorAt || k == waterDoor2 -> 3
                     k == doorAt -> 1
                     !water && rnd(es, 80 + k) < st.shopP -> 2
                     rnd(es, 90 + k) < 0.68f -> 0
@@ -246,7 +258,14 @@ class CityMesher {
                 }
                 // single balconies (poggioli): mostly on the first floor
                 var bal = 0
-                if (!court && !blank && rnd(es, 110 + k) < st.balP) bal = if (st.type == 0 && rnd(es, 120 + k) < 0.4f) 2 else 1
+                // (more on canal fronts; palazzi often stack them on the first two piani nobili)
+                if (!court && !blank && rnd(es, 110 + k) < st.balP * (if (water) 1.15f else 1f)) {
+                    val r2 = rnd(es, 120 + k)
+                    bal = when (st.type) {
+                        0 -> if (r2 < 0.55f) 1 else if (r2 < 0.9f) 2 else 3
+                        else -> if (r2 < 0.65f) 1 else if (r2 < 0.85f) 3 else 2
+                    }
+                }
                 bays.add(Bay(u + bw / 2, bw, if (blank) 2 else 0, ground, (rnd(es, 100 + k) * 16).toInt(), bal))
                 u += bw
             }
@@ -280,6 +299,9 @@ class CityMesher {
             fac.v(pax, pay, top + ha, nx, ny, 0f, ua, top + ha, blankBay.c, seed01, Kind.WALL, len)
         }
         if (cls == 1 || court) return
+        // per-tile memory budget for close-up detail: the densest tiles stop adding balconies, shutters, poles
+        // instead of growing one mesh to hundreds of MB (that ran the app out of memory)
+        if (det.count > DET_MAX || veg.count > VEG_MAX) return
         details(b, st, bays, ax, ay, tx, ty, nx, ny, top, water, es, len)
     }
 
@@ -315,6 +337,41 @@ class CityMesher {
         for (bay in bays) {
             if (bay.kind == 2) continue
             // ---- ground floor: paline in front of water doors, awnings over shops
+            if (bay.ground == 1 && !water && rnd(es + bay.jseed, 13) < 0.22f) {
+                // potted shrubs either side of a front door (vegetation mesh: shorter draw distance, dither fade)
+                val saved = gen; gen = veg
+                for (side in intArrayOf(-1, 1)) {
+                    val u = bay.c + side * (min(bay.w, 1.6f) / 2 + 0.3f)
+                    gen.color(0.50f, 0.28f, 0.18f, 0.05f); gen.frustum(wx(u, 0.35f), wy(u, 0.35f), Z.GROUND, 0.2f, 0.26f, 0.5f, 6)
+                    gen.color(0.18f, 0.34f + rnd(es, 14) * 0.08f, 0.13f, 0f)
+                    gen.frustum(wx(u, 0.35f), wy(u, 0.35f), Z.GROUND + 0.5f, 0.32f, 0.12f, 0.9f + rnd(es + bay.jseed, 15) * 0.6f, 7)
+                }
+                gen = saved
+            }
+            if (bay.ground != 3 && st.type == 0 && rnd(es + bay.jseed, 16) < 0.04f) {
+                // ivy climbing the wall from the ground
+                val saved = gen; gen = veg
+                val hgt = 2.5f + rnd(es + bay.jseed, 17) * 4f
+                for (k in 0 until 9) {
+                    val u = bay.c + (rnd(es + k, 18) - 0.5f) * bay.w * 0.9f
+                    val z0 = Z.GROUND + rnd(es + k, 19) * hgt * 0.7f
+                    val sz = 0.5f + rnd(es + k, 20) * 0.7f
+                    gen.color(0.16f + rnd(es + k, 21) * 0.06f, 0.30f + rnd(es + k, 22) * 0.1f, 0.12f, 0.05f)
+                    gen.quad(Vec3(wx(u - sz, 0.06f), wy(u - sz, 0.06f), z0), Vec3(wx(u + sz, 0.06f), wy(u + sz, 0.06f), z0),
+                        Vec3(wx(u + sz * 0.7f, 0.1f), wy(u + sz * 0.7f, 0.1f), z0 + sz * 1.6f), Vec3(wx(u - sz * 0.7f, 0.1f), wy(u - sz * 0.7f, 0.1f), z0 + sz * 1.6f))
+                }
+                gen = saved
+            }
+            if (water && bay.ground != 3) {
+                // more poles on the water: a painted palina in front of palazzi, plain timber mooring poles elsewhere
+                val r1 = rnd(es + bay.jseed, 40)
+                val off = 1.4f + rnd(es + bay.jseed, 41) * 0.6f
+                if (st.type in 1..3 && r1 < 0.28f) palina(wx(bay.c, off), wy(bay.c, off), Palette.PALINA[(rnd(es, 7) * 4).toInt().coerceAtMost(3)])
+                else if (r1 < 0.24f) {
+                    woodPole(wx(bay.c - bay.w * 0.2f, off), wy(bay.c - bay.w * 0.2f, off), es + bay.jseed)
+                    if (rnd(es + bay.jseed, 42) < 0.4f) woodPole(wx(bay.c + bay.w * 0.25f, off + 0.2f), wy(bay.c + bay.w * 0.25f, off + 0.2f), es + bay.jseed + 5)
+                }
+            }
             if (bay.ground == 3) {
                 val cols = Palette.PALINA[(rnd(es, 7) * 4).toInt().coerceAtMost(3)]
                 for (side in intArrayOf(-1, 1)) palina(wx(bay.c + side * (min(bay.w - 0.5f, 2.4f) / 2 + 0.5f), 1.3f), wy(bay.c + side * (min(bay.w - 0.5f, 2.4f) / 2 + 0.5f), 1.3f), cols)
@@ -325,7 +382,7 @@ class CityMesher {
                 val z0 = Z.GROUND + 0.75f; val z1 = Z.GROUND + min(st.groundH - 0.5f, 2.3f)
                 det.color(Palette.IRON)
                 val nbar = max(3, (gw * 2 / 0.14f).toInt())
-                for (k in 0..nbar) { val u = bay.c - gw + 2 * gw * k / nbar; det.box(wx(u, 0.07f), wy(u, 0.07f), (z0 + z1) / 2, 0.012f, 0.012f, (z1 - z0) / 2, rot) }
+                for (k in 0..nbar) { val u = bay.c - gw + 2 * gw * k / nbar; det.bar(wx(u, 0.07f), wy(u, 0.07f), (z0 + z1) / 2, 0.012f, 0.012f, (z1 - z0) / 2, rot) }
                 for (zz in floatArrayOf(z0 + 0.05f, (z0 + z1) / 2, z1 - 0.05f)) det.box(wx(bay.c, 0.07f), wy(bay.c, 0.07f), zz, gw, 0.015f, 0.012f, rot)
             }
             if (bay.ground == 2 && rnd(es + bay.jseed, 3) < 0.45f) {
@@ -419,7 +476,7 @@ class CityMesher {
                     val n = max(3, (hw * 2 / 0.32f).toInt())
                     for (k in 0..n) {
                         val f = -hw + 0.08f + (2 * hw - 0.16f) * k / n; val p = front(f, 0.07f)
-                        det.frustum(p[0], p[1], z, 0.04f, 0.035f, 0.5f, 6, capTop = false)
+                        det.bar(p[0], p[1], z + 0.25f, 0.035f, 0.035f, 0.25f, rot)
                         if (k < n) {
                             val f2 = -hw + 0.08f + (2 * hw - 0.16f) * (k + 0.5f) / n; val q = front(f2, 0.07f)
                             val span = (2 * hw - 0.16f) / n
@@ -441,8 +498,7 @@ class CityMesher {
                     val n = max(3, (hw * 2 / 0.19f).toInt())
                     for (k in 0..n) {
                         val f = -hw + 0.06f + (2 * hw - 0.12f) * k / n; val p = front(f, 0.08f)
-                        det.frustum(p[0], p[1], z, 0.045f, 0.03f, 0.3f, 5, capTop = false)
-                        det.frustum(p[0], p[1], z + 0.3f, 0.03f, 0.045f, 0.3f, 5, capTop = false)
+                        det.bar(p[0], p[1], z + 0.3f, 0.038f, 0.038f, 0.3f, rot + 0.785f)
                     }
                     val p = front(0f, 0.08f); det.box(p[0], p[1], z + 0.66f, hw, 0.08f, 0.05f, rot)
                 }
@@ -450,16 +506,16 @@ class CityMesher {
             for (side in intArrayOf(-1, 1)) det.box(ox + tx * side * (hw - 0.06f), oy + ty * side * (hw - 0.06f), z + 0.33f, 0.07f, d / 2 - 0.02f, 0.33f, rot)
         } else {
             det.color(Palette.IRON)
-            val n = max(4, (hw * 2 / 0.12f).toInt())
+            val n = max(4, (hw * 2 / 0.15f).toInt())
             for (k in 0..n) {
                 val f = -hw + 0.03f + (2 * hw - 0.06f) * k / n
                 if (style == 1) {
                     // bellied railing: each bar bows out over the street
                     val a = front(f, 0.11f); val m = front(f, -0.04f); val t = front(f, 0.06f)
-                    det.box((a[0] + m[0]) / 2, (a[1] + m[1]) / 2, z + 0.25f, 0.009f, 0.009f, 0.26f, rot)
-                    det.box((m[0] + t[0]) / 2, (m[1] + t[1]) / 2, z + 0.73f, 0.009f, 0.009f, 0.25f, rot)
+                    det.bar((a[0] + m[0]) / 2, (a[1] + m[1]) / 2, z + 0.25f, 0.009f, 0.009f, 0.26f, rot)
+                    det.bar((m[0] + t[0]) / 2, (m[1] + t[1]) / 2, z + 0.73f, 0.009f, 0.009f, 0.25f, rot)
                 } else {
-                    val p = front(f, 0.03f); det.box(p[0], p[1], z + 0.48f, 0.009f, 0.009f, 0.48f, rot)
+                    val p = front(f, 0.03f); det.bar(p[0], p[1], z + 0.48f, 0.009f, 0.009f, 0.48f, rot)
                 }
             }
             val bulge = if (style == 1) -0.02f else 0.03f
@@ -507,6 +563,16 @@ class CityMesher {
     }
 
     /** Striped mooring pole (palina) in front of a palazzo's water door. */
+    /** a plain timber mooring pole: weathered wood, green slime band at the waterline, dark top */
+    private fun woodPole(x: Float, y: Float, seed: Int) {
+        val z0 = Z.WALL_BOTTOM; val top = 3.2f + rnd(seed, 1) * 1.4f
+        val r = 0.11f + rnd(seed, 2) * 0.04f
+        det.color(0.16f, 0.19f, 0.11f, 0.35f); det.frustum(x, y, z0, r, r * 0.98f, 0.55f - z0, 7)
+        val w = 0.26f + rnd(seed, 3) * 0.1f
+        det.color(w, w * 0.8f, w * 0.6f, 0.05f); det.frustum(x, y, 0.55f, r * 0.98f, r * 0.85f, top - 0.55f, 7)
+        det.color(0.12f, 0.10f, 0.08f, 0.05f); det.frustum(x, y, top, r * 0.85f, r * 0.4f, 0.12f, 7, capTop = true)
+    }
+
     private fun palina(x: Float, y: Float, col: FloatArray) {
         val z0 = Z.WALL_BOTTOM; val h = 5.2f - Z.WALL_BOTTOM
         val n = 9
@@ -969,6 +1035,35 @@ class CityMesher {
     }
 
     /** Parks: planted on a jittered grid over the grass (dense in the Giardini, tall stone pines at Sant'Elena). */
+    /** Trees in the private courtyards and gardens enclosed by buildings (the holes of building outlines): from the
+     *  canals you see their crowns over the walls, a very Venetian sight. */
+    private fun courtyardTrees(t: TileData) {
+        for ((bi, b) in t.buildings.withIndex()) {
+            if (b.ringSizes.size < 2) continue
+            var start = b.ringSizes[0]
+            for (ri in 1 until b.ringSizes.size) {
+                val n = b.ringSizes[ri]
+                var area = 0f; var cx = 0f; var cy = 0f
+                for (i in 0 until n) {
+                    val ax = b.xy[(start + i) * 2]; val ay = b.xy[(start + i) * 2 + 1]
+                    val bx = b.xy[(start + (i + 1) % n) * 2]; val by = b.xy[(start + (i + 1) % n) * 2 + 1]
+                    area += ax * by - bx * ay; cx += ax; cy += ay
+                }
+                area = abs(area) / 2; cx /= n; cy /= n
+                start += n
+                val s = b.seed * 31 + ri
+                if (area < 35f || rnd(s, 1) < 0.35f) continue
+                if (cx < 1f || cy < 1f || cx > TILE_SIZE - 1f || cy > TILE_SIZE - 1f) continue
+                val wx = t.ox + cx; val wy = t.oy + cy
+                tree(cx, cy, Z.GROUND, treeKind(wx, wy, s), s)
+                if (area > 160f) {
+                    val ang = rnd(s, 2) * 6.28f; val d = sqrt(area) * 0.25f
+                    tree(cx + cos(ang) * d, cy + sin(ang) * d, Z.GROUND, treeKind(wx, wy, s + 7), s + 7)
+                }
+            }
+        }
+    }
+
     private fun parkTrees(t: TileData) {
         val cls = t.cls ?: return
         val cxw = t.ox + 128f; val cyw = t.oy + 128f
@@ -993,6 +1088,7 @@ class CityMesher {
     }
 
     private fun tree(x: Float, y: Float, gz: Float, kind: Int, s: Int) {
+        if (veg.count > VEG_MAX) return
         val saved = gen; gen = veg
         try { treeBody(x, y, gz, kind, s) } finally { gen = saved }
     }
