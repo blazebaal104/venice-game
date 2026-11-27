@@ -500,6 +500,7 @@ class LiveBoats(private val world: WorldMap) {
                 var best: Run? = null; var bd = 300f
                 for (r in runs) {
                     if (liveOf.containsKey(r.s.id) || now < r.dep[0] - 600 || now > r.arr.last() + 1800) continue
+                    schedPos(r, now, tmp2); if (hypot(tmp2[0] - p[0], tmp2[1] - p[1]) > 2000f) continue      // cheap reject first
                     val t = bestTime(r, p[0], p[1], now - 900f, now + 300f, now, bd)
                     if (!t.isNaN()) { schedPos(r, t, tmp2); val d = hypot(tmp2[0] - p[0], tmp2[1] - p[1]); if (d < bd) { bd = d; best = r } }
                 }
@@ -748,7 +749,9 @@ class LiveBoats(private val world: WorldMap) {
             for (c in list) { if (c.wakePick) continue; val dx = c.px - x; val dy = c.py - y; val d = dx * dx + dy * dy; if (d < bd) { bd = d; best = c } }
             val b = best ?: break
             b.wakePick = true
-            pose[n * 4] = b.px; pose[n * 4 + 1] = b.py; pose[n * 4 + 2] = b.h; pose[n * 4 + 3] = b.kind.draft
+            // a gentle displacement, only when actually under way: a soft V like a boat's, no pumping trains of waves
+            pose[n * 4] = b.px; pose[n * 4 + 1] = b.py; pose[n * 4 + 2] = b.h
+            pose[n * 4 + 3] = if (b.speed < 0.6f || b.docked) 0f else b.kind.draft * 0.3f * min(1f, (b.speed - 0.6f) / 3f)
             info[n * 4] = b.cmd.coerceIn(-1f, 1f) * b.rpm; info[n * 4 + 1] = 0f; info[n * 4 + 2] = b.speed; info[n * 4 + 3] = 0f
             size[n * 2] = b.kind.len / 2f; size[n * 2 + 1] = b.kind.beam / 2f
             n++

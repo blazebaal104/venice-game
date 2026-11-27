@@ -589,7 +589,12 @@ void main() {
     vec3 col = mix(body, refl, fres);
     vec3 h = normalize(uSunDir + v);
     float nh = max(dot(n, h), 0.0);
-    float spec = pow(nh, 600.0) * 40.0 + pow(nh, 80.0) * 0.6;
+    // specular anti-aliasing: where the normal changes within a pixel (distance, ripples, the camera turning) the
+    // sun's highlight widens and dims instead of sparkling pixel to pixel
+    vec3 dn = fwidth(n); float nvar = dot(dn, dn);
+    float sk = 1.0 / (1.0 + 900.0 * nvar);
+    float p1 = max(600.0 * sk, 30.0);
+    float spec = pow(nh, p1) * 40.0 * (p1 / 600.0) + pow(nh, max(80.0 * sk, 12.0)) * 0.6 * max(sk, 0.35);
     col += uSunCol * spec * sh * fres * 4.0 * (1.0 - 0.6 * clamp(milkA, 0.0, 1.0));
     float aerT = clamp(milkA * 0.9 + foam * 0.4, 0.0, 1.0);
     // the hollow behind the mound: water drops away and you see deeper into it - darker, glassier

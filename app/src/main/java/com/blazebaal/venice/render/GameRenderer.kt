@@ -317,6 +317,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         Audio.master = Settings.volMaster; Audio.engineVol = Settings.volEngine; Audio.ambienceVol = Settings.volAmbience
         Audio.engineOn = Controls.engineOn; Audio.throttle = Controls.throttle(); Audio.speed = abs(boat.surge)
         Audio.trim = Controls.trim; Audio.airborne = boat.airborne
+        // rising off a wave the prop comes up (load drops), slamming down it bites hard again
+        Audio.propLoad = if (boat.airborne) 0f else (1f - ((boat.vz - 0.25f) * 0.7f).coerceIn(0f, 0.85f)) * (if (boat.vz < -0.8f) 1f else 1f)
         Audio.nearLand = ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f)
         val wx = (Settings.liveWeather && Weather.live) || Weather.override > 0
         Audio.rain = if (wx) Weather.rainIntensity() else 0f
@@ -351,6 +353,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             when (boat.impactKind) {
                 3 -> Events.post("URTO CON IL VAPORETTO", Events.BAD, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 2 -> Events.post("URTO CONTRO IL PONTILE", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
+                4 -> Events.post("URTO CONTRO UNA BRICOLA", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 else -> Events.post("URTO", Events.WARN, "contro la fondamenta · ${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
             }
             Audio.event(Audio.EV_IMPACT, boat.impact)
@@ -722,7 +725,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ba.tex); compP.i("uBloom", 1)
         glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", (if (sc.isHdr) 0.85f else 1.45f) * (1f + flash * 1.6f))
         // sharpen more when the internal resolution is lower
-        compP.f("uSharpen", Settings.sharpen * (1f + (1f - scale) * 1.5f)); compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
+        compP.f("uSharpen", Settings.sharpen * 0.5f * (1f + (1f - scale) * 1.5f));      // gentler: sharpening amplified shimmer compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
         skyTri?.draw()
         glEnable(GL_DEPTH_TEST)
     }

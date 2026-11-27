@@ -170,7 +170,7 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
             for (pp in posts) for (p in HULL) {
                 val wx = x + p[0] * c - p[1] * s; val wy = y + p[0] * s + p[1] * c
                 val dx = wx - pp[0]; val dy = wy - pp[1]; val d = hypot(dx, dy)
-                if (d < 0.75f && d > 1e-4f) { pushX += dx / d * (0.75f - d); pushY += dy / d * (0.75f - d); if (0.75f - d > deepest) { deepest = 0.75f - d; iterKind = 2 } }
+                if (d < 0.75f && d > 1e-4f) { pushX += dx / d * (0.75f - d); pushY += dy / d * (0.75f - d); if (0.75f - d > deepest) { deepest = 0.75f - d; iterKind = 4 } }      // 4: a pole in the water (bricola / palina)
             }
             // oriented boxes: vaporetto pontoons and gangways, then line piers
             for (list in arrayOf(Obstacles.stops, pierBoxes, Obstacles.boats)) for (o in list) {

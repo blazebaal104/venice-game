@@ -126,7 +126,7 @@ class WakeGpu(private val tri: Mesh) {
                 val o = ns * 4
                 splats[o] = vPose[k * 4] - cos(h) * back; splats[o + 1] = vPose[k * 4 + 1] - sin(h) * back
                 splats[o + 2] = vSize[k * 2 + 1] * (if (thr < 0f) 1.1f else 0.6f)
-                splats[o + 3] = abs(thr) * dt * (if (thr < 0f) 3.0f else 0.9f) * (0.5f + 0.15f * sp)
+                splats[o + 3] = abs(thr) * dt * (if (thr < 0f) 1.6f else 0.45f) * (0.5f + 0.15f * sp)
                 ns++
             }
         }

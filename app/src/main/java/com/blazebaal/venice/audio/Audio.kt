@@ -23,6 +23,9 @@ object Audio {
     @Volatile var master = 0.8f; @Volatile var engineVol = 0.8f; @Volatile var ambienceVol = 0.6f
     @Volatile var engineOn = true
     @Volatile var throttle = 0f; @Volatile var speed = 0f; @Volatile var trim = 0f; @Volatile var airborne = false
+    /** how much the prop is biting (1 = fully in the water, 0 = out): bouncing on the trim/waves unloads it, the
+     *  engine flares up, then bogs down as the hull slams back - the "vroom-vrom-vroom" of a porpoising boat */
+    @Volatile var propLoad = 1f
     @Volatile var nearLand = 0f            // 0 open lagoon .. 1 narrow canal (more slap, more echo-ish)
     @Volatile var rain = 0f; @Volatile var wind = 0f
     @Volatile var lx = 0f; @Volatile var ly = 0f; @Volatile var lyaw = 0f   // listener (camera) position + yaw
@@ -108,7 +111,7 @@ object Audio {
         val load = (1f - (spd / 38f).coerceIn(0f, 1f)) * thr               // pushing hard at low speed = load
         val trimFree = 1f + 0.12f * trim                                     // trimmed out revs a little higher
         val targetRpm = if (!engineOn) 0f else (750f + 5100f * (0.55f * thr + 0.45f * (spd / 39f).coerceIn(0f, 1f)) * trimFree - 450f * load * (1f - trim) * 0.5f +
-            (if (airborne) 900f * thr else 0f)).coerceIn(650f, 6300f)
+            (if (airborne) 900f * thr else 0f) + 1300f * thr * (1f - propLoad)).coerceIn(650f, 6300f)
         // spin up slower than down, like a real motor
         val mv = master * engineVol; val amb = master * ambienceVol
         // nearest boats
@@ -135,7 +138,8 @@ object Audio {
 
         for (i in 0 until N) {
             fade += (targetFade - fade) * 0.0005f
-            rpm += (targetRpm - rpm) * (if (targetRpm > rpm) 0.00018f else 0.00012f)
+            // an unloaded prop spins up fast, and the load comes back just as quickly when it bites again
+            rpm += (targetRpm - rpm) * (if (propLoad < 0.9f) 0.0007f else if (targetRpm > rpm) 0.00018f else 0.00035f)
             // ---------------- outboard: V6 4-stroke -> firing frequency = rpm/60 * 3
             var eng = 0f
             if (rpm > 100f) {
