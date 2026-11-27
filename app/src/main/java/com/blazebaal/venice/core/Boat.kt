@@ -41,6 +41,13 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
     var weatherWaves = 1f
     // events for effects
     var bump = 0f; var splash = 0f; var wallHit = 0f
+    /** what the hull touched this step: 0 nothing, 1 quay / land, 2 pier or pontoon, 3 a vaporetto */
+    var contact = 0; private set
+    /** a new impact (m/s into the obstacle) and what it hit; consumed by the renderer for effects and HUD texts */
+    var impact = 0f; var impactKind = 0
+    /** seconds spent scraping along a quay at speed */
+    var scrape = 0f; private set
+    private var impactCooldown = 0f
     var time = 0f
     private val posts = ArrayList<FloatArray>()
     private val pierBoxes = ArrayList<FloatArray>(); private val pierPolys = ArrayList<FloatArray>()
@@ -79,7 +86,7 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         val c = cos(heading); val s = sin(heading)
         x += (surge * c - sway * s) * dt
         y += (surge * s + sway * c) * dt
-        collide(world)
+        collide(world, dt)
 
         // ---- wave amplitude follows how open the water is around the boat (canals calm, lagoon choppy)
         var open = 0f
@@ -120,7 +127,9 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         val pk = ((trim - 0.55f) / 0.45f).coerceIn(0f, 1f) * ((abs(surge) - 15f) / 12f).coerceIn(0f, 1f)
         porpoise += (pk - porpoise) * min(1f, dt * 2f)
         porpPhase += dt * 2f * PI.toFloat() * 1.5f
-        val pTorque = (fb - fs) * 0.11f + (if (!airborne) hump * 9f + (0.6f * trim + 0.15f) * planing * 0.9f - pitch * 6f + sin(porpPhase) * porpoise * 7f else -0.6f) - pitchRate * (if (airborne) 0.4f else 3.2f)
+        // porpoising is a real bounce: the bow is thrown up and slams back down, the whole hull heaving with it
+        if (!airborne && porpoise > 0.05f) vz += sin(porpPhase + 0.7f) * porpoise * 5.5f * dt
+        val pTorque = (fb - fs) * 0.11f + (if (!airborne) hump * 9f + (0.6f * trim + 0.15f) * planing * 0.9f - pitch * 6f + sin(porpPhase) * porpoise * 16f else -0.6f) - pitchRate * (if (airborne) 0.4f else 3.2f)
         pitchRate += pTorque * dt; pitch = (pitch + pitchRate * dt).coerceIn(-0.35f, 0.45f)
         val rTorque = (fp - fst) * 0.16f + (yawRate * surge * 0.05f).coerceIn(-0.2f, 0.2f) * 6f - roll * 5f - rollRate * (if (airborne) 0.4f else 3.5f)
         rollRate += rTorque * dt; roll = (roll + rollRate * dt).coerceIn(-0.4f, 0.4f)
@@ -129,10 +138,14 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
         bump *= exp(-dt * 4f); splash *= exp(-dt * 6f); wallHit *= exp(-dt * 6f)
     }
 
-    private fun collide(world: WorldMap) {
+    private fun collide(world: WorldMap, dt: Float) {
         val c = cos(heading); val s = sin(heading)
-        var hit = 0f
+        var hit = 0f; var kind = 0; var touching = 0
+        impactCooldown -= dt
+        world.posts(x, y, 8f, posts)
+        world.piers(x, y, pierBoxes, pierPolys)
         for (iter in 0 until 6) {
+            var iterKind = 0
             var pushX = 0f; var pushY = 0f; var deepest = 0f
             for (p in HULL) {
                 val wx = x + p[0] * c - p[1] * s; val wy = y + p[0] * s + p[1] * c
@@ -143,18 +156,17 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
                     val l = hypot(gx, gy).coerceAtLeast(1e-4f)
                     val depth = (sol - 0.5f) * 1.2f + 0.05f
                     pushX += gx / l * depth; pushY += gy / l * depth
-                    deepest = max(deepest, depth)
+                    if (depth > deepest) { deepest = depth; iterKind = 1 }
                 }
             }
-            world.posts(x, y, 8f, posts)
             for (pp in posts) for (p in HULL) {
                 val wx = x + p[0] * c - p[1] * s; val wy = y + p[0] * s + p[1] * c
                 val dx = wx - pp[0]; val dy = wy - pp[1]; val d = hypot(dx, dy)
-                if (d < 0.75f && d > 1e-4f) { pushX += dx / d * (0.75f - d); pushY += dy / d * (0.75f - d); deepest = max(deepest, 0.75f - d) }
+                if (d < 0.75f && d > 1e-4f) { pushX += dx / d * (0.75f - d); pushY += dy / d * (0.75f - d); if (0.75f - d > deepest) { deepest = 0.75f - d; iterKind = 2 } }
             }
             // oriented boxes: vaporetto pontoons and gangways, then line piers
-            world.piers(x, y, pierBoxes, pierPolys)
             for (list in arrayOf(Obstacles.stops, pierBoxes, Obstacles.boats)) for (o in list) {
+                val lk = if (list === Obstacles.boats) 3 else 2
                 // oriented box: x, y, rotation, half length, half width
                 if (abs(o[0] - x) > o[3] + 9f || abs(o[1] - y) > o[3] + 9f) continue
                 val oc = cos(o[2]); val os = sin(o[2])
@@ -164,8 +176,8 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
                     val lx = dx * oc + dy * os; val ly = -dx * os + dy * oc
                     val px = o[3] - abs(lx); val py = o[4] - abs(ly)
                     if (px <= 0f || py <= 0f) continue
-                    if (px < py) { val sgn = if (lx >= 0) 1f else -1f; pushX += oc * sgn * px; pushY += os * sgn * px; deepest = max(deepest, px) }
-                    else { val sgn = if (ly >= 0) 1f else -1f; pushX += -os * sgn * py; pushY += oc * sgn * py; deepest = max(deepest, py) }
+                    if (px < py) { val sgn = if (lx >= 0) 1f else -1f; pushX += oc * sgn * px; pushY += os * sgn * px; if (px > deepest) { deepest = px; iterKind = lk } }
+                    else { val sgn = if (ly >= 0) 1f else -1f; pushX += -os * sgn * py; pushY += oc * sgn * py; if (py > deepest) { deepest = py; iterKind = lk } }
                 }
             }
             // wooden docks drawn as areas: hull points inside the outline are pushed out through the nearest edge
@@ -189,10 +201,11 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
                         if (d < best) { best = d; bnx = qx; bny = qy }
                         j = i
                     }
-                    if (best < 1e9f && best > 1e-5f) { pushX += bnx / best * (best + 0.05f); pushY += bny / best * (best + 0.05f); deepest = max(deepest, best + 0.05f) }
+                    if (best < 1e9f && best > 1e-5f) { pushX += bnx / best * (best + 0.05f); pushY += bny / best * (best + 0.05f); if (best + 0.05f > deepest) { deepest = best + 0.05f; iterKind = 2 } }
                 }
             }
             if (deepest <= 0f) break
+            touching = 1; if (kind == 0) kind = iterKind
             val pl = hypot(pushX, pushY).coerceAtLeast(1e-4f)
             val nx = pushX / pl; val ny = pushY / pl
             x += nx * min(deepest, 0.5f); y += ny * min(deepest, 0.5f)
@@ -205,6 +218,13 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
                 yawRate += (nx * s - ny * c) * vn * 0.08f
             }
         }
-        if (hit > 0f) { bump = max(bump, hit); wallHit = max(wallHit, hit) }
+        contact = if (touching > 0) kind else 0
+        // only a real, new impact throws spray and counts as a hit: resting against a pontoon or brushing a moving
+        // vaporetto used to re-trigger the impact spray every frame (thousands of sprites behind the motor)
+        if (hit > 1.8f && impactCooldown <= 0f) {
+            bump = max(bump, hit); wallHit = max(wallHit, hit); impact = hit; impactKind = kind; impactCooldown = 0.6f
+        } else if (hit > 0f) bump = max(bump, min(hit, 1.2f))
+        // scraping along a quay at speed (sliding contact, no big impact)
+        scrape = if (contact == 1 && abs(surge) > 3f && hit < 1.8f) scrape + dt else max(0f, scrape - dt * 2f)
     }
 }

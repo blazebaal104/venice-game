@@ -9,6 +9,7 @@ object Shaders {
 uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec3 uSkyAmb; uniform vec3 uGroundAmb; uniform vec3 uFogCol; uniform vec3 uSkyZenith;
 uniform float uFogDens; uniform vec3 uCam; uniform float uTime;
 uniform float uFogStart; uniform float uFogEnd;     // render distance: fog is total at uFogEnd, where chunks unload
+uniform float uWet;                                  // 0 dry .. 1 soaked: rain darkens stone, plaster and wood
 uniform highp sampler2DShadow uShadow; uniform mat4 uLightVP; uniform float uShadowOn;
 uniform highp sampler2DShadow uShadowB; uniform mat4 uLightVPB;      // boat-only shadow, re-rendered every frame
 uniform float uClipZ;
@@ -80,6 +81,7 @@ vec3 light(vec3 alb, vec3 n, vec3 wpos, float rough, float ao, float f0) {
     return diff + spec + env * Fa * (1.0 - rough) * ao * 0.9;
 }
 vec3 fog(vec3 c, vec3 wpos) {
+    c *= 1.0 - 0.22 * uWet * step(0.05, wpos.z);
     float d = length(wpos - uCam);
     float f = 1.0 - exp(-pow(d * uFogDens, 1.4));
     f = max(f, (1.0 - exp(-d * 0.00035)) * 0.35);   // light lagoon haze

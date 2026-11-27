@@ -26,11 +26,29 @@ class HudView(ctx: Context) : View(ctx) {
     private var camLx = 0f; private var camLy = 0f
     private var lastLeverTap = 0L; private var lastNeutral = true
     private var placeName = ""; private var placeAt = 0L
+    // trim buttons: tap = 1 step, hold = repeats, slowly at first and then faster
+    private var trimId = -1; private var trimDir = 0; private var trimHoldStart = 0L; private var trimAcc = 0f
 
     init {
         MapLayer.load(ctx) { postInvalidate() }
-        val tick = object : Runnable { override fun run() { if (Controls.screen == Screen.NONE || Controls.screen == Screen.PAUSE) invalidate(); postDelayed(this, 33) } }
+        val tick = object : Runnable { override fun run() {
+            if (trimDir != 0) holdTrim()
+            if (Controls.screen == Screen.NONE || Controls.screen == Screen.PAUSE) invalidate()
+            postDelayed(this, 33)
+        } }
         post(tick)
+    }
+
+    private fun stepTrim(d: Int) {
+        val v = (Controls.trimPct + d).coerceIn(0, 100)
+        if (v != Controls.trimPct) { Controls.trimPct = v; if (v % 5 == 0 || v == 0 || v == 100) haptic() }
+    }
+    private fun holdTrim() {
+        val held = (System.currentTimeMillis() - trimHoldStart) / 1000f
+        if (held < 0.35f) return
+        val rate = min(60f, 6f + (held - 0.35f) * 40f)      // steps per second
+        trimAcc += rate * 0.033f
+        while (trimAcc >= 1f) { trimAcc -= 1f; stepTrim(trimDir) }
     }
 
     private fun haptic() { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
@@ -73,8 +91,8 @@ class HudView(ctx: Context) : View(ctx) {
                     hit(pauseBtn(), x, y) -> { Controls.screen = Screen.PAUSE; haptic() }
                     hit(camBtn(), x, y) -> { Controls.cameraMode = (Controls.cameraMode + 1) % 3; haptic() }
                     hit(engineBtn(), x, y) -> { Controls.engineOn = !Controls.engineOn; if (!Controls.engineOn) Controls.lever = 0f; haptic() }
-                    hit(trimUp(), x, y) -> { Controls.trim = (Controls.trim + 0.1f).coerceAtMost(1f); haptic() }
-                    hit(trimDown(), x, y) -> { Controls.trim = (Controls.trim - 0.1f).coerceAtLeast(-1f); haptic() }
+                    hit(trimUp(), x, y) -> { trimId = id; trimDir = 1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(1); haptic() }
+                    hit(trimDown(), x, y) -> { trimId = id; trimDir = -1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(-1); haptic() }
                     camId < 0 -> { camId = id; camLx = x; camLy = y }
                 }
                 invalidate()
@@ -126,6 +144,7 @@ class HudView(ctx: Context) : View(ctx) {
         if (id == leverId || id == -2) leverId = -1
         if (id == camId || id == -2) camId = -1
         if (id == padId || id == -2) { padId = -1; Controls.steerAnalog = Float.NaN }
+        if (id == trimId || id == -2) { trimId = -1; trimDir = 0 }
     }
 
     // ---------------------------------------------------------------- drawing
@@ -139,7 +158,8 @@ class HudView(ctx: Context) : View(ctx) {
         drawTopRight()
         drawRightColumn()
         if (Settings.analogSteering) drawPad() else drawArrows()
-        if (GameState.porpoising > 0.3f) chip("ASSETTO TROPPO ALTO · ABBASSA IL TRIM", width / 2f, margin + 74 * s, Theme.RED)
+        if (GameState.hasWaypoint()) drawWaypointArrow()
+        drawEvents()
         if (Settings.showFps) ink.label("${GameState.fps.roundToInt()} FPS · ${(GameState.renderScale * 100).roundToInt()}% · ${GameState.tilesLoaded} chunk", margin + 2 * s, margin + 118 * s, 10f, Theme.TEXT_DIM, face = Theme.condensed)
         if (GameState.loading) drawLoading()
         ink.dp = base
@@ -202,7 +222,10 @@ class HudView(ctx: Context) : View(ctx) {
         val pxPerM = r.width() / across
         val rot = if (Settings.minimapNorthUp) 0f else Math.toDegrees(GameState.heading.toDouble()).toFloat() - 90f
         c.translate(cx, cy)
-        MapLayer.draw(ink, GameState.x, GameState.y, pxPerM, rot, false)
+        // sharp: decode the full-resolution map around the boat (the half-resolution copy looked blurry)
+        val halfM = across * 0.75f
+        MapLayer.requestRegion(Rect(MapLayer.px(GameState.x - halfM).toInt(), MapLayer.py(GameState.y + halfM).toInt(), MapLayer.px(GameState.x + halfM).toInt(), MapLayer.py(GameState.y - halfM).toInt())) { postInvalidate() }
+        MapLayer.draw(ink, GameState.x, GameState.y, pxPerM, rot, true)
         // live vaporetti on the minimap
         if (Settings.liveVaporetti) for (v in com.blazebaal.venice.render.LiveBoats.markers) {
             val q = MapLayer.toScreen(v.x, v.y, GameState.x, GameState.y, pxPerM, rot)
@@ -260,22 +283,52 @@ class HudView(ctx: Context) : View(ctx) {
         for ((p, ic) in listOf(pauseBtn() to "pause", camBtn() to "camera")) { ink.glassCircle(p.x, p.y, 22 * s); ink.icon(ic, p.x, p.y) }
         val r = RectF(width - margin - 150 * s, margin + 54 * s, width - margin, margin + 100 * s)
         ink.glass(r, 14 * s)
-        if (GameState.hasWaypoint()) {
-            // arrow towards the waypoint, relative to the boat's heading
-            val bearing = atan2(GameState.wpY - GameState.y, GameState.wpX - GameState.x)
-            val rel = Math.toDegrees((GameState.heading - bearing).toDouble()).toFloat()
-            val ax = r.left + 22 * s; val ay = r.centerY()
-            val sv = c.save(); c.translate(ax, ay); c.rotate(rel)
-            ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW
-            ink.path.reset(); ink.path.moveTo(0f, -10 * s); ink.path.lineTo(7 * s, 8 * s); ink.path.lineTo(0f, 4 * s); ink.path.lineTo(-7 * s, 8 * s); ink.path.close(); c.drawPath(ink.path, ink.fill)
-            c.restoreToCount(sv)
-            val name = GameState.wpName.ifEmpty { "WAYPOINT" }.uppercase()
-            ink.label(if (name.length > 18) name.take(17) + "…" else name, r.left + 40 * s, r.top + 17 * s, 9.5f, Theme.YELLOW, spacing = 0.08f)
-            ink.label(dist(GameState.waypointDistance()), r.left + 40 * s, r.top + 38 * s, 18f, Theme.TEXT, face = Theme.black)
-        } else {
-            ink.label("DISTANZA", r.left + 14 * s, r.top + 17 * s, 9.5f, Theme.TEXT_DIM, spacing = 0.12f)
-            ink.label(dist(GameState.distanceM), r.left + 14 * s, r.top + 38 * s, 18f, Theme.TEXT, face = Theme.black)
-            ink.icon("water", r.right - 22 * s, r.centerY(), Theme.TEXT_FAINT, 0.9f)
+        ink.label("DISTANZA", r.left + 14 * s, r.top + 17 * s, 9.5f, Theme.TEXT_DIM, spacing = 0.12f)
+        ink.label(dist(GameState.distanceM), r.left + 14 * s, r.top + 38 * s, 18f, Theme.TEXT, face = Theme.black)
+        ink.icon("water", r.right - 22 * s, r.centerY(), Theme.TEXT_FAINT, 0.9f)
+    }
+
+    /** Floating arrow under the top-centre pill pointing where to steer for the waypoint (relative to the boat). */
+    private var arrowRot = Float.NaN
+    private fun drawWaypointArrow() {
+        val bearing = atan2(GameState.wpY - GameState.y, GameState.wpX - GameState.x)
+        var rel = Math.toDegrees((GameState.heading - bearing).toDouble()).toFloat()
+        while (rel > 180f) rel -= 360f; while (rel < -180f) rel += 360f
+        // smooth the rotation so it doesn't twitch with every wave
+        if (arrowRot.isNaN()) arrowRot = rel
+        var d = rel - arrowRot; while (d > 180f) d -= 360f; while (d < -180f) d += 360f
+        arrowRot += d * 0.25f
+        val cx = width / 2f; val cy = margin + 92 * s
+        val bob = sin(System.nanoTime() / 4e8).toFloat() * 2 * s
+        val sv = c.save(); c.translate(cx, cy + bob); c.rotate(arrowRot)
+        ink.fill.style = Paint.Style.FILL
+        // soft shadow, then the arrow
+        ink.fill.color = Color.argb(90, 0, 0, 0)
+        ink.path.reset(); ink.path.moveTo(1.5f * s, -20 * s); ink.path.lineTo(17.5f * s, 15 * s); ink.path.lineTo(1.5f * s, 7 * s); ink.path.lineTo(-14.5f * s, 15 * s); ink.path.close(); c.drawPath(ink.path, ink.fill)
+        ink.fill.color = Theme.YELLOW
+        ink.path.reset(); ink.path.moveTo(0f, -22 * s); ink.path.lineTo(16 * s, 13 * s); ink.path.lineTo(0f, 5 * s); ink.path.lineTo(-16 * s, 13 * s); ink.path.close(); c.drawPath(ink.path, ink.fill)
+        ink.stroke.color = Theme.INK; ink.stroke.strokeWidth = 1.5f * s; c.drawPath(ink.path, ink.stroke)
+        c.restoreToCount(sv)
+        ink.text.setShadowLayer(3 * s, 0f, 1 * s, Color.BLACK)
+        ink.label(dist(GameState.waypointDistance()), cx, cy + 34 * s, 11f, Theme.TEXT, Paint.Align.CENTER)
+        ink.text.clearShadowLayer()
+    }
+
+    /** Event texts: big coloured words that fade + slide in, hold, and fade out. No boxes. */
+    private fun drawEvents() {
+        val ev = Events.live(); if (ev.isEmpty()) return
+        val now = System.currentTimeMillis()
+        var y = height * 0.34f
+        for (e in ev.reversed()) {
+            val t = (now - e.t0).toFloat()
+            val a = when { t < 180f -> t / 180f; t > Events.LIFE_MS - 450f -> ((Events.LIFE_MS - t) / 450f).coerceAtLeast(0f); else -> 1f }
+            val slide = (1f - min(1f, t / 220f)) * 14 * s
+            val alpha = (a * 255).toInt()
+            ink.text.setShadowLayer(6 * s, 0f, 2 * s, Color.argb((a * 200).toInt(), 0, 0, 0))
+            ink.label(e.text, width / 2f, y + slide, 26f, Color.argb(alpha, Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.04f)
+            if (e.sub.isNotEmpty()) ink.label(e.sub, width / 2f, y + slide + 18 * s, 11f, Color.argb((alpha * 0.85f).toInt(), 255, 255, 255), Paint.Align.CENTER, spacing = 0.1f)
+            ink.text.clearShadowLayer()
+            y -= (if (e.sub.isNotEmpty()) 52 else 38) * s
         }
     }
 
@@ -288,25 +341,16 @@ class HudView(ctx: Context) : View(ctx) {
         val up = trimUp(); val dn = trimDown()
         ink.glassCircle(up.x, up.y, 20 * s); ink.icon("plus", up.x, up.y)
         ink.glassCircle(dn.x, dn.y, 20 * s); ink.icon("minus", dn.x, dn.y)
-        val gTop = up.y + 28 * s; val gBot = dn.y - 28 * s
-        if (gBot - gTop > 40 * s) {
-            val gr = RectF(e.x - 16 * s, gTop, e.x + 16 * s, gBot)
-            ink.glass(gr, 10 * s)
-            val tr = Controls.trim
-            val mid = gr.centerY(); val half = gr.height() / 2 - 10 * s
-            // sweet spot band (best top speed)
-            val opt = mid - 0.3f * half
-            ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(70, 46, 196, 182)
-            c.drawRoundRect(gr.left + 5 * s, opt - 7 * s, gr.right - 5 * s, opt + 7 * s, 4 * s, 4 * s, ink.fill)
-            ink.stroke.color = Theme.TEXT_FAINT; ink.stroke.strokeWidth = 1 * s
-            c.drawLine(gr.left + 7 * s, mid, gr.right - 7 * s, mid, ink.stroke)
-            val y = mid - tr * half
-            ink.fill.color = if (tr > 0.55f) Theme.RED else Theme.YELLOW
-            c.drawRoundRect(gr.left + 4 * s, y - 3 * s, gr.right - 4 * s, y + 3 * s, 3 * s, 3 * s, ink.fill)
-        }
-        ink.label("TRIM", e.x, dn.y + 34 * s, 9f, Theme.TEXT_DIM, Paint.Align.CENTER, spacing = 0.12f)
-        val tv = (Controls.trim * 100).roundToInt()
-        ink.label(if (tv > 0) "+$tv" else "$tv", e.x, dn.y + 46 * s, 11f, Theme.TEXT, Paint.Align.CENTER)
+        // value between the buttons + a small bar: green band = best top speed, red = porpoising
+        val mid = (up.y + dn.y) / 2
+        val tp = Controls.trimPct
+        ink.label("TRIM", e.x, mid - 12 * s, 8.5f, Theme.TEXT_DIM, Paint.Align.CENTER, spacing = 0.12f)
+        ink.label("$tp", e.x, mid + 8 * s, 17f, if (tp >= 78) Theme.RED else Theme.TEXT, Paint.Align.CENTER, Theme.black)
+        val bar = RectF(e.x - 17 * s, mid + 15 * s, e.x + 17 * s, mid + 19 * s)
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(60, 255, 255, 255); c.drawRoundRect(bar, 2 * s, 2 * s, ink.fill)
+        ink.fill.color = Color.argb(150, 46, 196, 182); c.drawRect(bar.left + bar.width() * 0.58f, bar.top, bar.left + bar.width() * 0.74f, bar.bottom, ink.fill)
+        ink.fill.color = Color.argb(150, 255, 90, 78); c.drawRect(bar.left + bar.width() * 0.78f, bar.top, bar.right, bar.bottom, ink.fill)
+        ink.fill.color = Theme.TEXT; val kx = bar.left + bar.width() * tp / 100f; c.drawRect(kx - 1.5f * s, bar.top - 3 * s, kx + 1.5f * s, bar.bottom + 3 * s, ink.fill)
 
         // throttle lever
         val r = leverRect()

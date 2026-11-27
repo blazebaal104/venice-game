@@ -22,7 +22,19 @@ Turn it off in *Impostazioni → Meteo e mondo*. Without a connection the game u
 **Next:** rain/snow particles and wet surfaces (`isRain()`), gust bursts on the water, sun position + night lighting
 from the real clock (`is_day`, sunrise/sunset), *acqua alta* from the tide gauge (Comune di Venezia, Punta della Salute).
 
-## 2. Vaporetti — v1 done (live positions)
+## 2. Vaporetti — v2 (27 Nov)
+
+* Real types at real size: motobattello 23.9 x 4.2 m, motoscafo 21.1 x 3.75 m (lines 3, 4.x, 5.x, 6),
+  motonave/foraneo 31 x 5.5 m (lines 11-19) - `tools/procedural/vaporetti.py`.
+* Motion: every fix becomes a destination; `core/Navigator` plans a water path (canals, clearance from the quays),
+  the boat sails it at the speed that gets it there by the next fix, accelerating, braking and turning at a
+  realistic rate. Fixes slightly behind the boat (GPS jitter) don't make it reverse. A stopped boat docks on the
+  water side of its pontoon (a second boat queues behind). Overlaps (bad data only) ease apart.
+* Offline: the timetable (stop patterns + departures from the cached GTFS) drives the same boats; built-in lines
+  1 and 2 if the timetable was never downloaded.
+* Sound: diesel throb, docking churn + thump + gangway clank, departure rev (`audio/Audio.kt`).
+
+## 2a. Vaporetti — v1 (live positions)
 
 Implemented in `live/Vaporetti.kt` + `render/LiveBoats.kt`, straight from **ACTV's own open data** (the same source
 miniVenice uses; miniVenice's terms don't allow other apps to use its real-time service, so we never touch it):

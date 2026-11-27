@@ -306,7 +306,7 @@ class CityMesher {
                 for (fl in 1..4) if ((mask shr (fl - 1)) and 1 == 1) {
                     val (fs, fh) = floorOf(st, fl)
                     if (fs + fh > relTop) continue
-                    balcony(wx((u0 + u1) / 2, 0f), wy((u0 + u1) / 2, 0f), rot, nx, ny, (u1 - u0) / 2 + 0.25f, Z.GROUND + fs + 0.5f, true, st.type == 1)
+                    balcony(wx((u0 + u1) / 2, 0f), wy((u0 + u1) / 2, 0f), rot, nx, ny, (u1 - u0) / 2 + 0.25f, Z.GROUND + fs + 0.5f, true, st.type == 1, es + fl * 31)
                 }
                 g0 = -1
             }
@@ -318,6 +318,15 @@ class CityMesher {
             if (bay.ground == 3) {
                 val cols = Palette.PALINA[(rnd(es, 7) * 4).toInt().coerceAtMost(3)]
                 for (side in intArrayOf(-1, 1)) palina(wx(bay.c + side * (min(bay.w - 0.5f, 2.4f) / 2 + 0.5f), 1.3f), wy(bay.c + side * (min(bay.w - 0.5f, 2.4f) / 2 + 0.5f), 1.3f), cols)
+            }
+            if (bay.ground == 0 && !water && st.type != 1 && rnd(es + bay.jseed, 5) < 0.5f) {
+                // iron grate (inferriata) over a ground-floor window
+                val gw = min(st.winW, bay.w - 0.5f) / 2 + 0.06f
+                val z0 = Z.GROUND + 0.75f; val z1 = Z.GROUND + min(st.groundH - 0.5f, 2.3f)
+                det.color(Palette.IRON)
+                val nbar = max(3, (gw * 2 / 0.14f).toInt())
+                for (k in 0..nbar) { val u = bay.c - gw + 2 * gw * k / nbar; det.box(wx(u, 0.07f), wy(u, 0.07f), (z0 + z1) / 2, 0.012f, 0.012f, (z1 - z0) / 2, rot) }
+                for (zz in floatArrayOf(z0 + 0.05f, (z0 + z1) / 2, z1 - 0.05f)) det.box(wx(bay.c, 0.07f), wy(bay.c, 0.07f), zz, gw, 0.015f, 0.012f, rot)
             }
             if (bay.ground == 2 && rnd(es + bay.jseed, 3) < 0.45f) {
                 val col = Palette.AWNING[(rnd(es + bay.jseed, 4) * 4).toInt().coerceAtMost(3)]
@@ -340,7 +349,9 @@ class CityMesher {
                 val jit = ((bay.jseed * 7 + fl * 13) % 17) / 16f - 0.5f
                 val xoff = if (st.pn || st.mat == 3) 0f else jit * max(0f, bay.w - ow - 0.6f) * 0.35f
                 val cu = bay.c + xoff
-                if (balHere) balcony(wx(cu, 0f), wy(cu, 0f), rot, nx, ny, ow / 2 + 0.28f, Z.GROUND + fs - 0.02f, st.type in 1..3, false)
+                if (balHere) balcony(wx(cu, 0f), wy(cu, 0f), rot, nx, ny, ow / 2 + 0.28f, Z.GROUND + fs - 0.02f, st.type in 1..3, false, es + bay.jseed * 17 + fl)
+                // washing hung out on a line along the facade (ordinary houses, never on palazzi or over a balcony)
+                if (!balHere && st.type == 0 && fl <= 3 && rnd(es + bay.jseed, 60 + fl) < 0.06f) laundry(::wx, ::wy, rot, cu, Z.GROUND + fs + sill - 0.25f, es + bay.jseed * 3 + fl)
                 val rectish = st.winType == 0 || st.winType >= 4 || (st.type == 0 && st.winType == 1)
                 if (st.shutter != 0 && rectish && (bay.jseed * 5 + fl * 11) % 7 >= 2) {
                     val col = Palette.SHUTTER[st.shutter]
@@ -381,41 +392,117 @@ class CityMesher {
         }
     }
 
-    private fun balcony(cx: Float, cy: Float, rot: Float, nx: Float, ny: Float, hw: Float, z: Float, stone: Boolean, gothic: Boolean) {
-        val d = if (stone) 0.55f else 0.42f
+    /** Balcony on brackets. Stone: balusters, a gothic arcade of little columns, or a solid carved parapet.
+     *  Iron (poggiolo): straight bars, the bellied Venetian "pancia", or bars with a crossed band. Some carry plants. */
+    private fun balcony(cx: Float, cy: Float, rot: Float, nx: Float, ny: Float, hw: Float, z: Float, stone: Boolean, gothic: Boolean, seed: Int) {
+        val style = (rnd(seed, 1) * 3).toInt().coerceAtMost(2)
+        val d = if (stone) 0.55f else 0.42f + (if (!stone && style == 1) 0.08f else 0f)
         val ox = cx + nx * d / 2; val oy = cy + ny * d / 2
-        if (stone) det.color(Palette.ISTRIAN) else det.color(Palette.ISTRIAN)
-        det.box(ox, oy, z - 0.07f, hw, d / 2, 0.08f, rot)
-        // brackets (mensole)
         val tx = -ny; val ty = nx
+        det.color(Palette.ISTRIAN)
+        det.box(ox, oy, z - 0.07f, hw, d / 2, 0.08f, rot)
+        // moulded edge under the slab
+        det.box(ox + nx * 0.02f, oy + ny * 0.02f, z - 0.18f, hw - 0.04f, d / 2 - 0.04f, 0.04f, rot)
+        // brackets (mensole)
         val nb = max(2, (hw * 2 / 0.9f).toInt())
         for (k in 0..nb) {
             val f = -hw + 0.12f + (2 * hw - 0.24f) * k / nb
-            det.box(cx + tx * f + nx * d * 0.35f, cy + ty * f + ny * d * 0.35f, z - 0.25f, 0.07f, d * 0.35f, 0.11f, rot)
+            det.box(cx + tx * f + nx * d * 0.35f, cy + ty * f + ny * d * 0.35f, z - 0.3f, 0.07f, d * 0.35f, 0.12f, rot)
+            det.box(cx + tx * f + nx * d * 0.15f, cy + ty * f + ny * d * 0.15f, z - 0.45f, 0.06f, d * 0.15f, 0.07f, rot)
         }
+        fun front(f: Float, out: Float) = floatArrayOf(ox + tx * f + nx * (d / 2 - out), oy + ty * f + ny * (d / 2 - out))
         if (stone) {
-            // balustrade: stone balusters under a rail (gothic: little columns and arches read the same at this scale)
-            val n = max(3, (hw * 2 / 0.19f).toInt())
-            for (k in 0..n) {
-                val f = -hw + 0.06f + (2 * hw - 0.12f) * k / n
-                val bx = ox + tx * f + nx * (d / 2 - 0.08f); val by = oy + ty * f + ny * (d / 2 - 0.08f)
-                det.frustum(bx, by, z, 0.045f, 0.03f, 0.3f, 5, capTop = false)
-                det.frustum(bx, by, z + 0.3f, 0.03f, if (gothic) 0.03f else 0.045f, 0.3f, 5, capTop = false)
+            val g = gothic || style == 1
+            when {
+                g -> {
+                    // gothic arcade: slender columns, pointed arches between them, a rail on top
+                    val n = max(3, (hw * 2 / 0.32f).toInt())
+                    for (k in 0..n) {
+                        val f = -hw + 0.08f + (2 * hw - 0.16f) * k / n; val p = front(f, 0.07f)
+                        det.frustum(p[0], p[1], z, 0.04f, 0.035f, 0.5f, 6, capTop = false)
+                        if (k < n) {
+                            val f2 = -hw + 0.08f + (2 * hw - 0.16f) * (k + 0.5f) / n; val q = front(f2, 0.07f)
+                            val span = (2 * hw - 0.16f) / n
+                            det.box(q[0], q[1], z + 0.56f, span * 0.28f, 0.05f, 0.025f, rot + 0.5f)
+                            det.box(q[0], q[1], z + 0.56f, span * 0.28f, 0.05f, 0.025f, rot - 0.5f)
+                        }
+                    }
+                    val p = front(0f, 0.07f); det.box(p[0], p[1], z + 0.66f, hw, 0.08f, 0.05f, rot)
+                }
+                style == 2 -> {
+                    // solid parapet with a carved, recessed panel
+                    val p = front(0f, 0.08f); det.box(p[0], p[1], z + 0.35f, hw, 0.08f, 0.35f, rot)
+                    det.color(Palette.ISTRIAN[0] * 0.85f, Palette.ISTRIAN[1] * 0.84f, Palette.ISTRIAN[2] * 0.8f, 0.1f)
+                    val q = front(0f, -0.005f); det.box(q[0], q[1], z + 0.35f, hw - 0.18f, 0.01f, 0.2f, rot)
+                    det.color(Palette.ISTRIAN)
+                    val r = front(0f, 0.08f); det.box(r[0], r[1], z + 0.72f, hw + 0.02f, 0.1f, 0.04f, rot)
+                }
+                else -> {
+                    val n = max(3, (hw * 2 / 0.19f).toInt())
+                    for (k in 0..n) {
+                        val f = -hw + 0.06f + (2 * hw - 0.12f) * k / n; val p = front(f, 0.08f)
+                        det.frustum(p[0], p[1], z, 0.045f, 0.03f, 0.3f, 5, capTop = false)
+                        det.frustum(p[0], p[1], z + 0.3f, 0.03f, 0.045f, 0.3f, 5, capTop = false)
+                    }
+                    val p = front(0f, 0.08f); det.box(p[0], p[1], z + 0.66f, hw, 0.08f, 0.05f, rot)
+                }
             }
             for (side in intArrayOf(-1, 1)) det.box(ox + tx * side * (hw - 0.06f), oy + ty * side * (hw - 0.06f), z + 0.33f, 0.07f, d / 2 - 0.02f, 0.33f, rot)
-            det.box(ox + nx * (d / 2 - 0.08f), oy + ny * (d / 2 - 0.08f), z + 0.66f, hw, 0.08f, 0.05f, rot)
-            for (side in intArrayOf(-1, 1)) det.box(ox + tx * side * (hw - 0.05f), oy + ty * side * (hw - 0.05f), z + 0.66f, 0.05f, d / 2 - 0.02f, 0.05f, rot)
         } else {
-            // wrought-iron railing
             det.color(Palette.IRON)
-            val n = max(4, (hw * 2 / 0.13f).toInt())
+            val n = max(4, (hw * 2 / 0.12f).toInt())
             for (k in 0..n) {
                 val f = -hw + 0.03f + (2 * hw - 0.06f) * k / n
-                det.box(ox + tx * f + nx * (d / 2 - 0.03f), oy + ty * f + ny * (d / 2 - 0.03f), z + 0.48f, 0.009f, 0.009f, 0.48f, rot)
+                if (style == 1) {
+                    // bellied railing: each bar bows out over the street
+                    val a = front(f, 0.11f); val m = front(f, -0.04f); val t = front(f, 0.06f)
+                    det.box((a[0] + m[0]) / 2, (a[1] + m[1]) / 2, z + 0.25f, 0.009f, 0.009f, 0.26f, rot)
+                    det.box((m[0] + t[0]) / 2, (m[1] + t[1]) / 2, z + 0.73f, 0.009f, 0.009f, 0.25f, rot)
+                } else {
+                    val p = front(f, 0.03f); det.box(p[0], p[1], z + 0.48f, 0.009f, 0.009f, 0.48f, rot)
+                }
             }
-            det.box(ox + nx * (d / 2 - 0.03f), oy + ny * (d / 2 - 0.03f), z + 0.97f, hw, 0.025f, 0.02f, rot)
-            det.box(ox + nx * (d / 2 - 0.03f), oy + ny * (d / 2 - 0.03f), z + 0.12f, hw, 0.015f, 0.015f, rot)
+            val bulge = if (style == 1) -0.02f else 0.03f
+            val top = front(0f, if (style == 1) 0.06f else 0.03f); det.box(top[0], top[1], z + 0.97f, hw, 0.025f, 0.02f, rot)
+            val low = front(0f, bulge); det.box(low[0], low[1], z + 0.12f, hw, 0.015f, 0.015f, rot)
+            if (style == 2) {
+                // decorative band: a row of crosses
+                val bz = z + 0.72f; val p = front(0f, 0.03f)
+                det.box(p[0], p[1], bz + 0.1f, hw, 0.012f, 0.012f, rot); det.box(p[0], p[1], bz - 0.1f, hw, 0.012f, 0.012f, rot)
+                val nc = max(2, (hw * 2 / 0.25f).toInt())
+                for (k in 0 until nc) {
+                    val f = -hw + (2 * hw) * (k + 0.5f) / nc; val q = front(f, 0.03f)
+                    det.box(q[0], q[1], bz, 0.11f, 0.01f, 0.01f, rot + 0.785f); det.box(q[0], q[1], bz, 0.11f, 0.01f, 0.01f, rot - 0.785f)
+                }
+            }
             for (side in intArrayOf(-1, 1)) det.box(ox + tx * side * (hw - 0.02f), oy + ty * side * (hw - 0.02f), z + 0.97f, 0.02f, d / 2 - 0.02f, 0.02f, rot)
+        }
+        // plants: pots at the ends, greenery spilling over, sometimes geraniums
+        if (rnd(seed, 7) < 0.35f) {
+            for (side in intArrayOf(-1, 1)) {
+                if (rnd(seed, 8 + side) < 0.3f) continue
+                val f = side * (hw - 0.22f); val p = front(f, d / 2)
+                det.color(0.55f, 0.30f, 0.20f, 0.05f); det.frustum(p[0], p[1], z + 0.01f, 0.13f, 0.17f, 0.25f, 6)
+                det.color(0.20f + rnd(seed, 9) * 0.1f, 0.38f, 0.14f, 0f); det.box(p[0], p[1], z + 0.42f, 0.2f, 0.17f, 0.18f, rot + rnd(seed, 10))
+                if (rnd(seed, 11 + side) < 0.5f) { det.color(0.85f, 0.15f, 0.2f, 0f); det.box(p[0], p[1], z + 0.6f, 0.13f, 0.1f, 0.05f, rot) }
+            }
+        }
+    }
+
+    /** A washing line along the facade under a window, with a few clothes pegged on it. */
+    private fun laundry(wx: (Float, Float) -> Float, wy: (Float, Float) -> Float, rot: Float, cu: Float, z: Float, seed: Int) {
+        val hl = 0.9f + rnd(seed, 1) * 0.6f
+        det.color(0.75f, 0.75f, 0.72f, 0.2f)
+        for (side in intArrayOf(-1, 1)) det.box(wx(cu + side * hl, 0.18f), wy(cu + side * hl, 0.18f), z, 0.015f, 0.18f, 0.015f, rot)
+        det.box(wx(cu, 0.35f), wy(cu, 0.35f), z, hl, 0.006f, 0.006f, rot)
+        val cols = arrayOf(floatArrayOf(0.92f, 0.92f, 0.9f), floatArrayOf(0.25f, 0.35f, 0.6f), floatArrayOf(0.8f, 0.25f, 0.25f), floatArrayOf(0.9f, 0.8f, 0.4f), floatArrayOf(0.4f, 0.6f, 0.45f), floatArrayOf(0.95f, 0.7f, 0.75f))
+        var u = cu - hl + 0.15f; var k = 0
+        while (u < cu + hl - 0.15f) {
+            val w = 0.18f + rnd(seed, 20 + k) * 0.25f; val h = 0.3f + rnd(seed, 30 + k) * 0.4f
+            val c = cols[(rnd(seed, 40 + k) * cols.size).toInt().coerceAtMost(cols.size - 1)]
+            det.color(c[0], c[1], c[2], 0.02f)
+            det.quad(Vec3(wx(u, 0.35f), wy(u, 0.35f), z), Vec3(wx(u + w, 0.35f), wy(u + w, 0.35f), z), Vec3(wx(u + w, 0.37f), wy(u + w, 0.37f), z - h), Vec3(wx(u, 0.37f), wy(u, 0.37f), z - h))
+            u += w + 0.08f + rnd(seed, 50 + k) * 0.15f; k++
         }
     }
 

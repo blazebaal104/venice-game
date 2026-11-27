@@ -15,8 +15,10 @@ object Controls {
     /** analog steering pad: -1 (left) .. 1 (right), NaN when the pad is not touched */
     @Volatile var steerAnalog = Float.NaN
     @Volatile var engineOn = true
-    /** outboard trim: -1 trimmed in (bow down) .. 0 neutral .. +1 trimmed out (bow up) */
-    @Volatile var trim = 0f
+    /** outboard trim as the player sees it: 0 = fully in (bow down) .. 100 = fully out (bow up). Starts at 30. */
+    @Volatile var trimPct = 30
+    /** the same for the physics: -1 .. +1 */
+    val trim get() = trimPct / 50f - 1f
     @Volatile var cameraMode = 0         // 0 chase, 1 high chase, 2 helm
     @Volatile var camYawDelta = 0f       // accumulated drag, consumed by the renderer
     @Volatile var camPitchDelta = 0f
@@ -27,6 +29,10 @@ object Controls {
     @Volatile var teleportX = Float.NaN; @Volatile var teleportY = Float.NaN
 
     @Volatile var screen = Screen.MENU
+    /** title screen: where the boat preview is drawn (screen px: left, top, right, bottom) and how it is turned */
+    @Volatile var menuBoatRect = IntArray(4)
+    @Volatile var menuBoatYaw = 0f
+    @Volatile var menuBoatDragging = false
     val paused get() = screen != Screen.NONE
 
     fun steer(): Float {
@@ -93,7 +99,7 @@ object Settings {
     @Volatile var shadows = true
     @Volatile var reflections = true
     @Volatile var bloom = true
-    @Volatile var sharpen = 0.35f
+    @Volatile var sharpen = 0.5f
     /** 0 light .. 1 normal .. 2 thick: how far before the render-distance edge the fog builds up */
     @Volatile var fogDensity = 1
     @Volatile var showFps = false
@@ -115,9 +121,9 @@ object Settings {
     @Volatile var language = 0           // 0 italiano, 1 english
 
     /** highest internal resolution (fraction of the screen) the dynamic scaler may use */
-    fun maxScale() = if (resolution > 0) resolution / 100f else when (quality) { PERFORMANCE -> 0.75f; BALANCED -> 0.9f; else -> 1.0f }
+    fun maxScale() = if (resolution > 0) resolution / 100f else when (quality) { PERFORMANCE -> 0.8f; else -> 1.0f }
     /** lowest it may drop to: never below 70 % any more, that is what made the city look like 144p */
-    fun minScale() = if (resolution > 0) resolution / 100f else when (quality) { PERFORMANCE -> 0.62f; BALANCED -> 0.7f; else -> 0.8f }
+    fun minScale() = if (resolution > 0) resolution / 100f else when (quality) { PERFORMANCE -> 0.65f; BALANCED -> 0.8f; else -> 0.85f }
 
     /** Quality presets set the distances too; the player can still fine-tune them afterwards. */
     fun applyPreset(q: Int) {
@@ -143,7 +149,7 @@ object Settings {
         // the old default of 120 FPS pushed the dynamic resolution down to 50 % on most phones
         fpsTarget = if (p.getInt("settingsVersion", 1) < 2) 60 else p.getInt("fps", 60)
         shadows = p.getBoolean("shadows", true); reflections = p.getBoolean("reflections", true); bloom = p.getBoolean("bloom", true)
-        sharpen = p.getFloat("sharpen", 0.35f); fogDensity = p.getInt("fog", 1)
+        sharpen = if (p.getInt("settingsVersion", 1) < 3) 0.5f else p.getFloat("sharpen", 0.5f); fogDensity = p.getInt("fog", 1)
         showFps = if (p.getInt("settingsVersion", 1) < 2) false else p.getBoolean("showFps", false)
         analogSteering = p.getBoolean("analog", true); steerSensitivity = p.getFloat("steerSens", 1f); cameraSensitivity = p.getFloat("camSens", 1f)
         vibration = p.getBoolean("vibration", true); speedUnit = p.getInt("speedUnit", 0); hudScale = p.getFloat("hudScale", 1f)
@@ -154,7 +160,7 @@ object Settings {
     }
     fun save(ctx: Context) {
         ctx.getSharedPreferences("venice", Context.MODE_PRIVATE).edit()
-            .putInt("settingsVersion", 2)
+            .putInt("settingsVersion", 3)
             .putInt("quality", quality).putFloat("renderDistance", renderDistance).putFloat("vegDistance", vegetationDistance).putFloat("detailDistance", detailDistance)
             .putInt("resolution", resolution).putInt("fps", fpsTarget)
             .putBoolean("shadows", shadows).putBoolean("reflections", reflections).putBoolean("bloom", bloom)

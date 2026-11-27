@@ -28,7 +28,6 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     private val gui = Gui(ink)
     private val dp = ink.baseDp
     private lateinit var c: Canvas
-    private var aerial: Bitmap? = null
     private var t0 = System.nanoTime()
     private var settingsReturn = Screen.MENU
     private var creditsReturn = Screen.MENU
@@ -48,13 +47,6 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     })
 
     init {
-        Thread {
-            try {
-                val o = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
-                aerial = ctx.assets.open("menu_aerial.jpg").use { BitmapFactory.decodeStream(it, null, o) }
-                postInvalidate()
-            } catch (_: Exception) { }
-        }.start()
         gui.onFeedback = { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY) }
         val tick = object : Runnable { override fun run() { if (Controls.screen != Screen.NONE) invalidate(); postDelayed(this, 33) } }
         post(tick)
@@ -103,6 +95,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
                 MotionEvent.ACTION_POINTER_UP -> { scaling = true }
             }
         }
+        if (Controls.screen == Screen.MENU && menuTouch(e)) { invalidate(); return true }
         gui.touch(e)
         invalidate()
         return true
@@ -142,74 +135,87 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     }
 
     // ================================================================ TITLE SCREEN
-    private fun drawMenu() {
-        val tt = (System.nanoTime() - t0) / 1e9f
-        // slow pan over the static aerial view of Venice (no 3D rendering on this page)
-        val a = aerial
-        if (a != null) {
-            val k = max(W / a.width, H / a.height) * 1.35f
-            val ex = a.width * k - W; val ey = a.height * k - H
-            val px = (0.5f + 0.5f * sin(tt * 0.035f)) * ex; val py = (0.5f + 0.45f * sin(tt * 0.023f + 1.3f)) * ey
-            val mtx = Matrix(); mtx.setScale(k, k); mtx.postTranslate(-px, -py)
-            c.drawBitmap(a, mtx, ink.bmp)
-        } else { ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.rgb(28, 70, 74); c.drawRect(0f, 0f, W, H, ink.fill) }
-        // darken towards the panels for legibility
-        ink.fill.shader = LinearGradient(0f, 0f, W, 0f, intArrayOf(Color.argb(150, 6, 9, 14), Color.argb(30, 6, 9, 14), Color.argb(190, 6, 9, 14)), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, W, H, ink.fill); ink.fill.shader = null
+    // The 3D flyover of Venice and the turning boat are drawn by the GL renderer underneath; this page only draws
+    // the panels, text and buttons, and leaves the boat's window transparent.
+    private var boatDrag = false; private var boatLastX = 0f
+    private val boatWin = RectF()
 
-        // ---- boat card (left)
-        val cardW = min(300 * dp, W * 0.34f)
-        val card = RectF(m, m, m + cardW, H - m - 34 * dp)
-        ink.glass(card, 18 * dp)
-        ink.label("LA TUA BARCA", card.left + 18 * dp, card.top + 28 * dp, 11f, Theme.YELLOW, spacing = 0.15f)
-        ink.label("Lampo 5.4", card.left + 18 * dp, card.top + 54 * dp, 24f, Theme.TEXT, face = Theme.black)
-        ink.label("Barchino in vetroresina · fuoribordo 115 cv", card.left + 18 * dp, card.top + 72 * dp, 11f, Theme.TEXT_DIM, face = Theme.condensed)
-        val boatH = card.height() - 210 * dp
-        if (boatH > 50 * dp) {
-            // the boat seen from above, gently bobbing on a water swatch
-            val bx = card.centerX(); val by = card.top + 86 * dp + boatH / 2
-            ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(90, 46, 196, 182)
-            c.drawRoundRect(card.left + 14 * dp, by - boatH / 2, card.right - 14 * dp, by + boatH / 2, 12 * dp, 12 * dp, ink.fill)
-            ink.stroke.color = Color.argb(60, 255, 255, 255); ink.stroke.strokeWidth = 1 * dp
-            for (k in 0 until 4) { val yy = by - boatH * 0.3f + k * boatH * 0.2f; val off = (tt * 18 * dp + k * 40 * dp) % (60 * dp); var xx = card.left + 20 * dp - off; while (xx < card.right - 20 * dp) { c.drawLine(max(xx, card.left + 20 * dp), yy, min(xx + 18 * dp, card.right - 20 * dp), yy, ink.stroke); xx += 60 * dp } }
-            ink.boatTopDown(bx, by + sin(tt * 1.4f) * 2 * dp, min(cardW - 60 * dp, boatH * 2.2f), -90f + sin(tt * 0.9f) * 2f)
-        }
-        val statsTop = card.bottom - 118 * dp
-        val stats = listOf("VELOCITÀ" to 0.9f, "ACCELERAZIONE" to 0.72f, "MANOVRABILITÀ" to 0.8f)
+    private fun drawMenu() {
+        // gentle darkening behind the title column and the bottom line, never over the boat window
+        ink.fill.shader = LinearGradient(W * 0.5f, 0f, W, 0f, intArrayOf(Color.argb(0, 6, 9, 14), Color.argb(170, 6, 9, 14)), null, Shader.TileMode.CLAMP)
+        c.drawRect(W * 0.5f, 0f, W, H, ink.fill); ink.fill.shader = null
+
+        // ---- boat card (left): header, transparent 3D window, specs
+        val cardW = min(320 * dp, W * 0.34f)
+        val x0 = m; val x1 = m + cardW
+        val header = RectF(x0, m, x1, m + 64 * dp)
+        ink.glass(header, 16 * dp)
+        ink.label("LA TUA BARCA", header.left + 18 * dp, header.top + 24 * dp, 10.5f, Theme.YELLOW, spacing = 0.16f)
+        ink.label("Lampo 5.4", header.left + 18 * dp, header.top + 50 * dp, 22f, Theme.TEXT, face = Theme.black)
+        ink.label("1 / 1", header.right - 18 * dp, header.top + 50 * dp, 12f, Theme.TEXT_FAINT, Paint.Align.RIGHT)
+        val specsH = 132 * dp
+        val specs = RectF(x0, H - m - specsH, x1, H - m)
+        boatWin.set(x0, header.bottom + 8 * dp, x1, specs.top - 8 * dp)
+        if (boatWin.height() > 60 * dp) {
+            Controls.menuBoatRect = intArrayOf(boatWin.left.toInt(), boatWin.top.toInt(), boatWin.right.toInt(), boatWin.bottom.toInt())
+            ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1.5f * dp
+            c.drawRoundRect(boatWin, 16 * dp, 16 * dp, ink.stroke)
+            ink.label(if (boatDrag) "" else "TRASCINA PER RUOTARE", boatWin.centerX(), boatWin.bottom - 12 * dp, 9f, Theme.TEXT_FAINT, Paint.Align.CENTER, spacing = 0.14f)
+        } else Controls.menuBoatRect = IntArray(4)
+        ink.glass(specs, 16 * dp)
+        ink.label("Barchino in vetroresina · fuoribordo 115 cv", specs.left + 18 * dp, specs.top + 24 * dp, 11f, Theme.TEXT_DIM, face = Theme.condensed)
+        val stats = listOf(Triple("VELOCITÀ", 0.92f, "140 km/h"), Triple("ACCELERAZIONE", 0.72f, "0-100 in 9 s"), Triple("MANOVRABILITÀ", 0.8f, ""))
         for ((i, st) in stats.withIndex()) {
-            val y = statsTop + i * 26 * dp
-            ink.label(st.first, card.left + 18 * dp, y + 4 * dp, 10f, Theme.TEXT_DIM, spacing = 0.1f)
-            val bar = RectF(card.left + 120 * dp, y - 2 * dp, card.right - 18 * dp, y + 4 * dp)
+            val y = specs.top + 50 * dp + i * 26 * dp
+            ink.label(st.first, specs.left + 18 * dp, y + 4 * dp, 9.5f, Theme.TEXT_DIM, spacing = 0.1f)
+            val valueW = if (st.third.isEmpty()) 0f else ink.width(st.third, 10.5f) + 10 * dp
+            val bar = RectF(specs.left + 120 * dp, y - 2 * dp, specs.right - 18 * dp - valueW, y + 4 * dp)
             ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(50, 255, 255, 255); c.drawRoundRect(bar, 3 * dp, 3 * dp, ink.fill)
             ink.fill.color = Theme.YELLOW; c.drawRoundRect(RectF(bar.left, bar.top, bar.left + bar.width() * st.second, bar.bottom), 3 * dp, 3 * dp, ink.fill)
+            if (st.third.isNotEmpty()) ink.label(st.third, specs.right - 18 * dp, y + 4 * dp, 10.5f, Theme.TEXT, Paint.Align.RIGHT)
         }
-        ink.label("140 km/h", card.right - 18 * dp, statsTop - 14 * dp, 12f, Theme.TEXT, Paint.Align.RIGHT)
-        ink.label("‹   1 / 1   ›", card.left + 18 * dp, card.bottom - 18 * dp, 13f, Theme.TEXT_FAINT)
-        ink.label("ALTRE BARCHE IN ARRIVO", card.right - 18 * dp, card.bottom - 18 * dp, 9f, Theme.TEXT_FAINT, Paint.Align.RIGHT, spacing = 0.1f)
+        ink.label("Altre barche in arrivo", specs.left + 18 * dp, specs.bottom - 12 * dp, 9.5f, Theme.TEXT_FAINT, face = Theme.condensed)
 
-        // ---- title + buttons (right)
-        val colW = min(330 * dp, W * 0.36f)
-        val x0 = W - m - colW
-        val bh = min(56 * dp, (H - 230 * dp) / 3.6f)
-        var y = H / 2f - (bh * 3 + 24 * dp) / 2 + 30 * dp
-        val titleSize = min(64f, colW / dp / 4.2f)
-        ink.stripes(RectF(x0, y - 118 * dp, x0 + colW, y - 110 * dp), 7f)
-        ink.label("GTACTV", x0 - 3 * dp, y - 52 * dp, titleSize, Theme.TEXT, face = Theme.black, spacing = -0.01f)
-        ink.label("VENEZIA · LAGUNA · SCALA 1:1", x0, y - 30 * dp, 11f, Theme.YELLOW, spacing = 0.2f)
+        // ---- title + buttons (right), sized to fit the height
+        val colW = min(330 * dp, W * 0.34f)
+        val cx0 = W - m - colW
+        val titleSize = min(60f, colW / dp / 4.3f)
+        val bh = min(54 * dp, (H - 2 * m - 150 * dp) / 3.4f)
+        val blockH = 40 * dp + titleSize * dp + 22 * dp + bh * 2.7f + 24 * dp
+        var y = max(m, (H - blockH) / 2f - 10 * dp)
+        ink.stripes(RectF(cx0, y, cx0 + colW, y + 8 * dp), 7f)
+        y += 14 * dp + titleSize * dp
+        ink.text.setShadowLayer(8 * dp, 0f, 2 * dp, Color.argb(160, 0, 0, 0))
+        ink.label("GTACTV", cx0 - 2 * dp, y, titleSize, Theme.TEXT, face = Theme.black, spacing = -0.01f)
+        ink.label("VENEZIA · LAGUNA · SCALA 1:1", cx0, y + 20 * dp, 10.5f, Theme.YELLOW, spacing = 0.2f)
+        ink.text.clearShadowLayer()
+        y += 40 * dp
         val loaded = !GameState.loading
         val sub = if (loaded) "Venezia è pronta" else "Caricamento ${(100f * GameState.tilesLoaded / max(1, min(4, GameState.tilesWanted))).roundToInt().coerceAtMost(99)}%"
-        if (gui.button(RectF(x0, y, x0 + colW, y + bh), "GIOCA", 1, "play", sub)) open(Screen.NONE)
-        y += bh + 12 * dp
-        if (gui.button(RectF(x0, y, x0 + colW, y + bh * 0.85f), "IMPOSTAZIONI", 0, "gear")) open(Screen.SETTINGS)
-        y += bh * 0.85f + 12 * dp
-        if (gui.button(RectF(x0, y, x0 + colW, y + bh * 0.85f), "CREDITI", 0, "info")) open(Screen.CREDITS)
+        if (gui.button(RectF(cx0, y, cx0 + colW, y + bh), "GIOCA", 1, "play", sub)) open(Screen.NONE)
+        y += bh + 10 * dp
+        val half = (colW - 10 * dp) / 2
+        if (gui.button(RectF(cx0, y, cx0 + half, y + bh * 0.85f), "IMPOSTAZIONI", 0, "gear")) open(Screen.SETTINGS)
+        if (gui.button(RectF(cx0 + half + 10 * dp, y, cx0 + colW, y + bh * 0.85f), "CREDITI", 0, "info")) open(Screen.CREDITS)
 
-        // ---- bottom bar: live Venice weather
+        // ---- bottom right: live Venice weather + vaporetti status
         val wtxt = if (Weather.live) "VENEZIA ORA · ${Weather.temperature.roundToInt()}° · ${Weather.label()} · VENTO ${Weather.windKmh.roundToInt()} KM/H ${compass(Weather.windDirDeg)}"
                    else "VENEZIA · ${Weather.temperature.roundToInt()}° · METEO REALE IN ATTESA DI CONNESSIONE"
-        ink.weatherIcon(Weather.icon(), m + 12 * dp, H - m - 6 * dp, Theme.TEXT, 0.8f)
-        ink.label(wtxt, m + 28 * dp, H - m - 2 * dp, 10f, Theme.TEXT_DIM, spacing = 0.08f)
-        ink.label("ALPHA", W - m, H - m - 2 * dp, 10f, Theme.TEXT_FAINT, Paint.Align.RIGHT, spacing = 0.2f)
+        var ws = 10f; while (ws > 7.5f && ink.width(wtxt, ws, spacing = 0.06f) > colW - 24 * dp) ws -= 0.5f
+        ink.text.setShadowLayer(4 * dp, 0f, 1 * dp, Color.BLACK)
+        ink.weatherIcon(Weather.icon(), cx0 + 8 * dp, H - m - 5 * dp, Theme.TEXT, 0.8f)
+        ink.label(wtxt, cx0 + 24 * dp, H - m - 1 * dp, ws, Theme.TEXT_DIM, spacing = 0.06f)
+        ink.text.clearShadowLayer()
+    }
+
+    /** drag on the boat window turns the boat (handled before the widget kit) */
+    private fun menuTouch(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> if (boatWin.contains(e.x, e.y)) { boatDrag = true; boatLastX = e.x; Controls.menuBoatDragging = true; return true }
+            MotionEvent.ACTION_MOVE -> if (boatDrag) { Controls.menuBoatYaw += (e.x - boatLastX) * 0.012f; boatLastX = e.x; return true }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (boatDrag) { boatDrag = false; Controls.menuBoatDragging = false; return true }
+        }
+        return boatDrag
     }
 
     private fun compass(deg: Float): String = arrayOf("N", "NE", "E", "SE", "S", "SO", "O", "NO")[(((deg % 360f) + 360f + 22.5f) / 45f).toInt() % 8]
@@ -328,65 +334,72 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         c.restoreToCount(save)
     }
 
-    private fun drawMenuBackdrop() {
-        val a = aerial
-        if (a != null) {
-            val k = max(W / a.width, H / a.height) * 1.35f
-            val mtx = Matrix(); mtx.setScale(k, k); mtx.postTranslate(-(a.width * k - W) / 2, -(a.height * k - H) / 2)
-            c.drawBitmap(a, mtx, ink.bmp)
-        }
-        dim(200)
-    }
+    private fun drawMenuBackdrop() { dim(175) }
 
-    /** Label (+ optional description) on the left half; returns the control rect on the right half. */
-    private fun row(x: Float, y: Float, w: Float, label: String, desc: String? = null, h: Float = 52f): RectF {
-        ink.label(label, x, y + (if (desc == null) 30f else 22f) * dp, 15f, Theme.TEXT)
-        if (desc != null) ink.label(desc, x, y + 39 * dp, 10.5f, Theme.TEXT_DIM, face = Theme.condensed)
+    private val ROW get() = 70 * dp
+    /** One settings row: label + wrapped description on the left, the control's rect on the right (never overlapping). */
+    private fun row(x: Float, y: Float, w: Float, label: String, desc: String? = null, h: Float = 70f): RectF {
+        val cw = min(w * 0.46f, 340 * dp)
+        val textW = w - cw - 20 * dp
+        var ls = 15f; while (ls > 11f && ink.width(label, ls) > textW) ls -= 0.5f
+        ink.label(label, x, y + (if (desc == null) 39f else 27f) * dp, ls, Theme.TEXT)
+        if (desc != null) {
+            // wrap to at most two lines in the label column
+            val words = desc.split(' '); var line = ""; var ly = y + 45 * dp; var lines = 0
+            for (wd in words) {
+                val t = if (line.isEmpty()) wd else "$line $wd"
+                if (ink.width(t, 11f, Theme.condensed) > textW && line.isNotEmpty()) {
+                    ink.label(if (lines == 1) "$line…" else line, x, ly, 11f, Theme.TEXT_DIM, face = Theme.condensed)
+                    lines++; ly += 14 * dp; line = wd
+                    if (lines >= 2) { line = ""; break }
+                } else line = t
+            }
+            if (line.isNotEmpty() && lines < 2) ink.label(line, x, ly, 11f, Theme.TEXT_DIM, face = Theme.condensed)
+        }
         ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1 * dp; c.drawLine(x, y + h * dp, x + w, y + h * dp, ink.stroke)
-        val cw = min(w * 0.5f, 340 * dp)
-        return RectF(x + w - cw, y + 8 * dp, x + w, y + h * dp - 8 * dp)
+        return RectF(x + w - cw, y + (h * dp - 40 * dp) / 2, x + w, y + (h * dp + 40 * dp) / 2)
     }
-    private fun section(x: Float, y: Float, t: String): Float { ink.label(t, x, y + 24 * dp, 10f, Theme.YELLOW, spacing = 0.18f); return y + 34 * dp }
+    private fun section(x: Float, y: Float, t: String): Float { ink.label(t, x, y + 30 * dp, 10.5f, Theme.YELLOW, spacing = 0.18f); return y + 40 * dp }
 
     private fun graphics(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "QUALITÀ")
         val q = gui.segmented(row(x, y, w, "Preimpostazione", "Imposta tutto il resto in un colpo"), listOf("Prestazioni", "Bilanciata", "Qualità", "Ultra"), Settings.quality)
         if (q != Settings.quality) Settings.applyPreset(q)
-        y += 56 * dp
+        y += ROW
         y = section(x, y, "DISTANZE (1 CHUNK = 256 m)")
         Settings.renderDistance = gui.slider("rd", row(x, y, w, "Distanza visiva", String.format("%.1f chunk · %d m · oltre: nebbia, niente caricato", Settings.chunks(), Settings.renderDistance.roundToInt()).replace('.', ',')), Settings.renderDistance, 256f, 1280f, 32f)
-        y += 56 * dp
+        y += ROW
         Settings.vegetationDistance = gui.slider("vd", row(x, y, w, "Distanza vegetazione", "${Settings.vegetationDistance.roundToInt()} m · alberi e giardini"), Settings.vegetationDistance, 60f, 400f, 10f)
-        y += 56 * dp
+        y += ROW
         Settings.detailDistance = gui.slider("dd", row(x, y, w, "Distanza dettagli", "${Settings.detailDistance.roundToInt()} m · balconi, persiane, comignoli"), Settings.detailDistance, 100f, 450f, 10f)
-        y += 56 * dp
+        y += ROW
         Settings.fogDensity = gui.segmented(row(x, y, w, "Nebbia", "Quanto presto la nebbia copre l'orizzonte"), listOf("Leggera", "Normale", "Fitta"), Settings.fogDensity)
-        y += 56 * dp
+        y += ROW
         y = section(x, y, "IMMAGINE")
         val resOpts = listOf(0, 70, 85, 100)
         val ri = gui.segmented(row(x, y, w, "Risoluzione", if (Settings.resolution == 0) "Dinamica: scende (mai sotto il ${(Settings.minScale() * 100).roundToInt()}%) solo se servono FPS" else "Fissa al ${Settings.resolution}%"),
             listOf("Dinamica", "70%", "85%", "100%"), resOpts.indexOf(Settings.resolution).coerceAtLeast(0))
         Settings.resolution = resOpts[ri]
-        y += 56 * dp
+        y += ROW
         val fpsOpts = listOf(30, 60, 90, 120)
         Settings.fpsTarget = fpsOpts[gui.segmented(row(x, y, w, "Fotogrammi al secondo", "Più alto = meno risoluzione dinamica"), fpsOpts.map { "$it" }, fpsOpts.indexOf(Settings.fpsTarget).coerceAtLeast(1))]
-        y += 56 * dp
+        y += ROW
         Settings.sharpen = gui.slider("sh", row(x, y, w, "Nitidezza", "${(Settings.sharpen * 100).roundToInt()}%"), Settings.sharpen, 0f, 1f, 0.05f)
-        y += 56 * dp
-        Settings.shadows = gui.toggle(row(x, y, w, "Ombre della città", "Ombre del sole su case e canali"), Settings.shadows); y += 56 * dp
-        Settings.reflections = gui.toggle(row(x, y, w, "Riflessi sull'acqua", "Palazzi riflessi nei canali"), Settings.reflections); y += 56 * dp
-        Settings.bloom = gui.toggle(row(x, y, w, "Bagliore (bloom)", "Riflessi del sole che brillano"), Settings.bloom); y += 56 * dp
-        Settings.showFps = gui.toggle(row(x, y, w, "Mostra FPS", "Contatore in alto a sinistra"), Settings.showFps); y += 56 * dp
+        y += ROW
+        Settings.shadows = gui.toggle(row(x, y, w, "Ombre della città", "Ombre del sole su case e canali"), Settings.shadows); y += ROW
+        Settings.reflections = gui.toggle(row(x, y, w, "Riflessi sull'acqua", "Palazzi riflessi nei canali"), Settings.reflections); y += ROW
+        Settings.bloom = gui.toggle(row(x, y, w, "Bagliore (bloom)", "Riflessi del sole che brillano"), Settings.bloom); y += ROW
+        Settings.showFps = gui.toggle(row(x, y, w, "Mostra FPS", "Contatore in alto a sinistra"), Settings.showFps); y += ROW
         return y
     }
 
     private fun controls(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "GUIDA")
         Settings.analogSteering = gui.segmented(row(x, y, w, "Sterzo", if (Settings.analogSteering) "Trascina il timone: sterzata progressiva" else "Due frecce: tutto a destra o a sinistra"), listOf("Timone", "Frecce"), if (Settings.analogSteering) 0 else 1) == 0
-        y += 56 * dp
-        Settings.steerSensitivity = gui.slider("ss", row(x, y, w, "Sensibilità sterzo", "${(Settings.steerSensitivity * 100).roundToInt()}%"), Settings.steerSensitivity, 0.5f, 1.5f, 0.05f); y += 56 * dp
-        Settings.cameraSensitivity = gui.slider("cs", row(x, y, w, "Sensibilità telecamera", "${(Settings.cameraSensitivity * 100).roundToInt()}%"), Settings.cameraSensitivity, 0.4f, 2f, 0.1f); y += 56 * dp
-        Settings.vibration = gui.toggle(row(x, y, w, "Vibrazione", "Scatti della manetta e dei pulsanti"), Settings.vibration); y += 56 * dp
+        y += ROW
+        Settings.steerSensitivity = gui.slider("ss", row(x, y, w, "Sensibilità sterzo", "${(Settings.steerSensitivity * 100).roundToInt()}%"), Settings.steerSensitivity, 0.5f, 1.5f, 0.05f); y += ROW
+        Settings.cameraSensitivity = gui.slider("cs", row(x, y, w, "Sensibilità telecamera", "${(Settings.cameraSensitivity * 100).roundToInt()}%"), Settings.cameraSensitivity, 0.4f, 2f, 0.1f); y += ROW
+        Settings.vibration = gui.toggle(row(x, y, w, "Vibrazione", "Scatti della manetta e dei pulsanti"), Settings.vibration); y += ROW
         y = section(x, y, "COMANDI")
         for (l in listOf("Manetta: trascina su e giù · doppio tocco = folle", "Trim + / −: assetto del fuoribordo (banda verde = massima velocità)", "Trascina sullo schermo: ruota la telecamera", "Tastiera: W/S gas e retro, A/D sterzo")) {
             ink.label("·  $l", x, y + 18 * dp, 12f, Theme.TEXT_DIM, face = Theme.condensed); y += 24 * dp
@@ -396,32 +409,33 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     private fun audio(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "VOLUME")
-        Settings.volMaster = gui.slider("vm", row(x, y, w, "Generale", "${(Settings.volMaster * 100).roundToInt()}%"), Settings.volMaster, 0f, 1f, 0.05f); y += 56 * dp
-        Settings.volEngine = gui.slider("ve", row(x, y, w, "Motore", "${(Settings.volEngine * 100).roundToInt()}%"), Settings.volEngine, 0f, 1f, 0.05f); y += 56 * dp
-        Settings.volAmbience = gui.slider("va", row(x, y, w, "Ambiente", "Acqua, gabbiani, campane · ${(Settings.volAmbience * 100).roundToInt()}%"), Settings.volAmbience, 0f, 1f, 0.05f); y += 56 * dp
-        ink.label("L'audio arriva con un prossimo aggiornamento: i livelli vengono già salvati.", x, y + 22 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
+        Settings.volMaster = gui.slider("vm", row(x, y, w, "Generale", "${(Settings.volMaster * 100).roundToInt()}%"), Settings.volMaster, 0f, 1f, 0.05f); y += ROW
+        Settings.volEngine = gui.slider("ve", row(x, y, w, "Motore", "${(Settings.volEngine * 100).roundToInt()}%"), Settings.volEngine, 0f, 1f, 0.05f); y += ROW
+        Settings.volAmbience = gui.slider("va", row(x, y, w, "Ambiente", "Acqua, gabbiani, campane · ${(Settings.volAmbience * 100).roundToInt()}%"), Settings.volAmbience, 0f, 1f, 0.05f); y += ROW
+        ink.label("Tutti i suoni sono generati in tempo reale: motore, acqua, vaporetti, gabbiani, campane, pioggia.", x, y + 22 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
         return y + 34 * dp
     }
 
     private fun hud(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "HUD")
-        Settings.speedUnit = gui.segmented(row(x, y, w, "Unità di velocità"), listOf("km/h", "nodi", "mph"), Settings.speedUnit); y += 56 * dp
-        Settings.hudScale = gui.slider("hs", row(x, y, w, "Dimensione HUD", "${(Settings.hudScale * 100).roundToInt()}%"), Settings.hudScale, 0.8f, 1.25f, 0.05f); y += 56 * dp
+        Settings.speedUnit = gui.segmented(row(x, y, w, "Unità di velocità"), listOf("km/h", "nodi", "mph"), Settings.speedUnit); y += ROW
+        Settings.hudScale = gui.slider("hs", row(x, y, w, "Dimensione HUD", "${(Settings.hudScale * 100).roundToInt()}%"), Settings.hudScale, 0.8f, 1.25f, 0.05f); y += ROW
         y = section(x, y, "MINIMAPPA")
-        Settings.minimapNorthUp = gui.segmented(row(x, y, w, "Orientamento"), listOf("Ruota con la barca", "Nord in alto"), if (Settings.minimapNorthUp) 1 else 0) == 1; y += 56 * dp
+        Settings.minimapNorthUp = gui.segmented(row(x, y, w, "Orientamento"), listOf("Ruota con la barca", "Nord in alto"), if (Settings.minimapNorthUp) 1 else 0) == 1; y += ROW
         return y
     }
 
     private fun world(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "METEO REALE")
-        Settings.liveWeather = gui.toggle(row(x, y, w, "Meteo reale di Venezia", "Nuvole, nebbia e onde come fuori dalla finestra"), Settings.liveWeather); y += 56 * dp
+        Settings.liveWeather = gui.toggle(row(x, y, w, "Meteo reale di Venezia", "Nuvole, pioggia, nebbia, vento e onde come fuori dalla finestra"), Settings.liveWeather); y += ROW
+        Weather.override = gui.stepper(row(x, y, w, "Anteprima meteo", "Prova un tempo diverso da quello reale (solo per vederlo)"), listOf("Reale", "Sereno", "Nuvoloso", "Pioggia", "Temporale", "Nebbia"), Weather.override); y += ROW
         val st = if (!Weather.live) "In attesa di connessione · uso il clima medio del mese (${Weather.temperature.roundToInt()}°)"
         else { val cal = Calendar.getInstance().apply { timeInMillis = Weather.updatedAt }
             String.format("Aggiornato alle %02d:%02d · %d° · %s · vento %d km/h da %s · visibilità %s", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE), Weather.temperature.roundToInt(), Weather.label().lowercase(), Weather.windKmh.roundToInt(), compass(Weather.windDirDeg), if (Weather.visibilityM >= 10000f) "oltre 10 km" else "${(Weather.visibilityM / 1000f).roundToInt()} km") }
         ink.label(st, x, y + 18 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed); y += 30 * dp
         ink.label("Dati: Open-Meteo.com (CC BY 4.0), aggiornati ogni 10 minuti. Pioggia e vento sulle onde: in arrivo.", x, y + 18 * dp, 11.5f, Theme.TEXT_FAINT, face = Theme.condensed); y += 36 * dp
         y = section(x, y, "VAPORETTI DAL VIVO")
-        Settings.liveVaporetti = gui.toggle(row(x, y, w, "Vaporetti ACTV in tempo reale", "I battelli veri, sulla loro linea, dove sono adesso"), Settings.liveVaporetti); y += 56 * dp
+        Settings.liveVaporetti = gui.toggle(row(x, y, w, "Vaporetti ACTV in tempo reale", "I battelli veri, sulla loro linea, dove sono adesso"), Settings.liveVaporetti); y += ROW
         com.blazebaal.venice.live.Vaporetti.enabled = Settings.liveVaporetti
         ink.label(com.blazebaal.venice.live.Vaporetti.status, x, y + 18 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed); y += 26 * dp
         ink.label("Dati: ACTV S.p.A., open data GTFS / GTFS-Realtime (Comune di Venezia), aggiornati ogni 15 secondi.", x, y + 18 * dp, 11.5f, Theme.TEXT_FAINT, face = Theme.condensed)
@@ -433,10 +447,10 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         val cached = actions.cachedTiles(); val total = actions.totalTiles()
         val pb = GameState.prebuild
         val desc = if (pb >= 0f) "Preparazione… ${(pb * 100).roundToInt()}%" else "$cached di $total chunk già pronti in memoria"
-        val r = row(x, y, w, "Prepara tutta Venezia", desc, 60f)
+        val r = row(x, y, w, "Prepara tutta Venezia", desc)
         if (pb < 0f && gui.button(r, if (cached >= total) "PRONTA" else "PREPARA", 1)) actions.prebuildCity()
         if (pb >= 0f) { ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(60, 255, 255, 255); c.drawRoundRect(r, 10 * dp, 10 * dp, ink.fill); ink.stripes(RectF(r.left, r.top, r.left + r.width() * pb, r.bottom), 8f) }
-        y += 64 * dp
+        y += ROW
         ink.label("Costruisce una volta sola tutti i palazzi e li salva sul telefono: poi la città si carica", x, y + 16 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
         ink.label("dalla memoria invece di essere ricostruita mentre guidi (meno scatti a tutta velocità).", x, y + 32 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
         y += 48 * dp
