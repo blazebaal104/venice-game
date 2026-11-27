@@ -49,7 +49,9 @@ object Audio {
     private fun noise() = rnd.nextFloat() * 2f - 1f
 
     private class OnePole { var z = 0f; fun lp(x: Float, a: Float): Float { z += (x - z) * a; return z } }
-    private fun coef(fc: Float) = (1f - exp(-2f * PI.toFloat() * fc / SR)).coerceIn(0.0001f, 1f)
+    /** one-pole low-pass coefficient for a cutoff: a table lookup (it was an exp() per filter per sample, ~20 per sample) */
+    private val COEF = FloatArray(1601) { (1f - exp(-2f * PI.toFloat() * (it * 10f) / SR)).coerceIn(0.0001f, 1f) }
+    private fun coef(fc: Float): Float = COEF[(fc * 0.1f).toInt().coerceIn(0, 1600)]
 
     // engine state
     private var rpm = 750f; private var ePhase = 0.0; private var shaftPhase = 0.0
@@ -62,6 +64,10 @@ object Audio {
     private class Voice(val type: Int, var t: Float, val dur: Float, val gain: Float, val panL: Float, val panR: Float, val f: Float) { val lp = OnePole() }
     private val voices = ArrayList<Voice>()
     // boats (up to 4 nearest), each with its own phases
+    private val TAB = 1024
+    /** diesel firing waveform and its combustion-pulse envelope, one cycle each (built once) */
+    private val DIESEL = FloatArray(TAB) { val ph = it * 2.0 * PI / TAB; (sin(ph) + 0.6 * sin(2 * ph) + 0.35 * sin(3 * ph) + 0.2 * sin(4 * ph + 1.0) + 0.12 * sin(6 * ph)).toFloat() }
+    private val PULSE = FloatArray(TAB) { sin(PI * it / TAB).toFloat().pow(6f) }
     private val bPh = DoubleArray(4); private val bLp = Array(4) { OnePole() }; private val bChurn = Array(4) { OnePole() }
     // ambience
     private val lapLp = OnePole(); private val lapLp2 = OnePole(); private var lapMod = 0f
@@ -169,9 +175,9 @@ object Audio {
                 // diesel firing frequency follows the engine rpm from the behaviour layer (idle ~15 Hz, flat out ~42 Hz)
                 val f = (13f + 29f * rpm) * (if (b[3] == 2f) 0.8f else 1f)
                 bPh[bi] += f / SR; if (bPh[bi] > 1.0) bPh[bi] -= 1.0
-                val ph = bPh[bi] * 2.0 * PI
-                var d = (sin(ph) + 0.6 * sin(2 * ph) + 0.35 * sin(3 * ph) + 0.2 * sin(4 * ph + 1.0) + 0.12 * sin(6 * ph)).toFloat()
-                d += bLp[bi].lp(noise() * sin(PI * bPh[bi]).toFloat().pow(6f), coef(400f)) * 1.5f
+                val ti = (bPh[bi] * TAB).toInt() and (TAB - 1)
+                var d = DIESEL[ti]                                   // one firing cycle, precomputed (no sin per sample)
+                d += bLp[bi].lp(noise() * PULSE[ti], coef(400f)) * 1.5f
                 val churn = bChurn[bi].lp(noise(), coef(600f)) * (0.1f + bs * 0.06f + rpm * 0.25f)
                 val v = (d * (0.18f + 0.3f * rpm) + churn) * att * mv * 0.9f
                 sl += v * pl; sr += v * pr

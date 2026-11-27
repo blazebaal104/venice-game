@@ -172,7 +172,10 @@ class DynMesh(val stride: Int, layout: IntArray, capacityFloats: Int) {
     fun upload(data: FloatArray, floats: Int) {
         val n = minOf(floats, buf.capacity())
         buf.position(0); buf.put(data, 0, n); buf.position(0)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo); glBufferSubData(GL_ARRAY_BUFFER, 0, n * 4, buf)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        // orphan first: rewriting a buffer the GPU may still be reading from last frame stalls on mobile drivers
+        glBufferData(GL_ARRAY_BUFFER, buf.capacity() * 4, null, GL_STREAM_DRAW)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, n * 4, buf)
         count = n / stride
     }
     fun draw(mode: Int) { if (count == 0) return; glBindVertexArray(vao); glDrawArrays(mode, 0, count) }

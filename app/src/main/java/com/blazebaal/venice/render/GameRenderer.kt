@@ -115,10 +115,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         loadBridges()
         loadStops()
         live = LiveBoats(world); live.setStops(stopList)
-        for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) fleetMeshes[i] = loadMesh("live/$n.mesh")
+        for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) { fleetMeshes[i] = loadMesh("live/$n.mesh"); fleetLod[i] = loadMesh("live/${n}_lod.mesh") }
         wake.fleet = live
         smokeP = Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke"); trailP = Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail")
-        smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 24000 * 5)
+        smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 9000 * 5)
         boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
         Obstacles.stops = stopBoxes
         findWater()
@@ -168,10 +168,11 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     private var signTex = 0
     private lateinit var live: LiveBoats
-    private val fleetMeshes = arrayOfNulls<Mesh>(4)
+    private val fleetMeshes = arrayOfNulls<Mesh>(4); private val fleetLod = arrayOfNulls<Mesh>(4)
+    private val boatModel = FloatArray(16)
     private lateinit var smokeP: Program; private lateinit var trailP: Program
     private lateinit var smokeMesh: InstMesh; private lateinit var trailMesh: DynMesh
-    private val smokeData = FloatArray(LiveBoats.MAX_SMOKE * 6); private val trailData = FloatArray(24000 * 5)
+    private val smokeData = FloatArray(LiveBoats.MAX_SMOKE * 6); private val trailData = FloatArray(9000 * 5)
     private val stopBoxes = ArrayList<FloatArray>()
     private var stopList: List<StopLayout.Stop> = emptyList()
     private var stopExtras: Mesh? = null
@@ -309,7 +310,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (kmh > 138f) Events.post("VELOCITÀ MASSIMA", Events.GOOD, "140 km/h", cooldownMs = 20000)
         if (Controls.engineOn != lastEngine) { Events.post(if (Controls.engineOn) "MOTORE ACCESO" else "MOTORE SPENTO", Events.INFO, key = "engine", cooldownMs = 300); lastEngine = Controls.engineOn }
         val lv = Controls.throttle()
-        if (lv < -0.05f && lastLever >= -0.05f) Events.post("RETROMARCIA", Events.INFO, cooldownMs = 2000)
+        if (lv < -0.05f && lastLever >= -0.05f) Events.post("RETROMARCIA", Events.GOOD, cooldownMs = 2000)
         lastLever = lv
         // waypoint reached: it disappears
         if (GameState.hasWaypoint() && hypot(GameState.wpX - boat.x, GameState.wpY - boat.y) < 28f) {
@@ -672,10 +673,14 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         }
         // live ACTV vaporetti (plain-colour materials, no atlas)
         run {
-            val vd = if (reflection) 220f else maxDist + 30f
-            for (b in live.boats.values) if (hypot(b.px - camX, b.py - camY) < vd && sphereVisible(b.px, b.py, 2f, b.kind.len * 0.6f)) {
-                val vm = fleetMeshes[b.kind.ordinal] ?: continue
-                generic.mat4("uModel", live.model(b, boat.time, boat.waveAmp)); vm.draw()
+            val vd = if (reflection) 160f else maxDist + 30f
+            for (b in live.boats.values) {
+                val d = hypot(b.px - camX, b.py - camY)
+                if (d > vd || !sphereVisible(b.px, b.py, 2f, b.kind.len * 0.6f)) continue
+                // full detail only up close; the reflection and anything past ~70 m get the 8x lighter model
+                val vm = (if (reflection || d > 70f) fleetLod[b.kind.ordinal] else null) ?: fleetMeshes[b.kind.ordinal] ?: continue
+                live.model(b, boat.time, boat.waveAmp, boatModel)
+                generic.mat4("uModel", boatModel); vm.draw()
             }
         }
         boatMesh?.let { generic.mat4("uModel", bm); it.draw() }
@@ -698,14 +703,16 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private fun drawTrails(vp: FloatArray) {
-        val n = live.buildTrails(trailData, min(drawDist, 700f), camX, camY)
+        val n = live.buildTrails(trailData, min(drawDist, 380f), camX, camY)
         if (n == 0) return
         trailMesh.upload(trailData, n * 5)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
-        trailP.use(); common(trailP, vp, ident, -1000f)
+        trailP.use(); common(trailP, vp, ident, -1000f, false); foam(trailP)
         trailMesh.draw(GL_TRIANGLES)
         glDepthMask(true); glDisable(GL_BLEND)
     }
+
+    private fun foam(p: Program) { glActiveTexture(GL_TEXTURE11); glBindTexture(GL_TEXTURE_2D, foamT); p.i("uFoamT", 11) }
 
     private fun drawSmoke(vp: FloatArray) {
         val src = live.smokeP; var n = 0
@@ -713,7 +720,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             val o = i * 9; val t = src[o + 5] / src[o + 6]
             val q = n * 6
             smokeData[q] = src[o]; smokeData[q + 1] = src[o + 1]; smokeData[q + 2] = src[o + 2]
-            smokeData[q + 3] = src[o + 7] * (1f + t * 5f)                         // puffs grow as they rise
+            smokeData[q + 3] = src[o + 7] * (1f + t * 2.5f)                       // puffs grow as they rise
             smokeData[q + 4] = (0.10f + 0.30f * src[o + 8]) * min(1f, t * 8f) * (1f - t) // fade in, then out
             smokeData[q + 5] = src[o + 8] * (1f - t * 0.7f)
             n++
@@ -721,7 +728,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (n == 0) return
         smokeMesh.upload(smokeData, n)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
-        smokeP.use(); common(smokeP, vp, ident, -1000f)
+        smokeP.use(); common(smokeP, vp, ident, -1000f, false); foam(smokeP)
         smokeMesh.draw()
         glDepthMask(true); glDisable(GL_BLEND)
     }
@@ -731,7 +738,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (n == 0) return
         sprayMesh.upload(sprayData, n)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
-        sprayP.use(); common(sprayP, vp, ident, -1000f)
+        sprayP.use(); common(sprayP, vp, ident, -1000f); foam(sprayP)
         sprayMesh.draw()
         glDepthMask(true); glDisable(GL_BLEND)
     }

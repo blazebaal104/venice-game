@@ -316,20 +316,36 @@ class HudView(ctx: Context) : View(ctx) {
 
     /** Event texts: big coloured words that fade + slide in, hold, and fade out. No boxes. */
     private fun drawEvents() {
-        val ev = Events.live(); if (ev.isEmpty()) return
         val now = System.currentTimeMillis()
-        var y = height * 0.30f
-        for (e in ev.reversed()) {
-            val t = (now - e.t0).toFloat()
-            val a = when { t < 180f -> t / 180f; t > Events.LIFE_MS - 450f -> ((Events.LIFE_MS - t) / 450f).coerceAtLeast(0f); else -> 1f }
-            val slide = (1f - min(1f, t / 220f)) * 14 * s
-            val alpha = (a * 255).toInt()
-            ink.text.setShadowLayer(6 * s, 0f, 2 * s, Color.argb((a * 200).toInt(), 0, 0, 0))
-            ink.label(e.text, width / 2f, y + slide, 16f, Color.argb(alpha, Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.05f)
-            if (e.sub.isNotEmpty()) ink.label(e.sub, width / 2f, y + slide + 13 * s, 9f, Color.argb((alpha * 0.7f).toInt(), 235, 238, 242), Paint.Align.CENTER, Theme.condensed, 0.04f)
-            ink.text.clearShadowLayer()
-            y -= (if (e.sub.isNotEmpty()) 34 else 24) * s
+        val (cur, out, outT0) = Events.snapshot(now)
+        if (cur == null && out == null) return
+        val y = height * 0.30f
+        // the one being replaced: lifts up a little, grows and fades out quickly
+        if (out != null) {
+            val k = ((now - outT0).toFloat() / Events.OUT_MS).coerceIn(0f, 1f)
+            eventText(out, y - 6 * s * k, 1f + 0.12f * k, (1f - k) * (1f - k))
         }
+        if (cur != null) {
+            val t = (now - cur.t0).toFloat()
+            // pops in from small to big (ease-out with a slight overshoot), then fades and shrinks a touch at the end
+            val inK = (t / 240f).coerceIn(0f, 1f)
+            val pop = 1f + 1.7f * (inK - 1f).let { it * it * it } + 0.7f * (inK - 1f).let { it * it }      // easeOutBack
+            val endK = ((t - (Events.LIFE_MS - 320f)) / 320f).coerceIn(0f, 1f)
+            val scale = (0.45f + 0.55f * pop) * (1f - 0.08f * endK)
+            val alpha = min(1f, t / 120f) * (1f - endK) * (if (out != null) 0.4f + 0.6f * ((now - outT0).toFloat() / Events.OUT_MS).coerceIn(0f, 1f) else 1f)
+            eventText(cur, y, scale, alpha)
+        }
+    }
+
+    private fun eventText(e: Events.E, y: Float, scale: Float, a: Float) {
+        if (a <= 0.01f) return
+        val c = ink.c
+        c.save(); c.scale(scale, scale, width / 2f, y - 5 * s)
+        ink.text.textScaleX = 1.18f                     // stretched a little horizontally
+        ink.text.setShadowLayer(6 * s, 0f, 2 * s, Color.argb((a * 190).toInt(), 0, 0, 0))
+        ink.label(e.text, width / 2f, y, 13.6f, Color.argb((a * 255).toInt(), Color.red(e.color), Color.green(e.color), Color.blue(e.color)), Paint.Align.CENTER, Theme.black, 0.06f)
+        ink.text.clearShadowLayer(); ink.text.textScaleX = 1f
+        c.restore()
     }
 
     private fun dist(d: Float) = if (d < 1000f) "${d.roundToInt()} m" else String.format("%.1f km", d / 1000f).replace('.', ',')

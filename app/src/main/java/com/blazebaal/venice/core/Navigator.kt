@@ -12,7 +12,32 @@ class Navigator(private val world: WorldMap) {
         override fun removeEldestEntry(e: MutableMap.MutableEntry<Long, FloatArray>) = size > 400
     }
 
-    private fun water(x: Float, y: Float) = world.solid(x, y) < 0.3f
+    // vaporetto pontoons: boats go round them, never through (oriented boxes, bucketed on a 32 m grid)
+    private var boxes = FloatArray(0)            // x, y, cos, sin, half length, half width (inflated)
+    private var grid = HashMap<Long, IntArray>()
+    fun setBlockers(list: List<FloatArray>, inflate: Float = 0.4f) {
+        val b = FloatArray(list.size * 6); val g = HashMap<Long, ArrayList<Int>>()
+        for ((i, o) in list.withIndex()) {
+            b[i * 6] = o[0]; b[i * 6 + 1] = o[1]; b[i * 6 + 2] = cos(o[2]); b[i * 6 + 3] = sin(o[2]); b[i * 6 + 4] = o[3] + inflate; b[i * 6 + 5] = o[4] + inflate
+            val r = hypot(o[3], o[4]) + inflate
+            for (gx in floor((o[0] - r) / 32f).toInt()..floor((o[0] + r) / 32f).toInt())
+                for (gy in floor((o[1] - r) / 32f).toInt()..floor((o[1] + r) / 32f).toInt())
+                    g.getOrPut((gx.toLong() shl 32) or (gy.toLong() and 0xffffffffL)) { ArrayList() }.add(i)
+        }
+        val gg = HashMap<Long, IntArray>(); for ((k, v) in g) gg[k] = v.toIntArray()
+        synchronized(this) { boxes = b; grid = gg }
+        synchronized(cache) { cache.clear() }
+    }
+    private fun blocked(x: Float, y: Float): Boolean {
+        val ids = grid[(floor(x / 32f).toLong() shl 32) or (floor(y / 32f).toLong() and 0xffffffffL)] ?: return false
+        val b = boxes
+        for (i in ids) {
+            val dx = x - b[i * 6]; val dy = y - b[i * 6 + 1]
+            if (abs(dx * b[i * 6 + 2] + dy * b[i * 6 + 3]) < b[i * 6 + 4] && abs(-dx * b[i * 6 + 3] + dy * b[i * 6 + 2]) < b[i * 6 + 5]) return true
+        }
+        return false
+    }
+    private fun water(x: Float, y: Float) = world.solid(x, y) < 0.3f && !blocked(x, y)
     private fun free(x: Float, y: Float, cl: Float) =
         water(x, y) && water(x + cl, y) && water(x - cl, y) && water(x, y + cl) && water(x, y - cl)
 

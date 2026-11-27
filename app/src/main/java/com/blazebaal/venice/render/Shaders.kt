@@ -765,14 +765,17 @@ void main() {
     val SPRAY_FS = """#version 300 es
 precision highp float;
 $COMMON
+uniform sampler2D uFoamT;
 in float vA; in vec3 vW; in vec2 vC; in float vSize;
 out vec4 o;
 void main() {
     float r = dot(vC, vC);
-    float ragged = r * (0.85 + 0.4 * noise(vC * 2.5 + vW.xy * 9.0));
+    float ragged = r * (0.85 + 0.4 * texture(uFoamT, vC * 0.25 + vW.xy * 0.9).g);
     if (ragged > 1.0) discard;
     bool mist = vSize > 0.25;
-    float a = exp(-ragged * (mist ? 2.5 : 3.5)) * smoothstep(0.0, 0.3, vA) * (mist ? 0.08 : 0.38);
+    float near = smoothstep(1.2, 4.5, distance(vW, uCam));        // mist on the lens = full-screen overdraw: fade it
+    float a = exp(-ragged * (mist ? 2.5 : 3.5)) * smoothstep(0.0, 0.3, vA) * (mist ? 0.08 * near : 0.38);
+    if (a < 0.004) discard;
     float sh = sunShadow(vW, vec3(0, 0, 1));
     vec3 v = normalize(uCam - vW);
     float fwd = pow(max(dot(-v, uSunDir), 0.0), 6.0);       // droplets glow when backlit
@@ -785,30 +788,34 @@ void main() {
     const val SMOKE_VS = """#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aInfo; layout(location=3) in vec2 aCorner;
 uniform mat4 uVP; uniform vec3 uCam;
-out vec3 vW; out vec2 vC; out float vA; out float vDark;
+out vec3 vW; out vec2 vC; out float vA; out float vDark; out vec2 vT;
 void main() {
-    vec3 view = normalize(aPos - uCam);
+    float dist = distance(aPos, uCam);
+    // puffs right in front of the lens are the expensive ones (full-screen overdraw): fade them out and drop them
+    float a = aInfo.y * smoothstep(3.0, 9.0, dist);
+    if (a < 0.004) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+    vec3 view = (aPos - uCam) / dist;
     vec3 side = normalize(cross(view, vec3(0.0, 0.0, 1.0)));
     vec3 up = cross(side, view);
     vec3 p = aPos + (side * aCorner.x + up * aCorner.y) * aInfo.x;
-    vW = p; vC = aCorner; vA = aInfo.y; vDark = aInfo.z;
+    vW = p; vC = aCorner; vA = a; vDark = aInfo.z;
+    vT = aCorner * 0.18 + aPos.xy * 0.05;
     gl_Position = uVP * vec4(p, 1.0);
 }
 """
     val SMOKE_FS = """#version 300 es
-precision highp float;
+precision mediump float;
 $COMMON
-in vec3 vW; in vec2 vC; in float vA; in float vDark;
+uniform sampler2D uFoamT;
+in vec3 vW; in vec2 vC; in float vA; in float vDark; in vec2 vT;
 out vec4 o;
 void main() {
     float r = dot(vC, vC);
-    float n = noise(vC * 2.2 + vW.xy * 0.7 + vec2(uTime * 0.3, 0.0));
-    float d = r * (0.8 + 0.5 * n);
+    float d = r * (0.8 + 0.5 * texture(uFoamT, vT).b);
     if (d > 1.0) discard;
     float a = (1.0 - d) * (1.0 - d) * vA;
     vec3 base = mix(vec3(0.62, 0.63, 0.64), vec3(0.16, 0.16, 0.17), vDark);
-    vec3 col = base * (uSunCol * 0.55 + uSkyAmb * 1.2);
-    o = vec4(fog(col, vW), a);
+    o = vec4(fog(base * (uSunCol * 0.55 + uSkyAmb * 1.2), vW), a);
 }
 """
 
@@ -822,12 +829,13 @@ void main() { vW = vec3(aPos, 0.07); vInfo = aInfo; gl_Position = uVP * vec4(vW,
     val TRAIL_FS = """#version 300 es
 precision highp float;
 $COMMON
+uniform sampler2D uFoamT;
 in vec3 vW; in vec3 vInfo;
 out vec4 o;
 void main() {
     float age = vInfo.x, across = abs(vInfo.y), str = vInfo.z;
     // churned core right behind the stern, breaking up into streaks and patches as it ages and spreads
-    float n1 = noise(vW.xy * 0.55), n2 = noise(vW.xy * 2.1 + 7.0);
+    float n1 = texture(uFoamT, vW.xy * 0.069).r, n2 = texture(uFoamT, vW.xy * 0.26 + 0.37).g;
     float core = smoothstep(1.0, 0.25 + 0.4 * age, across);
     float edge = smoothstep(0.55, 0.95, across) * smoothstep(1.0, 0.92, across) * 0.6;
     float breakup = smoothstep(0.25 + 0.55 * age, 0.85, n1 * 0.6 + n2 * 0.4);

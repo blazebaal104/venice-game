@@ -55,6 +55,7 @@ class LiveBoats(private val world: WorldMap) {
         var seen = 0L; var fresh = true; var sim = false
         var simStop = -1
         var smokeAcc = 0f
+        var clearT = -1f; var clearAhead = true; var wakePick = false
         val trail = FloatArray(TRAIL_N * 4); var trailHead = 0; var trailCount = 0; var trailX = 0f; var trailY = 0f
         val px get() = x + offX
         val py get() = y + offY
@@ -87,8 +88,10 @@ class LiveBoats(private val world: WorldMap) {
 
     // ================================================================ per frame
     /** camX/camY: smoke and trails are only made near the camera */
+    private var blockersSet = false
     fun update(dt: Float, camX: Float, camY: Float) {
         time += dt
+        if (!blockersSet && Obstacles.stops.isNotEmpty()) { blockersSet = true; val st = Obstacles.stops; worker.execute { nav.setBlockers(st) } }
         val live = Vaporetti.isLive()
         if (live) {
             if (Vaporetti.updatedAt != lastFeed) { lastFeed = Vaporetti.updatedAt; applyFeed() }
@@ -110,11 +113,23 @@ class LiveBoats(private val world: WorldMap) {
         separate(dt)
         smoke(dt, camX, camY)
         publishClock -= dt
-        if (publishClock <= 0f) { publishClock = 0.05f; publish() }
-        else Obstacles.boats = list.map { floatArrayOf(it.px, it.py, it.h, it.kind.len / 2f, it.kind.beam / 2f) }
+        if (publishClock <= 0f) { publishClock = 0.05f; publish() }      // collisions, minimap, audio: 20 Hz is plenty
     }
 
     // ================================================================ LIVE: ACTV fixes -> where along its leg it should be
+    private val berthCache = HashMap<Long, Berth?>()
+    /** the berth of a GTFS stop: the pontoon nearest to the stop's own coordinates (Rialto A, B, C... are separate) */
+    private fun berthAt(lat: Double, lon: Double): Berth? {
+        if (lat.isNaN() || lon.isNaN()) return null
+        val key = ((lat * 1e5).roundToLong() shl 32) xor (lon * 1e5).roundToLong()
+        return berthCache.getOrPut(key) {
+            val p = Places.project(lat, lon, GameState.lat0, GameState.lon0)
+            var best: Berth? = null; var bd = 75f
+            for (be in berths) { val d = hypot(be.x - p[0], be.y - p[1]); if (d < bd) { bd = d; best = be } }
+            best
+        }
+    }
+
     private fun applyFeed() {
         val lat0 = GameState.lat0; val lon0 = GameState.lon0
         val now = System.currentTimeMillis()
@@ -122,18 +137,25 @@ class LiveBoats(private val world: WorldMap) {
             val p = Places.project(v.lat, v.lon, lat0, lon0)
             val b = boats.getOrPut(v.id) { Boat(v.id) }
             b.kind = kindFor(v.line); b.line = v.line; b.head = v.headsign; b.seen = now
-            val stopped = v.status == 1 || (v.status < 0 && v.speed in 0f..0.3f)
-            // the stop it is at (stopped) or heading for (incoming / in transit: the feed's stop is the next one)
-            var target: Berth? = if (v.stopName.isNotEmpty()) namedBerth(v.stopName, p[0], p[1], if (stopped) 150f else 2500f) else null
-            if (stopped && target == null) target = nearestBerth(p[0], p[1], 70f, "")
-            if (!stopped && target == null) target = nextOnTrip(v.tripStops, p[0], p[1])
-            if (stopped && target != null && hypot(target.x - p[0], target.y - p[1]) > 120f) target = null
+            // the stop the feed names: by its GTFS coordinates (exact pontoon), by name only as a fallback
+            val named = berthAt(v.stopLat, v.stopLon) ?: (if (v.stopName.isNotEmpty()) namedBerth(v.stopName, p[0], p[1], 600f) else null)
+            val reported = if (v.speed >= 0f) v.speed else -1f
+            var stopped = v.status == 1
+            var target: Berth? = named ?: nextOnTrip(v.tripStops, p[0], p[1], b)
+            // behaviour inference: slow and close to a pontoon of its trip (or the one the feed names) = it's coming
+            // alongside there, even before the feed says STOPPED_AT
+            val slow = (reported in 0f..1.2f) || (b.hasFix && b.vEst < 1.0f && b.legTo != null)
+            if (!stopped && slow) {
+                val near = nearbyTripBerth(v.tripStops, p[0], p[1], 45f) ?: target?.takeIf { hypot(it.x - p[0], it.y - p[1]) < 45f }
+                if (near != null) { target = near; stopped = reported in 0f..0.4f || hypot(near.x - p[0], near.y - p[1]) < 25f }
+            }
+            if (stopped && target != null && hypot(target.x - p[0], target.y - p[1]) > 120f) target = nearestBerth(p[0], p[1], 60f, "")
             if (b.fresh) {
                 b.fresh = false
                 if (stopped && target != null) { placeDocked(b, target); continue }
                 val w = nav.nearestWater(p[0], p[1]); b.x = w[0]; b.y = w[1]
                 b.h = if (!v.bearing.isNaN()) Math.toRadians(90.0 - v.bearing).toFloat() else if (target != null) atan2(target.y - b.y, target.x - b.x) else 0f
-                b.speed = if (v.speed > 0f) min(v.speed, b.kind.maxSpeed) else 3f; b.rpm = 0.5f; b.state = State.UNDERWAY
+                b.speed = if (reported > 0f) min(reported, b.kind.maxSpeed) else 3f; b.rpm = 0.5f; b.state = State.UNDERWAY
                 if (target != null) planLeg(b, target, null) else planLegTo(b, p[0], p[1])
                 continue
             }
@@ -154,31 +176,41 @@ class LiveBoats(private val world: WorldMap) {
             val leg = b.leg ?: continue
             if (b.planning) continue
             val sNew = if (stopped && target != null && target === b.legTo) b.legLen else project(b, leg, p[0], p[1])
-            if (sNew < 0f) { if (!b.planning) { if (b.legTo != null) planLeg(b, b.legTo!!, null) else planLegTo(b, p[0], p[1]) }; continue }  // off the leg: replan
+            if (sNew < 0f) { if (b.legTo != null) planLeg(b, b.legTo!!, null) else planLegTo(b, p[0], p[1]); continue }  // off the leg: replan
             if (b.hasFix) {
                 val dtf = max(1f, time - b.fixT)
                 val v1 = ((sNew - b.sFix) / dtf).coerceIn(0f, b.kind.maxSpeed)
-                b.vEst = b.vEst * 0.5f + v1 * 0.5f
-            } else b.vEst = if (v.speed > 0f) v.speed else 3f
+                b.vEst = if (reported >= 0f) (v1 * 0.6f + min(reported, b.kind.maxSpeed) * 0.4f) else b.vEst * 0.4f + v1 * 0.6f
+            } else b.vEst = if (reported > 0f) reported else 3f
             b.sFix = max(sNew, if (b.hasFix) b.sFix else 0f); b.fixT = time; b.hasFix = true
         }
         boats.values.removeAll { !it.sim && now - it.seen > 90_000 }
     }
 
-    private fun legEndFar(b: Boat, x: Float, y: Float): Boolean {
-        val l = b.leg ?: return true
-        return hypot(l[l.size - 2] - x, l[l.size - 1] - y) > 30f && project(b, l, x, y) < 0f || project(b, l, x, y) >= b.legLen - 4f && hypot(l[l.size - 2] - x, l[l.size - 1] - y) > 30f
+    /** a pontoon of its trip within r of (x, y) */
+    private fun nearbyTripBerth(stops: List<Vaporetti.StopRef>, x: Float, y: Float, r: Float): Berth? {
+        var best: Berth? = null; var bd = r
+        for (st in stops) { val be = berthAt(st.lat, st.lon) ?: continue; val d = hypot(be.x - x, be.y - y); if (d < bd) { bd = d; best = be } }
+        return best
     }
 
-    /** the next stop on its trip ahead of (x, y): the stop after the one it's nearest to */
-    private fun nextOnTrip(stops: List<String>, x: Float, y: Float): Berth? {
+    /** the next stop of its trip: the nearest trip stop if it's still ahead of the bow, otherwise the one after it */
+    private fun nextOnTrip(stops: List<Vaporetti.StopRef>, x: Float, y: Float, b: Boat): Berth? {
         if (stops.size < 2) return null
-        val bs = stops.map { namedBerth(it, x, y, 6000f) }
+        val bs = stops.map { berthAt(it.lat, it.lon) }
         var bi = -1; var bd = Float.MAX_VALUE
         for ((i, be) in bs.withIndex()) if (be != null) { val d = hypot(be.x - x, be.y - y); if (d < bd) { bd = d; bi = i } }
         if (bi < 0) return null
-        // nearest stop behind or ahead? if moving away from it along the trip, the next one
-        return if (bi + 1 < bs.size && bd < 400f) bs[bi + 1] ?: bs[bi] else bs[bi]
+        val be = bs[bi]!!
+        val ahead = (be.x - x) * cos(b.h) + (be.y - y) * sin(b.h)
+        if (ahead > 15f || bi + 1 >= bs.size) return be
+        for (k in bi + 1 until bs.size) bs[k]?.let { return it }
+        return be
+    }
+
+    private fun legEndFar(b: Boat, x: Float, y: Float): Boolean {
+        val l = b.leg ?: return true
+        return hypot(l[l.size - 2] - x, l[l.size - 1] - y) > 30f && (project(b, l, x, y) < 0f || project(b, l, x, y) >= b.legLen - 4f)
     }
 
     // ================================================================ legs
@@ -312,8 +344,8 @@ class LiveBoats(private val world: WorldMap) {
         if (leg == null && b.state == State.DEPARTING) { b.cmd = 0.15f; b.stateT = 0f; return }   // leg still being planned: wait alongside
         if (leg == null) {
             // no leg yet: keep going gently on the current heading while the water ahead is clear (a guess)
-            val clear = nav.clearLine(b.x, b.y, b.x + cos(b.h) * 14f, b.y + sin(b.h) * 14f, 2f)
-            b.cmd = control(b, if (clear) min(max(b.speed, 1.5f), 3f) else 0f)
+            if (b.stateT - b.clearT > 0.5f || b.stateT < b.clearT) { b.clearT = b.stateT; b.clearAhead = nav.clearLine(b.x, b.y, b.x + cos(b.h) * 14f, b.y + sin(b.h) * 14f, 2f) }
+            b.cmd = control(b, if (b.clearAhead) min(max(b.speed, 1.5f), 3f) else 0f)
             b.x += cos(b.h) * b.speed * dt; b.y += sin(b.h) * b.speed * dt
             return
         }
@@ -514,10 +546,10 @@ class LiveBoats(private val world: WorldMap) {
         }
         for (b in list) {
             val dx = b.px - camX; val dy = b.py - camY
-            if (dx * dx + dy * dy > 260f * 260f) continue
+            if (dx * dx + dy * dy > 160f * 160f) continue
             // a thin haze at idle, more with rpm, dark puffs when the throttle opens (the diesel under load)
             val load = min(1f, b.rpmRise * 4f)
-            b.smokeAcc += dt * (1.5f + 7f * b.rpm + 22f * load)
+            b.smokeAcc += dt * (0.6f + 3.5f * b.rpm + 12f * load)
             while (b.smokeAcc >= 1f && smokeN < MAX_SMOKE) {
                 b.smokeAcc -= 1f
                 val c = cos(b.h); val s = sin(b.h)
@@ -528,8 +560,8 @@ class LiveBoats(private val world: WorldMap) {
                 smokeP[o + 2] = b.kind.exZ
                 // left behind by the boat: starts with part of its velocity
                 smokeP[o + 3] = c * b.speed * 0.3f; smokeP[o + 4] = s * b.speed * 0.3f
-                smokeP[o + 5] = 0f; smokeP[o + 6] = 2.5f + 3f * b.rpm + rnd() * 1.5f
-                smokeP[o + 7] = 0.25f + 0.25f * b.rpm
+                smokeP[o + 5] = 0f; smokeP[o + 6] = 2.2f + 2f * b.rpm + rnd() * 1.0f
+                smokeP[o + 7] = 0.3f + 0.3f * b.rpm
                 smokeP[o + 8] = (0.15f + 0.85f * load).coerceIn(0f, 1f)
                 smokeN++
             }
@@ -587,10 +619,13 @@ class LiveBoats(private val world: WorldMap) {
     fun wakeHulls(x: Float, y: Float, radius: Float, pose: FloatArray, info: FloatArray, size: FloatArray): Int {
         var n = 0
         val r2 = radius * radius
-        // nearest first (simple selection; the fleet is small)
-        val cand = list.filter { val dx = it.px - x; val dy = it.py - y; dx * dx + dy * dy < r2 }.sortedBy { hypot(it.px - x, it.py - y) }
-        for (b in cand) {
-            if (n >= 4) break
+        // the 4 nearest (selection without allocating: the fleet is small)
+        for (b in list) b.wakePick = false
+        while (n < 4) {
+            var best: Boat? = null; var bd = r2
+            for (c in list) { if (c.wakePick) continue; val dx = c.px - x; val dy = c.py - y; val d = dx * dx + dy * dy; if (d < bd) { bd = d; best = c } }
+            val b = best ?: break
+            b.wakePick = true
             pose[n * 4] = b.px; pose[n * 4 + 1] = b.py; pose[n * 4 + 2] = b.h; pose[n * 4 + 3] = b.kind.draft
             info[n * 4] = b.cmd.coerceIn(-1f, 1f) * b.rpm; info[n * 4 + 1] = 0f; info[n * 4 + 2] = b.speed; info[n * 4 + 3] = 0f
             size[n * 2] = b.kind.len / 2f; size[n * 2 + 1] = b.kind.beam / 2f
@@ -661,11 +696,15 @@ class LiveBoats(private val world: WorldMap) {
         audio = list.map { floatArrayOf(it.px, it.py, it.speed, it.kind.ordinal.toFloat(), if (it.docked) 1f else 0f, it.rpm) }
     }
 
-    fun model(b: Boat, time: Float, waveAmp: Float): FloatArray {
+    /** model matrix (translation * rotZ(heading) * rotY(squat)) written into out, no allocation */
+    fun model(b: Boat, time: Float, waveAmp: Float, out: FloatArray) {
         val z = Waves.height(b.px, b.py, time, waveAmp) * 0.5f
-        // squat by the stern and a little heel into turns when under power
-        val pitch = -0.012f * b.rpm * min(1f, b.speed / 3f)
-        return Mat4.mul(Mat4.mul(Mat4.translation(b.px, b.py, z), Mat4.rotZ(b.h)), Mat4.rotY(pitch))
+        val pitch = -0.012f * b.rpm * min(1f, b.speed / 3f)      // squats by the stern under power
+        val ch = cos(b.h); val sh = sin(b.h); val cp = cos(pitch); val sp = sin(pitch)
+        out[0] = ch * cp; out[1] = sh * cp; out[2] = -sp; out[3] = 0f
+        out[4] = -sh; out[5] = ch; out[6] = 0f; out[7] = 0f
+        out[8] = ch * sp; out[9] = sh * sp; out[10] = cp; out[11] = 0f
+        out[12] = b.px; out[13] = b.py; out[14] = z; out[15] = 1f
     }
 
     fun shutdown() { worker.shutdownNow() }
@@ -673,8 +712,8 @@ class LiveBoats(private val world: WorldMap) {
     class Marker(val x: Float, val y: Float, val h: Float, val line: String, val head: String)
     companion object {
         const val CUE_DEPART = 1f; const val CUE_DOCK = 2f
-        const val MAX_SMOKE = 900
-        const val TRAIL_N = 48
+        const val MAX_SMOKE = 260
+        const val TRAIL_N = 32
         const val TRAIL_LIFE = 45f
         const val LEG_STEP = 2f
         @Volatile var markers: List<Marker> = emptyList()

@@ -22,8 +22,10 @@ object Vaporetti {
         val id: String, val line: String, val headsign: String,
         val lat: Double, val lon: Double, val bearing: Float, val speed: Float, val time: Long,
         val status: Int, val stopName: String,
-        /** the stop names of its trip in order (its whole route today), empty if the trip is unknown */
-        val tripStops: List<String> = emptyList(),
+        /** the stops of its trip in order (its whole route today, GTFS coordinates), empty if the trip is unknown */
+        val tripStops: List<StopRef> = emptyList(),
+        /** GTFS coordinates of the stop in `stopName` (each pontoon - Rialto A, B, C... - is its own stop), NaN if none */
+        val stopLat: Double = Double.NaN, val stopLon: Double = Double.NaN,
     )
     class StopRef(val name: String, val lat: Double, val lon: Double, val arr: Int, val dep: Int)
     /** one line in one direction: its stops with times relative to the first departure, and the day's departures */
@@ -43,7 +45,7 @@ object Vaporetti {
     private val tripDir = HashMap<String, String>()
     private val stopInfo = HashMap<String, StopRef>()
     /** trip id -> its stop names in order (shared lists: one per distinct stop pattern) */
-    private val tripPattern = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
+    private val tripPattern = java.util.concurrent.ConcurrentHashMap<String, List<StopRef>>()
 
     fun start(ctx: Context) {
         if (thread != null) return
@@ -102,8 +104,8 @@ object Vaporetti {
                 }
             }
         }
-        val patterns = HashMap<List<String>, List<String>>()
-        for ((t, ids) in tripStops) { val names = ids.mapNotNull { stopInfo[it]?.name }; tripPattern[t] = patterns.getOrPut(names) { names } }
+        val patterns = HashMap<List<String>, List<StopRef>>()
+        for ((t, ids) in tripStops) tripPattern[t] = patterns.getOrPut(ids) { ids.mapNotNull { stopInfo[it] } }
         // one stop pattern per line + direction (the trip with the most stops), plus every departure of that pattern
         val groups = HashMap<String, ArrayList<String>>()
         for (t in tripStops.keys) { val r = tripRoute[t] ?: continue; groups.getOrPut(r + "|" + tripDir[t].orEmpty()) { ArrayList() }.add(t) }
@@ -198,7 +200,8 @@ object Vaporetti {
         val rid = routeId.ifEmpty { tripRoute[tripId] ?: "" }
         val line = routeName[rid] ?: rid.ifEmpty { "?" }
         return Vessel(label.ifEmpty { id }, line, tripHead[tripId] ?: "", lat, lon, bearing, speed,
-            if (time > 0) time * 1000 else System.currentTimeMillis(), st, stopInfo[stopId]?.name ?: "", tripPattern[tripId] ?: emptyList())
+            if (time > 0) time * 1000 else System.currentTimeMillis(), st, stopInfo[stopId]?.name ?: "", tripPattern[tripId] ?: emptyList(),
+            stopInfo[stopId]?.lat ?: Double.NaN, stopInfo[stopId]?.lon ?: Double.NaN)
     }
 
     private fun open(url: String): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {

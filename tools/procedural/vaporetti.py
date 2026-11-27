@@ -17,12 +17,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 from meshlib import *
 
 SCALE = 0.9
+LOD = False      # low-detail variant (*_lod.mesh): far away and in the water reflection
 CREAM = (0.86, 0.83, 0.71); WHITE = (0.91, 0.92, 0.91); GREEN = (0.08, 0.26, 0.18); BLACK = (0.05, 0.055, 0.06)
 ANTIFOUL = (0.42, 0.14, 0.09); RED = (0.72, 0.10, 0.08); RAFT = (0.80, 0.16, 0.08)
 GLASS = (0.08, 0.11, 0.13); WHEEL_GREY = (0.56, 0.58, 0.59); ROOF = (0.80, 0.81, 0.81); RAIL = (0.78, 0.79, 0.80)
 WOOD = (0.46, 0.29, 0.16); RUBBER = (0.04, 0.04, 0.045); YELLOW = (0.95, 0.78, 0.10)
 
 def hull(m, L, B, deck, bands, bow_round=0.45, fender=0.16, N=64, nose_bumper=False, bump_stops=0):
+    if LOD: N, bump_stops, nose_bumper = 14, 0, False
     """bands: list of (z0, z1, colour, gloss) up the topsides from the waterline (z=0) to the deck edge."""
     hb_max = B / 2 - fender
     def hb(x):
@@ -45,7 +47,7 @@ def hull(m, L, B, deck, bands, bow_round=0.45, fender=0.16, N=64, nose_bumper=Fa
     # the heavy black rubber fender round the deck edge
     m.color(*RUBBER, gloss=0.15)
     ring = [(x, hb(x) + fender * 0.5, deck - 0.3) for x in xs] + [(x, -hb(x) - fender * 0.5, deck - 0.3) for x in reversed(xs)]
-    m.tube(ring + [ring[0]], fender * 0.85, 8, caps=False)
+    m.tube(ring + [ring[0]], fender * 0.85, 4 if LOD else 8, caps=False)
     if nose_bumper:
         m.tube([(L / 2 - 0.9, -0.7, deck - 0.35), (L / 2 + 0.12, 0, deck - 0.35), (L / 2 - 0.9, 0.7, deck - 0.35)], 0.22, 8)
     for k in range(bump_stops):           # black vertical rubber bump stops down the sides
@@ -59,7 +61,7 @@ def cabin(m, x0, x1, w, z0, z1, win0, win1, body=CREAM, pitch=1.45, posts=True):
         m.quad((x0, s * w, z0), (x1, s * w, z0), (x1, s * w, win0), (x0, s * w, win0))
         m.quad((x0, s * w, win1), (x1, s * w, win1), (x1, s * w, z1), (x0, s * w, z1))
         m.color(*GLASS, gloss=0.9); m.quad((x0, s * w * 1.002, win0), (x1, s * w * 1.002, win0), (x1, s * w * 1.002, win1), (x0, s * w * 1.002, win1))
-        if posts:
+        if posts and not LOD:
             m.color(*body, gloss=0.4)
             x = x0 + pitch * 0.8
             while x < x1 - 0.4: m.box(x, s * w * 1.004, (win0 + win1) / 2, 0.07, 0.02, (win1 - win0) / 2); x += pitch
@@ -70,7 +72,7 @@ def cabin(m, x0, x1, w, z0, z1, win0, win1, body=CREAM, pitch=1.45, posts=True):
 
 def railing(m, hb, xs, xa, xb, z0, h=1.0, inset=0.08, cap=WOOD):
     seg = [x for x in xs if xa <= x <= xb]
-    if len(seg) < 2: return
+    if len(seg) < 2 or LOD: return
     for s in (-1, 1):
         m.color(*cap, gloss=0.35); m.tube([(x, s * (hb(x) - inset), z0 + h) for x in seg], 0.045, 6)
         m.color(*RAIL, gloss=0.6)
@@ -83,11 +85,15 @@ def wheelhouse(m, x, w, d, z0, h, body=WHEEL_GREY, mast=True):
     m.box(x + 0.02, 0, z0 + h * 0.6, d + 0.02, w + 0.02, h * 0.28)                   # big windows all round
     m.color(*YELLOW, gloss=0.3); m.box(x + d + 0.03, 0, z0 + h - 0.1, 0.04, min(0.55, w * 0.6), 0.1)   # line board
     m.color(*ROOF, gloss=0.3); m.box(x, 0, z0 + h + 0.04, d + 0.12, w + 0.12, 0.04)
-    if mast:
+    if mast and not LOD:
         m.color(0.85, 0.85, 0.85, gloss=0.4); m.tube([(x - d * 0.6, 0, z0 + h), (x - d * 0.6, 0, z0 + h + 1.5)], 0.045, 6)
         m.color(1.0, 0.95, 0.85, gloss=0.6); m.box(x - d * 0.6, 0, z0 + h + 1.55, 0.07, 0.07, 0.07)
 
 def rafts(m, xs_, z, y=0.55):
+    if LOD:
+        for x in xs_:
+            m.color(*RAFT, gloss=0.35); m.box(x, 0, z + 0.25, 0.55, y + 0.28, 0.25)
+        return
     for x in xs_:
         for s in (-1, 1):
             m.color(*RAFT, gloss=0.35); m.tube([(x - 0.55, s * y, z + 0.28), (x + 0.55, s * y, z + 0.28)], 0.28, 10)
@@ -156,8 +162,12 @@ os.makedirs(out, exist_ok=True)
 lines = ["# type length beam exhaust_x exhaust_y exhaust_z  (metres, scaled; written by tools/procedural/vaporetti.py)"]
 dims = {'motobattello': (23.9, 4.2), 'motoscafo': (21.1, 3.75), 'motonave': (31.0, 5.5), 'lancione': (19.6, 4.3)}
 for name, f in (('motobattello', motobattello), ('motoscafo', motoscafo), ('motonave', motonave), ('lancione', lancione)):
+    LOD = False
     m, ex = f()
     print(name, scaled(m, SCALE).write(os.path.join(out, name + '.mesh')))
+    LOD = True
+    print(name + '_lod', scaled(f()[0], SCALE).write(os.path.join(out, name + '_lod.mesh')))
+    LOD = False
     L, B = dims[name]
     lines.append(f"{name} {L * SCALE:.2f} {B * SCALE:.2f} {ex[0] * SCALE:.2f} {ex[1] * SCALE:.2f} {ex[2] * SCALE:.2f}")
 open(os.path.join(out, 'fleet.txt'), 'w').write('\n'.join(lines) + '\n')
