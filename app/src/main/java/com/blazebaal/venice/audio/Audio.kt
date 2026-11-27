@@ -30,6 +30,8 @@ object Audio {
     // ---- inputs (written by the game)
     @Volatile var running = false
     @Volatile var paused = false
+    /** on the main menu: the world is silent (you can't see it), only the buttons make a sound */
+    @Volatile var menu = true
     @Volatile var master = 0.8f; @Volatile var engineVol = 0.8f; @Volatile var ambienceVol = 0.6f
     @Volatile var engineOn = true
     @Volatile var throttle = 0f; @Volatile var speed = 0f; @Volatile var trim = 0f; @Volatile var airborne = false
@@ -56,6 +58,11 @@ object Audio {
     const val EV_WAKE = 9f
     /** a gull calling at x, y (the birds you see) */
     const val EV_GULL = 10f
+    /** a button: 1 = tap, 2 = back (lower) - plays even over the menus and pause */
+    const val EV_UI = 11f
+
+    /** the soft "plop" of a menu button */
+    fun ui(back: Boolean = false) = event(EV_UI, if (back) 2f else 1f)
 
     /** one-shot sound at a world position (NaN = at the player): type, strength, x, y, kind (what was hit / boat type) */
     fun event(type: Float, strength: Float, x: Float = Float.NaN, y: Float = Float.NaN, kind: Float = 0f) {
@@ -133,6 +140,7 @@ object Audio {
         var pos = 0.0; var t = 0f; val lp = OnePole(); val lp2 = OnePole(); var done = false
     }
     private val voices = ArrayList<Voice>()
+    private val uiVoices = ArrayList<Voice>()
     private fun play(c: Clip?, gain: Float, rate: Float = 1f, pan: FloatArray = CENTRE, delay: Float = 0f, lp: Float = 20000f, send: Float = 0.3f) {
         if (c == null || gain < 0.002f || voices.size >= 40) return
         voices.add(Voice(c, T_CLIP, rate, gain * pan[2], pan[0], pan[1], (delay * SR).toInt(), coef(lp), send))
@@ -244,6 +252,13 @@ object Audio {
     private fun handle(e: FloatArray) {
         val type = e[0]; val s = e[1]
         val p = pan(e[2], e[3])
+        if (type == EV_UI) {
+            // a drop falling into water, short and close: the menus' click (on its own bus, never faded out)
+            val c = pick("plip", 2) ?: return
+            if (uiVoices.size < 6) uiVoices.add(Voice(c, T_CLIP, (if (s > 1.5f) 0.82f else 1.12f) * rr(0.97f, 1.03f), 0.42f, 0.55f, 0.55f, 0, coef(7000f), 0f))
+            return
+        }
+        if (menu && type != EV_THUNDER) return                       // nothing of the world while on the menu
         when (type) {
             EV_SPLASH -> {                                  // landing after a jump
                 val g = min(1f, s / 5f)
@@ -373,7 +388,7 @@ object Audio {
     // ================================================================ the mix
     private fun renderBlock(L: FloatArray, R: FloatArray) {
         val dt = 1f / SR
-        val targetFade = if (paused) 0.0f else 1f
+        val targetFade = if (paused || menu) 0.0f else 1f
         val spd = speed; val on = engineOn; val thr = if (on) abs(throttle) else 0f
         val sp = (spd / 39f).coerceIn(0f, 1f)
         val load = (1f - (spd / 38f).coerceIn(0f, 1f)) * thr               // pushing hard at low speed = load
@@ -397,7 +412,7 @@ object Audio {
         val hr = cal.get(Calendar.HOUR_OF_DAY)
         if (cal.get(Calendar.MINUTE) == 0 && hr != lastBellHour) {
             lastBellHour = hr; bellsLeft = if (hr in 7..22) ((hr + 11) % 12) + 1 else 0; bellT = 2.5f
-            if (hr == 12) noonPeal()
+            if (hr == 12 && !menu) noonPeal()
         }
         if (bellsLeft > 0) {
             bellT += N * dt
@@ -582,7 +597,19 @@ object Audio {
             dlL[dlPos] = send + echoLpR.lp(eR, 0.35f) * 0.38f
             dlR[dlPos] = send + echoLpL.lp(eL, 0.35f) * 0.38f
             dlPos = (dlPos + 1) and 8191
-            L[i] = (sl + a + eL * wet) * fade; R[i] = (sr + a + eR * wet) * fade
+            // menu buttons, on top of everything (not faded with the world)
+            var ul = 0f
+            if (uiVoices.isNotEmpty()) {
+                var q = 0
+                while (q < uiVoices.size) {
+                    val uv = uiVoices[q]
+                    val v = voice(uv)
+                    if (uv.done) { uiVoices.removeAt(q); continue }
+                    ul += v * uv.gain * master.coerceAtLeast(0.3f)
+                    q++
+                }
+            }
+            L[i] = (sl + a + eL * wet) * fade + ul; R[i] = (sr + a + eR * wet) * fade + ul
         }
     }
 

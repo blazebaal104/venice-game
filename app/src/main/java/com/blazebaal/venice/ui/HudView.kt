@@ -88,9 +88,9 @@ class HudView(ctx: Context) : View(ctx) {
                     Settings.steerMode == 0 && padRect().contains(x, y) -> { padId = id; setPad(x) }
                     Settings.steerMode == 1 && leftArrow().contains(x, y) -> { leftId = id; Controls.leftHeld = true }
                     Settings.steerMode == 1 && rightArrow().contains(x, y) -> { rightId = id; Controls.rightHeld = true }
-                    mapRect().contains(x, y) -> { Controls.screen = Screen.MAP; haptic() }
-                    hit(pauseBtn(), x, y) -> { Controls.screen = Screen.PAUSE; haptic() }
-                    hit(camBtn(), x, y) -> { Controls.cameraMode = (Controls.cameraMode + 1) % 3; haptic() }
+                    mapRect().contains(x, y) -> { Controls.screen = Screen.MAP; haptic(); com.blazebaal.venice.audio.Audio.ui() }
+                    hit(pauseBtn(), x, y) -> { Controls.screen = Screen.PAUSE; haptic(); com.blazebaal.venice.audio.Audio.ui() }
+                    hit(camBtn(), x, y) -> { Controls.cameraMode = (Controls.cameraMode + 1) % 3; haptic(); com.blazebaal.venice.audio.Audio.ui() }
                     hit(engineBtn(), x, y) -> { Controls.engineOn = !Controls.engineOn; if (!Controls.engineOn) Controls.lever = 0f; haptic() }
                     hit(trimUp(), x, y) -> { trimId = id; trimDir = 1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(1); haptic() }
                     hit(trimDown(), x, y) -> { trimId = id; trimDir = -1; trimHoldStart = System.currentTimeMillis(); trimAcc = 0f; stepTrim(-1); haptic() }

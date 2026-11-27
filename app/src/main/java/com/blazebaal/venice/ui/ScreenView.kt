@@ -47,7 +47,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     })
 
     init {
-        gui.onFeedback = { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY) }
+        gui.onFeedback = { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); com.blazebaal.venice.audio.Audio.ui() }
         // 60 fps while a page scrolls or glides (the GL view is frozen meanwhile, so this is the only work), 30 otherwise
         val tick = object : Runnable { override fun run() { if (Controls.screen != Screen.NONE) invalidate(); postDelayed(this, if (Controls.screen == Screen.SETTINGS || gui.gliding) 16 else 33) } }
         post(tick)
@@ -175,6 +175,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     private val boatWin = RectF()
     private val cardPath = Path()
 
+    private val version: String by lazy { try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?" } catch (_: Exception) { "?" } }
     private fun drawMenu() {
         // gentle darkening behind the title column and the bottom line, never over the boat window
         ink.fill.shader = LinearGradient(W * 0.5f, 0f, W, 0f, intArrayOf(Color.argb(0, 6, 9, 14), Color.argb(170, 6, 9, 14)), null, Shader.TileMode.CLAMP)
@@ -237,6 +238,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         ink.text.setShadowLayer(8 * dp, 0f, 2 * dp, Color.argb(160, 0, 0, 0))
         ink.label("GTACTV", cx0 - 2 * dp, y, titleSize, Theme.TEXT, face = Theme.black, spacing = -0.01f)
         ink.label("VENEZIA · LAGUNA · SCALA 1:1", cx0, y + 20 * dp, 10.5f, Theme.YELLOW, spacing = 0.2f)
+        // which build this is (so it's obvious when a new APK is really installed)
+        ink.label("versione $version", W - m - 4 * dp, H - m + 4 * dp, 10f, Theme.TEXT_DIM, Paint.Align.RIGHT, spacing = 0.1f)
         ink.text.clearShadowLayer()
         y += 40 * dp
         val loaded = !GameState.loading

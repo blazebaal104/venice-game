@@ -411,7 +411,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     // ---------------------------------------------------------------- what's happening, as HUD texts
     private var scrapeSnd = 0f; private var vzMin = 0f; private var slapCd = 0f
     private fun feedAudio(paused: Boolean) {
-        Audio.paused = paused
+        Audio.paused = paused; Audio.menu = false
         Audio.master = Settings.volMaster; Audio.engineVol = Settings.volEngine; Audio.ambienceVol = Settings.volAmbience
         Audio.engineOn = Controls.engineOn; Audio.throttle = Controls.throttle(); Audio.speed = abs(boat.surge)
         Audio.trim = Controls.trim; Audio.airborne = boat.airborne
@@ -718,6 +718,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             streamer.update(boat.x, boat.y, cos(boat.heading), sin(boat.heading), 2)
             GameState.tilesLoaded = streamer.tiles.size; GameState.tilesWanted = streamer.wanted
             GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
+            Audio.menu = true
             drawMenu(dt)
             return
         }
