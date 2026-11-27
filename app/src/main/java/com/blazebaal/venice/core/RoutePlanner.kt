@@ -95,7 +95,7 @@ class RoutePlanner(private val world: WorldMap) {
         fun sight(a: Int, b: Int): Boolean {
             val ax = a % nx + 0.5f; val ay = a / nx + 0.5f; val bx = b % nx + 0.5f; val by = b / nx + 0.5f
             val steps = (max(abs(bx - ax), abs(by - ay)) * 2).toInt() + 1
-            val need = min(clear[a], clear[b]).coerceAtMost(2)
+            val need = min(clear[a].toInt(), clear[b].toInt()).coerceAtMost(2)
             for (st in 0..steps) {
                 val f = st.toFloat() / steps
                 val c = ((ay + (by - ay) * f).toInt()) * nx + (ax + (bx - ax) * f).toInt()
