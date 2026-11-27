@@ -58,6 +58,8 @@ object Controls {
 }
 
 object GameState {
+    /** the previous session's crash, shown once on the menu (empty: none) */
+    @Volatile var lastCrash = ""
     @Volatile var x = 0f
     @Volatile var y = 0f
     @Volatile var heading = 0f

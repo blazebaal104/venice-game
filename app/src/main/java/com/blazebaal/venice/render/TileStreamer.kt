@@ -152,7 +152,7 @@ class TileStreamer(private val world: WorldMap, var radius: Float = 640f, privat
             pending.add(k)
             val tx = k % map.tilesX; val ty = k / map.tilesX
             pool.execute {
-                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) else retry.add(k) }
+                try { val b = buildTile(tx, ty); if (b != null) ready.add(b) }      // null = no data there (open lagoon): done
                 catch (e: Throwable) {
                     // never leave a hole: retry, and after two failures build it with ground and quays only
                     android.util.Log.e("Venice", "tile $tx,$ty failed", e)

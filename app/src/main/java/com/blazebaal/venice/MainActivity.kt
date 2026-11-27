@@ -30,6 +30,19 @@ class MainActivity : Activity(), GameActions {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // crash reporter: the last crash is saved and shown once on the next launch (top of the main menu)
+        val crashFile = java.io.File(filesDir, "last_crash.txt")
+        if (crashFile.exists()) { GameState.lastCrash = try { crashFile.readText().take(400) } catch (_: Exception) { "" }; crashFile.delete() }
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val rt = Runtime.getRuntime()
+                val mem = "heap ${(rt.totalMemory() - rt.freeMemory()) / 1048576}/${rt.maxMemory() / 1048576} MB"
+                val frames = e.stackTrace.take(4).joinToString(" < ") { "${it.fileName}:${it.lineNumber}" }
+                crashFile.writeText("${e.javaClass.simpleName}: ${e.message ?: ""} · thread ${t.name} · $mem · $frames")
+            } catch (_: Throwable) { }
+            prev?.uncaughtException(t, e)
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         Settings.load(this)
         Controls.screen = Screen.MENU

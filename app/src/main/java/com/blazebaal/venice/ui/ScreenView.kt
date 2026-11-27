@@ -213,6 +213,23 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         if (gui.button(RectF(cx0, y, cx0 + half, y + bh * 0.85f), "IMPOSTAZIONI", 0, "gear")) open(Screen.SETTINGS)
         if (gui.button(RectF(cx0 + half + 10 * dp, y, cx0 + colW, y + bh * 0.85f), "CREDITI", 0, "info")) open(Screen.CREDITS)
 
+        // ---- the previous session crashed: show what happened, once, so it can be reported (screenshot)
+        if (GameState.lastCrash.isNotEmpty()) {
+            val msg = "ULTIMO CRASH · " + GameState.lastCrash
+            var cs = 9f; while (cs > 6.5f && ink.width(msg, cs, Theme.condensed) > W - x1 - colW - 4 * m) cs -= 0.5f
+            val cx = (x1 + cx0) / 2
+            ink.text.setShadowLayer(4 * dp, 0f, 1 * dp, Color.BLACK)
+            // wrapped over up to 3 lines
+            val words = msg.split(' '); var line = ""; var ly = m + 12 * dp; var lines = 0
+            val maxW = cx0 - x1 - 24 * dp
+            for (w in words) {
+                val t = if (line.isEmpty()) w else "$line $w"
+                if (ink.width(t, cs, Theme.condensed) > maxW && line.isNotEmpty()) { ink.label(line, cx, ly, cs, Theme.RED, Paint.Align.CENTER, Theme.condensed); line = w; ly += 13 * dp; if (++lines >= 3) break } else line = t
+            }
+            if (lines < 3 && line.isNotEmpty()) ink.label(line, cx, ly, cs, Theme.RED, Paint.Align.CENTER, Theme.condensed)
+            ink.text.clearShadowLayer()
+        }
+
         // ---- bottom right: live Venice weather + vaporetti status
         val wtxt = if (Weather.live) "VENEZIA ORA · ${Weather.temperature.roundToInt()}° · ${Weather.label()} · VENTO ${Weather.windKmh.roundToInt()} KM/H ${compass(Weather.windDirDeg)}"
                    else "VENEZIA · ${Weather.temperature.roundToInt()}° · METEO REALE IN ATTESA DI CONNESSIONE"

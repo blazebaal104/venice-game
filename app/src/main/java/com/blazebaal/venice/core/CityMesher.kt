@@ -33,6 +33,10 @@ object Palette {
 }
 
 /** How one building looks: architectural type, rhythm of floors and openings, materials, roof. */
+/** close-up detail / vegetation vertex budgets per tile (memory: 12 floats per vertex) */
+private const val DET_MAX = 380_000
+private const val VEG_MAX = 260_000
+
 private class Style(
     val type: Int,                 // 0 casa popolare, 1 gothic palazzo, 2 renaissance, 3 baroque, 4 19th century
     val groundH: Float, val floorH: Float, val pn: Boolean,
@@ -127,20 +131,20 @@ class CityMesher {
             1 -> Style(1, 3.7f + r(1) * 0.8f, 3.6f + r(2) * 0.6f, true, if (r(3) < 0.5f) 3 else if (r(3) < 0.8f) 2 else 6,
                 pick(r(4), 0.5f, 0.3f, 0.2f, 0f), 1, 0.9f + r(5) * 0.25f, 2.0f + r(6) * 0.45f,
                 pick(r(7), 0.5f, 0.15f, 0.35f, 0f), if (r(8) < 0.7f) 1 else 2, false,
-                if (r(9) < 0.75f) 0 else 1, 0.38f + r(10) * 0.08f, 0.1f, 0.34f)
+                if (r(9) < 0.75f) 0 else 1, 0.38f + r(10) * 0.08f, 0.1f, 0.28f)
             2 -> Style(2, 3.9f + r(1) * 0.7f, 3.8f + r(2) * 0.6f, true, if (r(3) < 0.7f) 1 else 0,
                 if (r(4) < 0.6f) 0 else 1, 1, 0.95f + r(5) * 0.2f, 2.1f + r(6) * 0.4f,
-                if (r(7) < 0.55f) 3 else 0, 1, r(8) < 0.7f, 0, 0.38f + r(10) * 0.06f, 0.05f, 0.45f)
+                if (r(7) < 0.55f) 3 else 0, 1, r(8) < 0.7f, 0, 0.38f + r(10) * 0.06f, 0.05f, 0.38f)
             3 -> Style(3, 3.9f + r(1) * 0.6f, 3.8f + r(2) * 0.5f, true, if (r(3) < 0.5f) 4 else 5,
                 if (r(4) < 0.5f) 0 else 1, 1, 1.0f + r(5) * 0.2f, 2.1f + r(6) * 0.3f,
-                if (r(7) < 0.5f) 3 else 0, 1, r(8) < 0.5f, 0, 0.36f + r(10) * 0.06f, 0.05f, 0.5f)
+                if (r(7) < 0.5f) 3 else 0, 1, r(8) < 0.5f, 0, 0.36f + r(10) * 0.06f, 0.05f, 0.42f)
             4 -> Style(4, 3.3f + r(1) * 0.6f, 3.1f + r(2) * 0.4f, false, if (r(3) < 0.65f) 0 else 5,
                 pick(r(4), 0.1f, 0.7f, 0.15f, 0.05f), if (r(5) < 0.8f) 1 else 0, 0.85f + r(6) * 0.2f, 1.65f + r(7) * 0.3f,
-                if (r(8) < 0.85f) 0 else 1, if (r(9) < 0.7f) 1 else 2, r(10) < 0.25f, if (r(11) < 0.8f) 0 else 1, 0.36f + r(12) * 0.08f, 0.3f, 0.55f)
+                if (r(8) < 0.85f) 0 else 1, if (r(9) < 0.7f) 1 else 2, r(10) < 0.25f, if (r(11) < 0.8f) 0 else 1, 0.36f + r(12) * 0.08f, 0.3f, 0.45f)
             else -> Style(0, 2.7f + r(1) * 0.7f, 2.75f + r(2) * 0.4f, false, pick(r(3), 0.74f, 0.16f, 0.10f),
                 pick(r(4), 0.12f, 0.55f, 0.25f, 0.08f), pick(r(5), 0.3f, 0.6f, 0.0f, 0.1f), 0.72f + r(6) * 0.3f, 1.3f + r(7) * 0.35f,
                 pick(r(8), 0.55f, 0.35f, 0.10f), if (r(9) < 0.6f) 0 else 2, false,
-                pick(r(10), 0.72f, 0.2f, 0.08f), 0.36f + r(11) * 0.12f, 0.28f, 0.26f)
+                pick(r(10), 0.72f, 0.2f, 0.08f), 0.36f + r(11) * 0.12f, 0.28f, 0.22f)
         }
     }
 
@@ -255,12 +259,11 @@ class CityMesher {
                 // single balconies (poggioli): mostly on the first floor
                 var bal = 0
                 // (more on canal fronts; palazzi often stack them on the first two piani nobili)
-                if (!court && !blank && rnd(es, 110 + k) < st.balP * (if (water) 1.3f else 1f)) {
+                if (!court && !blank && rnd(es, 110 + k) < st.balP * (if (water) 1.15f else 1f)) {
                     val r2 = rnd(es, 120 + k)
                     bal = when (st.type) {
-                        0 -> if (r2 < 0.45f) 1 else if (r2 < 0.8f) 2 else 3
-                        4 -> if (r2 < 0.5f) 1 else if (r2 < 0.8f) 3 else 7
-                        else -> if (r2 < 0.5f) 1 else if (r2 < 0.8f) 3 else 2
+                        0 -> if (r2 < 0.55f) 1 else if (r2 < 0.9f) 2 else 3
+                        else -> if (r2 < 0.65f) 1 else if (r2 < 0.85f) 3 else 2
                     }
                 }
                 bays.add(Bay(u + bw / 2, bw, if (blank) 2 else 0, ground, (rnd(es, 100 + k) * 16).toInt(), bal))
@@ -296,6 +299,9 @@ class CityMesher {
             fac.v(pax, pay, top + ha, nx, ny, 0f, ua, top + ha, blankBay.c, seed01, Kind.WALL, len)
         }
         if (cls == 1 || court) return
+        // per-tile memory budget for close-up detail: the densest tiles stop adding balconies, shutters, poles
+        // instead of growing one mesh to hundreds of MB (that ran the app out of memory)
+        if (det.count > DET_MAX || veg.count > VEG_MAX) return
         details(b, st, bays, ax, ay, tx, ty, nx, ny, top, water, es, len)
     }
 
@@ -376,7 +382,7 @@ class CityMesher {
                 val z0 = Z.GROUND + 0.75f; val z1 = Z.GROUND + min(st.groundH - 0.5f, 2.3f)
                 det.color(Palette.IRON)
                 val nbar = max(3, (gw * 2 / 0.14f).toInt())
-                for (k in 0..nbar) { val u = bay.c - gw + 2 * gw * k / nbar; det.box(wx(u, 0.07f), wy(u, 0.07f), (z0 + z1) / 2, 0.012f, 0.012f, (z1 - z0) / 2, rot) }
+                for (k in 0..nbar) { val u = bay.c - gw + 2 * gw * k / nbar; det.bar(wx(u, 0.07f), wy(u, 0.07f), (z0 + z1) / 2, 0.012f, 0.012f, (z1 - z0) / 2, rot) }
                 for (zz in floatArrayOf(z0 + 0.05f, (z0 + z1) / 2, z1 - 0.05f)) det.box(wx(bay.c, 0.07f), wy(bay.c, 0.07f), zz, gw, 0.015f, 0.012f, rot)
             }
             if (bay.ground == 2 && rnd(es + bay.jseed, 3) < 0.45f) {
@@ -470,7 +476,7 @@ class CityMesher {
                     val n = max(3, (hw * 2 / 0.32f).toInt())
                     for (k in 0..n) {
                         val f = -hw + 0.08f + (2 * hw - 0.16f) * k / n; val p = front(f, 0.07f)
-                        det.frustum(p[0], p[1], z, 0.04f, 0.035f, 0.5f, 6, capTop = false)
+                        det.bar(p[0], p[1], z + 0.25f, 0.035f, 0.035f, 0.25f, rot)
                         if (k < n) {
                             val f2 = -hw + 0.08f + (2 * hw - 0.16f) * (k + 0.5f) / n; val q = front(f2, 0.07f)
                             val span = (2 * hw - 0.16f) / n
@@ -492,8 +498,7 @@ class CityMesher {
                     val n = max(3, (hw * 2 / 0.19f).toInt())
                     for (k in 0..n) {
                         val f = -hw + 0.06f + (2 * hw - 0.12f) * k / n; val p = front(f, 0.08f)
-                        det.frustum(p[0], p[1], z, 0.045f, 0.03f, 0.3f, 5, capTop = false)
-                        det.frustum(p[0], p[1], z + 0.3f, 0.03f, 0.045f, 0.3f, 5, capTop = false)
+                        det.bar(p[0], p[1], z + 0.3f, 0.038f, 0.038f, 0.3f, rot + 0.785f)
                     }
                     val p = front(0f, 0.08f); det.box(p[0], p[1], z + 0.66f, hw, 0.08f, 0.05f, rot)
                 }
@@ -501,16 +506,16 @@ class CityMesher {
             for (side in intArrayOf(-1, 1)) det.box(ox + tx * side * (hw - 0.06f), oy + ty * side * (hw - 0.06f), z + 0.33f, 0.07f, d / 2 - 0.02f, 0.33f, rot)
         } else {
             det.color(Palette.IRON)
-            val n = max(4, (hw * 2 / 0.12f).toInt())
+            val n = max(4, (hw * 2 / 0.15f).toInt())
             for (k in 0..n) {
                 val f = -hw + 0.03f + (2 * hw - 0.06f) * k / n
                 if (style == 1) {
                     // bellied railing: each bar bows out over the street
                     val a = front(f, 0.11f); val m = front(f, -0.04f); val t = front(f, 0.06f)
-                    det.box((a[0] + m[0]) / 2, (a[1] + m[1]) / 2, z + 0.25f, 0.009f, 0.009f, 0.26f, rot)
-                    det.box((m[0] + t[0]) / 2, (m[1] + t[1]) / 2, z + 0.73f, 0.009f, 0.009f, 0.25f, rot)
+                    det.bar((a[0] + m[0]) / 2, (a[1] + m[1]) / 2, z + 0.25f, 0.009f, 0.009f, 0.26f, rot)
+                    det.bar((m[0] + t[0]) / 2, (m[1] + t[1]) / 2, z + 0.73f, 0.009f, 0.009f, 0.25f, rot)
                 } else {
-                    val p = front(f, 0.03f); det.box(p[0], p[1], z + 0.48f, 0.009f, 0.009f, 0.48f, rot)
+                    val p = front(f, 0.03f); det.bar(p[0], p[1], z + 0.48f, 0.009f, 0.009f, 0.48f, rot)
                 }
             }
             val bulge = if (style == 1) -0.02f else 0.03f
@@ -1083,6 +1088,7 @@ class CityMesher {
     }
 
     private fun tree(x: Float, y: Float, gz: Float, kind: Int, s: Int) {
+        if (veg.count > VEG_MAX) return
         val saved = gen; gen = veg
         try { treeBody(x, y, gz, kind, s) } finally { gen = saved }
     }
