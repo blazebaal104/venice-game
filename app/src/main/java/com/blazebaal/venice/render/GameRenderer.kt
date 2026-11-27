@@ -407,7 +407,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
                 color(0.05f, 0.20f, 0.22f, 0.92f)
                 val n = 64
                 for (i in 0 until n) { val a0 = i * 2f * PI.toFloat() / n; val a1 = (i + 1) * 2f * PI.toFloat() / n
-                    quad(Vec3(0f, 0f, 0f), Vec3(0f, 0f, 0f), Vec3(cos(a0) * 7.5f, sin(a0) * 7.5f, 0f), Vec3(cos(a1) * 7.5f, sin(a1) * 7.5f, 0f)) }
+                    quad(Vec3(cos(a0) * 0.05f, sin(a0) * 0.05f, 0f), Vec3(cos(a0) * 7.5f, sin(a0) * 7.5f, 0f), Vec3(cos(a1) * 7.5f, sin(a1) * 7.5f, 0f), Vec3(cos(a1) * 0.05f, sin(a1) * 0.05f, 0f)) }
                 Mesh(floats())
             }.also { previewDisc = it }
             generic.mat4("uModel", ident); disc.draw()
