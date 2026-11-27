@@ -32,7 +32,8 @@ class GpuTile(
 private class Built(val t: TileData, val hasMarsh: Boolean, val fac: FloatBuffer?, val gen: FloatBuffer?, val det: FloatBuffer?, val veg: FloatBuffer?)
 
 /** On-disk cache of meshed tiles. Invalidated automatically when the map or the mesher version changes. */
-class TileCache(root: File, key: String) {
+/** Tile meshes, from (in order) the pre-baked assets in the APK (baker/), the phone's own cache, or nothing. */
+class TileCache(root: File, key: String, private val assets: android.content.res.AssetManager? = null) {
     private val dir = File(root, "tiles-$key")
     init {
         try {
@@ -44,7 +45,37 @@ class TileCache(root: File, key: String) {
     fun has(tx: Int, ty: Int) = file(tx, ty).exists()
 
     /** Returns (hasMarsh, facade, generic, detail, vegetation) or null. Buffers are direct, native order. */
+    /** the APK's pre-baked copy of a tile (deflated, little-endian); null if the build didn't bake it */
+    private fun readBaked(tx: Int, ty: Int): Array<Any?>? {
+        val am = assets ?: return null
+        return try {
+            val bytes = java.util.zip.InflaterInputStream(am.open("tiles/${tx}_$ty.gtc"), java.util.zip.Inflater(), 1 shl 16).use { it.readBytes() }
+            val buf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.LITTLE_ENDIAN)
+            buf.put(bytes); buf.flip()
+            parse(buf, ByteOrder.LITTLE_ENDIAN)
+        } catch (e: java.io.IOException) { null }
+    }
+
+    private fun parse(buf: ByteBuffer, order: ByteOrder): Array<Any?>? {
+        if (buf.int != MAGIC) return null
+        val hasMarsh = buf.int == 1
+        val n = IntArray(4) { buf.int }
+        var pos = buf.position()
+        val out = arrayOfNulls<Any>(5); out[0] = hasMarsh
+        for (i in 0 until 4) {
+            if (n[i] == 0) { out[i + 1] = null; continue }
+            buf.position(pos); buf.limit(pos + n[i] * 4)
+            out[i + 1] = buf.slice().order(order).asFloatBuffer()
+            buf.limit(buf.capacity()); pos += n[i] * 4
+        }
+        return out
+    }
+
+    /** true when this tile came pre-baked (nothing to build or to write) */
+    fun baked(tx: Int, ty: Int): Boolean = assets != null && try { assets.open("tiles/${tx}_$ty.gtc").close(); true } catch (e: java.io.IOException) { false }
+
     fun read(tx: Int, ty: Int): Array<Any?>? {
+        readBaked(tx, ty)?.let { return it }
         val f = file(tx, ty)
         if (!f.exists()) return null
         return try {

@@ -34,7 +34,10 @@ android {
     }
 
     // keep the map/mesh assets uncompressed-friendly
-    androidResources { noCompress += listOf("map", "mesh") }
+    androidResources { noCompress += listOf("map", "mesh", "gtc", "etc") }
+
+    // the pre-baked city (see baker/): generated into build/, packaged as assets/tiles/*.gtc
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/baked"))
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -45,3 +48,6 @@ android {
 kotlin { jvmToolchain(17) }
 
 // No dependencies: the game uses only the Android platform and the Kotlin standard library.
+
+// bake the city before the app is assembled
+tasks.named("preBuild") { dependsOn(":baker:bakeTiles") }

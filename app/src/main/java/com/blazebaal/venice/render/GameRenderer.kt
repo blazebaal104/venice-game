@@ -94,8 +94,9 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         "Preparo la cache dei quartieri" to {
             // meshed tiles are cached on the phone; the key changes with the map data and with every app build
             val crc = java.util.zip.CRC32().apply { update(mapBytes!!) }.value; mapBytes = null
-            val build = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).let { if (android.os.Build.VERSION.SDK_INT >= 28) it.longVersionCode else @Suppress("DEPRECATION") it.versionCode.toLong() } } catch (_: Exception) { 0L }
-            streamer = TileStreamer(world, Settings.renderDistance, TileCache(ctx.filesDir, "${java.lang.Long.toHexString(crc)}-$build-m$MESHER_VERSION"))
+            // the key no longer has the app build in it: an update keeps the phone's cache unless the mesher changed
+            // (and most tiles come pre-baked in the APK anyway)
+            streamer = TileStreamer(world, Settings.renderDistance, TileCache(ctx.filesDir, "${java.lang.Long.toHexString(crc)}-m$MESHER_VERSION", ctx.assets))
         },
         "Compilo gli shader della città" to {
             generic = Program(Shaders.STD_VS, Shaders.GENERIC_FS, "generic")
