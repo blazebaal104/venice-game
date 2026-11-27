@@ -52,7 +52,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private val ident = Mat4.identity()
     private val visible = ArrayList<GpuTile>(128)
 
-    private var lastNs = 0L; private var time = 0f
+    private var lastNs = 0L; private var time = 0f; private var glErr = 0
     private var fpsAcc = 0f; private var fpsN = 0
     private var frameEma = 1f / 60f; private var badT = 0f; private var goodT = 0f; private var lastDrop = -100f
     private var camX = 0f; private var camY = 0f; private var camZ = 3f
@@ -530,6 +530,14 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val startK = when (Settings.fogDensity) { 0 -> 0.72f; 2 -> 0.3f; else -> 0.5f } / sqrt(wf)
         fogStart = fogEnd * startK.coerceIn(0.08f, 0.9f)
         fogDens = wf / (drawDist * 1.25f) * when (Settings.fogDensity) { 0 -> 0.8f; 2 -> 1.3f; else -> 1f }
+        // never hand the shaders a broken value (a NaN here turns everything it touches black)
+        fun ok(a: FloatArray, d: FloatArray) { for (k in a.indices) if (!a[k].isFinite()) a[k] = d[k] }
+        ok(sunCol, sunClear); ok(fogCol, fogClear); ok(zenith, zenithClear)
+        if (!wet.isFinite()) wet = 0f
+        if (!fogEnd.isFinite() || fogEnd < 50f) fogEnd = 600f
+        if (!fogStart.isFinite() || fogStart >= fogEnd) fogStart = fogEnd * 0.5f
+        if (!fogDens.isFinite() || fogDens < 0f) fogDens = 1f / 800f
+        if (!flash.isFinite()) flash = 0f
     }
 
     override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
@@ -714,7 +722,14 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val dt = rawDt.coerceIn(0.001f, 0.05f)
         lastNs = now
         fpsAcc += rawDt; fpsN++
-        if (fpsAcc > 0.5f) { GameState.fps = fpsN / fpsAcc; fpsAcc = 0f; fpsN = 0 }
+        if (fpsAcc > 0.5f) {
+            GameState.fps = fpsN / fpsAcc; fpsAcc = 0f; fpsN = 0
+            // diagnostics (shown under the FPS line): the inputs the picture depends on
+            GameState.diag = String.format(java.util.Locale.US, "meteo %s c%d vis%.0f nuv%.0f%% · nebbia %.0f-%.0fm d%.2f · sole %.1f,%.1f,%.1f · wet %.2f · GL %s · cam %.1f,%.1f,%.1f",
+                if (Weather.live) "live" else "off", Weather.code, Weather.visibilityM, Weather.cloudCover * 100f, fogStart, fogEnd, fogDens * 1000f,
+                sunCol[0], sunCol[1], sunCol[2], wet, if (glErr == 0) "ok" else "0x" + Integer.toHexString(glErr), camX - boat.x, camY - boat.y, camZ)
+        }
+        run { var e = glGetError(); while (e != GL_NO_ERROR) { glErr = e; e = glGetError() } }
         // bad weather: the fog closes in and the render distance drops with it (fewer chunks = steady FPS)
         drawDist = if (Settings.liveWeather || Weather.override > 0) min(Settings.renderDistance, Weather.renderCap()) else Settings.renderDistance
         streamer.radius = drawDist

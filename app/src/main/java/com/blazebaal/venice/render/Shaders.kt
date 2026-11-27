@@ -93,7 +93,10 @@ vec3 fog(vec3 c, vec3 wpos) {
         float e = smoothstep(uFogStart, uFogEnd, d);
         f = max(f, e * e * (3.0 - 2.0 * e) * (0.6 + 0.4 * low) + e * 0.4 * (1.0 - low));
     }
-    return mix(c, uFogCol * 1.15, clamp(f, 0.0, 1.0));
+    vec3 r = mix(c, uFogCol * 1.15, clamp(f, 0.0, 1.0));
+    // a broken value anywhere upstream (NaN / inf in the lighting) used to come out black: show the fog instead
+    if (any(isnan(r)) || any(isinf(r))) r = uFogCol * 1.15;
+    return r;
 }
 """
 
@@ -1143,7 +1146,9 @@ void main() {
         col = max(col + (col - avg) * amt * 1.6, vec3(0.0));
     }
     // a branch, not a multiply: with bloom off the bloom buffer may hold garbage, and NaN * 0 is still NaN
-    if (uBloomK > 0.0) col += texture(uBloom, vUv).rgb * 0.35 * uBloomK;
+    if (uBloomK > 0.0) { vec3 bl = texture(uBloom, vUv).rgb; if (!any(isnan(bl)) && !any(isinf(bl))) col += bl * 0.35 * uBloomK; }
+    // last line of defence: a NaN pixel (it would be black) takes its neighbours' colour
+    if (any(isnan(col)) || any(isinf(col))) { vec3 nb = (cN + cS + cE + cW) * 0.25; col = (any(isnan(nb)) || any(isinf(nb))) ? vec3(0.3, 0.32, 0.34) : nb; }
     col = aces(col * uExposure);
     col = mix(vec3(luma(col)), col, 1.08);
     col *= vec3(1.02, 1.0, 0.97);
