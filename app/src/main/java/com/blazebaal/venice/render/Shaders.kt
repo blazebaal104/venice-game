@@ -990,21 +990,24 @@ uniform sampler2D uWaterN; uniform float uWaveAmp;
 out vec4 o;
 void main() {
     vec2 p = vW.xy;
+    // two scales of baked ripples drifting against each other: a calm canal surface
     vec2 r = (texture(uWaterN, p * 0.045 + uTime * vec2(0.010, 0.006)).rg * 2.0 - 1.0) * 0.6
            + (texture(uWaterN, p * 0.11 - uTime * vec2(0.012, 0.017)).rg * 2.0 - 1.0) * 0.4;
-    vec3 n = normalize(vec3(-r * (0.25 + uWaveAmp * 0.5), 1.0));
+    vec3 n = normalize(vec3(-r * 0.22, 1.0));
     vec3 v = normalize(uCam - vW);
-    float nv = max(dot(n, v), 0.0);
-    float fres = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+    float nv = clamp(dot(n, v), 0.0, 1.0);
+    float fres = 0.03 + 0.97 * pow(1.0 - nv, 5.0);
     vec3 rd = reflect(-v, n);
     vec3 sky = mix(uFogCol, uSkyZenith, clamp(rd.z * 1.6, 0.0, 1.0));
-    vec3 deep = vec3(0.035, 0.095, 0.088) * (uSkyAmb * 1.4 + uSunCol * 0.3);
-    vec3 col = mix(deep, sky, clamp(fres, 0.0, 1.0) * 0.85);
+    // Venetian canal water: green-teal, a little milky
+    vec3 deep = vec3(0.045, 0.115, 0.095) * (uSkyAmb * 1.5 + uSunCol * 0.32);
+    vec3 col = mix(deep, sky * 0.9, clamp(fres, 0.0, 1.0) * 0.8);
+    // sun glint, widened where the ripples are finer than a pixel (no sparkle)
     vec3 dn = fwidth(n); float sk = 1.0 / (1.0 + 900.0 * dot(dn, dn));
-    float pw = max(280.0 * sk, 24.0);
+    float pw = max(260.0 * sk, 24.0);
     vec3 h = normalize(uSunDir + v);
-    col += uSunCol * pow(max(dot(n, h), 0.0), pw) * 1.8 * (pw / 280.0);
-    o = vec4(fog(max(col, vec3(0.0)), vW), 1.0);
+    col += uSunCol * pow(clamp(dot(n, h), 0.0, 1.0), pw) * 1.5 * (pw / 260.0);
+    o = vec4(fog(clamp(col, vec3(0.0), vec3(30.0)), vW), 1.0);
 }
 """
 

@@ -772,7 +772,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             if (boat.splash > 1.5f) Audio.event(Audio.EV_SPLASH, boat.splash)
             distance += hypot(boat.x - ox, boat.y - oy)
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
-            if (!Settings.simple) wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
+            // (the wake simulation no longer drives the water: the water is a calm, self-contained surface)
         }
         LiveBoats.playerX = boat.x; LiveBoats.playerY = boat.y
         live.update(if (paused) 0f else dt, camX, camY)
@@ -858,8 +858,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
 
         val bm = boatModel()
-        if (Settings.shadows) renderCityShadow(camX + cos(yaw) * 120f, camY + sin(yaw) * 120f)
-        renderBoatShadow(bm)
+        // sun shadow maps off: everything that read them is where the picture went black
 
         // ---- reflection pass: low resolution, nearby city only, no shadows (sky only when reflections are off).
         // A still or slowly drifting camera reuses it for up to 2 frames: under the ripples nobody can tell, and it
@@ -867,7 +866,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val r = refl!!
         val camMove = hypot(camX - reflCamX, camY - reflCamY) + abs(camZ - reflCamZ)
         val turn = abs(LiveBoats.wrap(yaw - reflYaw))
-        if (Settings.simple) { /* no reflection pass at all */ }
+        if (true) { /* the water doesn't use a reflection pass any more */ }
         else if (camMove > 0.35f || turn > 0.012f || reflAge >= 2 || !reflValid) {
             r.bind()
             glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
@@ -931,7 +930,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, boatShadow.tex); p.i("uShadowB", 9)
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[0]); p.i("uAlb", 3)
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[1]); p.i("uNrm", 4)
-        p.mat4("uLightVP", lightVP); p.mat4("uLightVPB", lightVPB); p.f("uShadowOn", if (shadows && Settings.shadows && cityShadow.tex != 0) 1f else 0f)
+        p.mat4("uLightVP", lightVP); p.mat4("uLightVPB", lightVPB); p.f("uShadowOn", 0f)
     }
 
     private fun drawOpaque(vp: FloatArray, mir: FloatArray, clipZ: Float, maxDist: Float, bm: FloatArray, reflection: Boolean) {
@@ -994,8 +993,9 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private fun drawWater(vp: FloatArray, r: Target) {
-        if (Settings.simple) {
-            // low-end: flat water with baked ripples and the sky projected on it, nothing simulated, no reflection pass
+        if (true) {
+            // one water for every mode: flat, baked ripples, the sky projected on it, a sun glint - nothing simulated,
+            // no reflection pass, no shadow map
             val w = waterSimple
             w.use(); common(w, vp, ident, -1000f, false)
             w.vec3("uCenter", floor(camX / 40f) * 40f, floor(camY / 40f) * 40f, 0f); w.f("uWaveAmp", boat.waveAmp)
