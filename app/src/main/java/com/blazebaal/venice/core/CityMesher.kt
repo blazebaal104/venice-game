@@ -127,20 +127,20 @@ class CityMesher {
             1 -> Style(1, 3.7f + r(1) * 0.8f, 3.6f + r(2) * 0.6f, true, if (r(3) < 0.5f) 3 else if (r(3) < 0.8f) 2 else 6,
                 pick(r(4), 0.5f, 0.3f, 0.2f, 0f), 1, 0.9f + r(5) * 0.25f, 2.0f + r(6) * 0.45f,
                 pick(r(7), 0.5f, 0.15f, 0.35f, 0f), if (r(8) < 0.7f) 1 else 2, false,
-                if (r(9) < 0.75f) 0 else 1, 0.38f + r(10) * 0.08f, 0.1f, 0.15f)
+                if (r(9) < 0.75f) 0 else 1, 0.38f + r(10) * 0.08f, 0.1f, 0.34f)
             2 -> Style(2, 3.9f + r(1) * 0.7f, 3.8f + r(2) * 0.6f, true, if (r(3) < 0.7f) 1 else 0,
                 if (r(4) < 0.6f) 0 else 1, 1, 0.95f + r(5) * 0.2f, 2.1f + r(6) * 0.4f,
-                if (r(7) < 0.55f) 3 else 0, 1, r(8) < 0.7f, 0, 0.38f + r(10) * 0.06f, 0.05f, 0.3f)
+                if (r(7) < 0.55f) 3 else 0, 1, r(8) < 0.7f, 0, 0.38f + r(10) * 0.06f, 0.05f, 0.45f)
             3 -> Style(3, 3.9f + r(1) * 0.6f, 3.8f + r(2) * 0.5f, true, if (r(3) < 0.5f) 4 else 5,
                 if (r(4) < 0.5f) 0 else 1, 1, 1.0f + r(5) * 0.2f, 2.1f + r(6) * 0.3f,
-                if (r(7) < 0.5f) 3 else 0, 1, r(8) < 0.5f, 0, 0.36f + r(10) * 0.06f, 0.05f, 0.35f)
+                if (r(7) < 0.5f) 3 else 0, 1, r(8) < 0.5f, 0, 0.36f + r(10) * 0.06f, 0.05f, 0.5f)
             4 -> Style(4, 3.3f + r(1) * 0.6f, 3.1f + r(2) * 0.4f, false, if (r(3) < 0.65f) 0 else 5,
                 pick(r(4), 0.1f, 0.7f, 0.15f, 0.05f), if (r(5) < 0.8f) 1 else 0, 0.85f + r(6) * 0.2f, 1.65f + r(7) * 0.3f,
-                if (r(8) < 0.85f) 0 else 1, if (r(9) < 0.7f) 1 else 2, r(10) < 0.25f, if (r(11) < 0.8f) 0 else 1, 0.36f + r(12) * 0.08f, 0.3f, 0.4f)
+                if (r(8) < 0.85f) 0 else 1, if (r(9) < 0.7f) 1 else 2, r(10) < 0.25f, if (r(11) < 0.8f) 0 else 1, 0.36f + r(12) * 0.08f, 0.3f, 0.55f)
             else -> Style(0, 2.7f + r(1) * 0.7f, 2.75f + r(2) * 0.4f, false, pick(r(3), 0.74f, 0.16f, 0.10f),
                 pick(r(4), 0.12f, 0.55f, 0.25f, 0.08f), pick(r(5), 0.3f, 0.6f, 0.0f, 0.1f), 0.72f + r(6) * 0.3f, 1.3f + r(7) * 0.35f,
                 pick(r(8), 0.55f, 0.35f, 0.10f), if (r(9) < 0.6f) 0 else 2, false,
-                pick(r(10), 0.72f, 0.2f, 0.08f), 0.36f + r(11) * 0.12f, 0.28f, 0.12f)
+                pick(r(10), 0.72f, 0.2f, 0.08f), 0.36f + r(11) * 0.12f, 0.28f, 0.26f)
         }
     }
 
@@ -239,13 +239,14 @@ class CityMesher {
             val ws = w.sum()
             var u = 0f
             val doorAt = if (water) -1 else (rnd(es, 5) * nb).toInt().coerceAtMost(nb - 1)
-            val waterDoorAt = if (water && nb >= 2 && rnd(es, 6) < 0.6f) nb / 2 else -1
+            val waterDoorAt = if (water && nb >= 2 && rnd(es, 6) < 0.8f) nb / 2 else -1
+            val waterDoor2 = if (water && nb >= 6 && rnd(es, 9) < 0.5f) (if (rnd(es, 10) < 0.5f) 1 else nb - 2) else -1
             for (k in 0 until nb) {
                 val bw = len * w[k] / ws
                 val blank = st.type == 0 && !court && rnd(es, 70 + k) < 0.10f
                 val ground = when {
                     court -> 0
-                    k == waterDoorAt -> 3
+                    k == waterDoorAt || k == waterDoor2 -> 3
                     k == doorAt -> 1
                     !water && rnd(es, 80 + k) < st.shopP -> 2
                     rnd(es, 90 + k) < 0.68f -> 0
@@ -253,7 +254,15 @@ class CityMesher {
                 }
                 // single balconies (poggioli): mostly on the first floor
                 var bal = 0
-                if (!court && !blank && rnd(es, 110 + k) < st.balP) bal = if (st.type == 0 && rnd(es, 120 + k) < 0.4f) 2 else 1
+                // (more on canal fronts; palazzi often stack them on the first two piani nobili)
+                if (!court && !blank && rnd(es, 110 + k) < st.balP * (if (water) 1.3f else 1f)) {
+                    val r2 = rnd(es, 120 + k)
+                    bal = when (st.type) {
+                        0 -> if (r2 < 0.45f) 1 else if (r2 < 0.8f) 2 else 3
+                        4 -> if (r2 < 0.5f) 1 else if (r2 < 0.8f) 3 else 7
+                        else -> if (r2 < 0.5f) 1 else if (r2 < 0.8f) 3 else 2
+                    }
+                }
                 bays.add(Bay(u + bw / 2, bw, if (blank) 2 else 0, ground, (rnd(es, 100 + k) * 16).toInt(), bal))
                 u += bw
             }
@@ -346,6 +355,16 @@ class CityMesher {
                         Vec3(wx(u + sz * 0.7f, 0.1f), wy(u + sz * 0.7f, 0.1f), z0 + sz * 1.6f), Vec3(wx(u - sz * 0.7f, 0.1f), wy(u - sz * 0.7f, 0.1f), z0 + sz * 1.6f))
                 }
                 gen = saved
+            }
+            if (water && bay.ground != 3) {
+                // more poles on the water: a painted palina in front of palazzi, plain timber mooring poles elsewhere
+                val r1 = rnd(es + bay.jseed, 40)
+                val off = 1.4f + rnd(es + bay.jseed, 41) * 0.6f
+                if (st.type in 1..3 && r1 < 0.28f) palina(wx(bay.c, off), wy(bay.c, off), Palette.PALINA[(rnd(es, 7) * 4).toInt().coerceAtMost(3)])
+                else if (r1 < 0.24f) {
+                    woodPole(wx(bay.c - bay.w * 0.2f, off), wy(bay.c - bay.w * 0.2f, off), es + bay.jseed)
+                    if (rnd(es + bay.jseed, 42) < 0.4f) woodPole(wx(bay.c + bay.w * 0.25f, off + 0.2f), wy(bay.c + bay.w * 0.25f, off + 0.2f), es + bay.jseed + 5)
+                }
             }
             if (bay.ground == 3) {
                 val cols = Palette.PALINA[(rnd(es, 7) * 4).toInt().coerceAtMost(3)]
@@ -539,6 +558,16 @@ class CityMesher {
     }
 
     /** Striped mooring pole (palina) in front of a palazzo's water door. */
+    /** a plain timber mooring pole: weathered wood, green slime band at the waterline, dark top */
+    private fun woodPole(x: Float, y: Float, seed: Int) {
+        val z0 = Z.WALL_BOTTOM; val top = 3.2f + rnd(seed, 1) * 1.4f
+        val r = 0.11f + rnd(seed, 2) * 0.04f
+        det.color(0.16f, 0.19f, 0.11f, 0.35f); det.frustum(x, y, z0, r, r * 0.98f, 0.55f - z0, 7)
+        val w = 0.26f + rnd(seed, 3) * 0.1f
+        det.color(w, w * 0.8f, w * 0.6f, 0.05f); det.frustum(x, y, 0.55f, r * 0.98f, r * 0.85f, top - 0.55f, 7)
+        det.color(0.12f, 0.10f, 0.08f, 0.05f); det.frustum(x, y, top, r * 0.85f, r * 0.4f, 0.12f, 7, capTop = true)
+    }
+
     private fun palina(x: Float, y: Float, col: FloatArray) {
         val z0 = Z.WALL_BOTTOM; val h = 5.2f - Z.WALL_BOTTOM
         val n = 9

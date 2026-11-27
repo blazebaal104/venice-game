@@ -40,7 +40,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private lateinit var sprayMesh: InstMesh
     private val sprayData = FloatArray(Effects.MAX_P * 8)
     private lateinit var wake: WakeGpu
-    private var waterN = 0
+    private var waterN = 0; private var foamT = 0
 
     private var width = 1; private var height = 1
     private var scale = 0.85f; private var targetsScale = -1f
@@ -109,6 +109,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         sprayMesh = InstMesh(8, intArrayOf(3, 3, 2), Effects.MAX_P)
         wake = WakeGpu(skyTri!!)
         waterN = WaterNormals.create()
+        foamT = loadData("water/foam.png")
         boatMesh = loadMesh("boat.mesh")
         loadLandmarks()
         loadBridges()
@@ -130,7 +131,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     companion object {
         /** bump whenever CityMesher output changes, so cached tiles on players' phones are rebuilt */
-        const val MESHER_VERSION = 7
+        const val MESHER_VERSION = 8
     }
 
     private fun loadMesh(asset: String): Mesh? = try {
@@ -140,6 +141,19 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     } catch (e: Exception) { android.util.Log.e("Venice", "mesh $asset", e); null }
 
     /** Baked albedo atlas of a hand-built landmark (sRGB JPEG, mipmapped). 0 if the landmark has none. */
+    /** a tileable data texture (linear, repeating, mipmapped) */
+    private fun loadData(asset: String): Int = try {
+        val opts = android.graphics.BitmapFactory.Options().apply { inPremultiplied = false; inScaled = false }
+        val bmp = ctx.assets.open(asset).use { android.graphics.BitmapFactory.decodeStream(it, null, opts)!! }
+        val t = IntArray(1); glGenTextures(1, t, 0)
+        glBindTexture(GL_TEXTURE_2D, t[0])
+        android.opengl.GLUtils.texImage2D(GL_TEXTURE_2D, 0, bmp, 0); bmp.recycle()
+        glGenerateMipmap(GL_TEXTURE_2D)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        t[0]
+    } catch (e: Exception) { 0 }
+
     private fun loadAtlas(asset: String): Int = try {
         val bmp = ctx.assets.open(asset).use { android.graphics.BitmapFactory.decodeStream(it)!! }
         val t = IntArray(1); glGenTextures(1, t, 0)
@@ -674,6 +688,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, r.tex); water.i("uRefl", 5)
         glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, wake.tex); water.i("uWake", 7)
         glActiveTexture(GL_TEXTURE10); glBindTexture(GL_TEXTURE_2D, waterN); water.i("uWaterN", 10)
+        glActiveTexture(GL_TEXTURE11); glBindTexture(GL_TEXTURE_2D, foamT); water.i("uFoamT", 11)
         water.vec3("uWakeO", wake.ox, wake.oy, if (wake.ok) wake.size else 0.001f); water.vec2("uWakeDir", wake.dirX, wake.dirY)
         glUniform4f(water.loc("uBoat"), boat.x, boat.y, boat.heading, abs(boat.surge)); glUniform2f(water.loc("uHull"), Boat.HALF_LEN, Boat.HALF_BEAM)
         glUniform2f(water.loc("uScreen"), scene!!.w.toFloat(), scene!!.h.toFloat())

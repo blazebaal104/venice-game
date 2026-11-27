@@ -523,6 +523,7 @@ in vec3 vW; in float vFade;
 uniform sampler2D uRefl; uniform vec2 uScreen; uniform float uWaveAmp;
 uniform sampler2D uWake; uniform vec3 uWakeO; uniform vec2 uWakeDir;   // wake state: r height, g previous height, b foam, a aeration
 uniform sampler2D uWaterN;                       // tileable ripple slopes (rg), baked once at start-up
+uniform sampler2D uFoamT;                        // baked foam: r lace, g froth, b blotches (assets/water/foam.png)
 uniform vec4 uBoat; uniform vec2 uHull;          // x, y, heading, speed ; half length, half beam
 out vec4 o;
 vec2 ripple(vec2 uv) { return texture(uWaterN, uv).rg * 2.0 - 1.0; }
@@ -595,13 +596,14 @@ void main() {
     if (foam > 0.01) {
         // lace streaked along the track: torn patches x bubble rafts x fine froth, slowly boiling
         vec2 q = pw + n.xy * 0.4 + vec2(0.0, milkA * pw.x * 0.25);
-        float lace = fbm(q * 0.8 + uTime * 0.05) * 0.25 + noise(q * 2.6 - uTime * 0.15) * 0.32
-                   + noise(q * 7.0 + uTime * 0.3) * 0.22 + noise(q * 9.0 + uTime * 0.2) * 0.13 + noise(q * 26.0) * 0.08;
+        // two scrolling samples of the baked lace at unrelated scales (no visible tiling) + fine froth
+        float lace = texture(uFoamT, q * 0.1 + uTime * 0.006).r * 0.58 + texture(uFoamT, q * 0.37 - vec2(uTime * 0.019, uTime * 0.011)).r * 0.42
+                   + (texture(uFoamT, q * 1.1 + uTime * 0.03).g - 0.5) * 0.18;
         float thr = 1.0 - clamp(foam, 0.0, 1.0) * mix(0.64, 0.86, smoothstep(0.6, 0.95, foam));
         float fw = smoothstep(thr - 0.06, thr + 0.06, lace);
         vec2 sb = ripple(q * 0.9 + uTime * 0.02);
         vec3 nf = normalize(vec3(-g * 0.6 - sb * 0.5, 1.0));
-        float alb = 0.62 + 0.28 * clamp(sb.x * 0.5 + 0.5, 0.0, 1.0) * (0.7 + 0.3 * noise(p * 3.0));
+        float alb = 0.62 + 0.28 * clamp(sb.x * 0.5 + 0.5, 0.0, 1.0) * (0.7 + 0.3 * texture(uFoamT, p * 0.21).g);
         float dif = max(dot(nf, uSunDir), 0.0);
         vec3 white = vec3(alb, alb * 1.03, alb * 1.02) * (uSunCol * 0.6 * dif * sh + uSkyAmb * (1.1 + 0.4 * nf.z));
         float sub = smoothstep(thr - 0.3, thr - 0.1, lace) * (1.0 - fw);
