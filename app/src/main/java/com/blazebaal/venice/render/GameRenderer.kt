@@ -104,6 +104,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         },
         "Compilo acqua e cielo" to {
             water = Program(Shaders.WATER_VS, Shaders.WATER_FS, "water")
+            waterSimple = Program(Shaders.WATER_VS, Shaders.WATER_SIMPLE_FS, "water-simple")
             sky = Program(Shaders.SKY_VS, Shaders.SKY_FS, "sky")
             depth = Program(Shaders.DEPTH_VS, Shaders.DEPTH_FS, "depth")
         },
@@ -113,6 +114,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             blurP = Program(Shaders.POST_VS, Shaders.BLUR_FS, "blur")
             compP = Program(Shaders.POST_VS, Shaders.COMPOSITE_FS, "composite")
             dimP = Program(Shaders.POST_VS, Shaders.DIM_FS, "dim")
+            copyP = Program(Shaders.POST_VS, Shaders.COPY_FS, "copy")
             smokeP = try { Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke") } catch (e: Throwable) { android.util.Log.e("Venice", "smoke off", e); null }
             trailP = try { Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail") } catch (e: Throwable) { android.util.Log.e("Venice", "trails off", e); null }
         },
@@ -405,11 +407,12 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private fun ensureTargets() {
-        if (abs(targetsScale - scale) < 0.001f) return
+        if (abs(targetsScale - scale) < 0.001f && targetsSimple == Settings.simple) return
+        targetsSimple = Settings.simple
         targetsScale = scale
         val w = max(64, (width * scale).toInt()); val h = max(64, (height * scale).toInt())
         scene?.release(); refl?.release(); bloomA?.release(); bloomB?.release()
-        scene = Target(w, h, true, true)
+        scene = Target(w, h, !Settings.simple, true)      // simple mode: LDR scene, half the bandwidth
         refl = Target(max(32, (w * 0.42f).toInt()), max(32, (h * 0.42f).toInt()), true, true); reflValid = false
         bloomA = Target(w / 4, h / 4, true, false); bloomB = Target(w / 4, h / 4, true, false)
         GameState.renderScale = scale
@@ -428,7 +431,41 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private var menuScene: MenuScene? = null; private var menuT = 0f; 
-    private lateinit var dimP: Program
+    private lateinit var dimP: Program; private lateinit var copyP: Program; private lateinit var waterSimple: Program
+    private var targetsSimple = false
+    // ---- frozen background while a page is open: the last frame, blurred, and no more rendering
+    private var frozen = false; private var frzTex = 0; private var frzW = 0; private var frzH = 0
+    private fun overlayOpen() = Controls.screen == Screen.PAUSE || Controls.screen == Screen.SETTINGS || Controls.screen == Screen.CREDITS || Controls.screen == Screen.MAP
+
+    /** copies the frame just drawn, blurs it (quarter resolution, 3 widening passes) and shows it darkened */
+    private fun freezeFrame() {
+        if (frzTex == 0 || frzW != width || frzH != height) {
+            if (frzTex != 0) glDeleteTextures(1, intArrayOf(frzTex), 0)
+            val t = IntArray(1); glGenTextures(1, t, 0); frzTex = t[0]; frzW = width; frzH = height
+            glBindTexture(GL_TEXTURE_2D, frzTex)
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glBindTexture(GL_TEXTURE_2D, frzTex); glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height)
+        ensureTargets()
+        val ba = bloomA!!; val bb = bloomB!!
+        glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND)
+        ba.bind(); copyP.use(); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, frzTex); copyP.i("uTex", 0); copyP.vec3("uTint", 1f, 1f, 1f); skyTri?.draw()
+        blurP.use(); blurP.i("uTex", 0)
+        for (r in floatArrayOf(1.2f, 2.4f, 4f)) {
+            bb.bind(); glBindTexture(GL_TEXTURE_2D, ba.tex); glUniform2f(blurP.loc("uDir"), r / ba.w, 0f); skyTri?.draw()
+            ba.bind(); glBindTexture(GL_TEXTURE_2D, bb.tex); glUniform2f(blurP.loc("uDir"), 0f, r / ba.h); skyTri?.draw()
+        }
+        frozen = true; GameState.frozen = true
+        drawFrozen()
+    }
+    private fun drawFrozen() {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height); glDisable(GL_DEPTH_TEST)
+        copyP.use(); glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, bloomA!!.tex); copyP.i("uTex", 0); copyP.vec3("uTint", 0.72f, 0.72f, 0.75f); skyTri?.draw()
+        glEnable(GL_DEPTH_TEST)
+    }
     private var reflCamX = 0f; private var reflCamY = 0f; private var reflCamZ = 0f; private var reflYaw = 0f; private var reflAge = 0; private var reflValid = false
 
     private fun drawMenu(dt: Float) {
@@ -526,6 +563,19 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             try { bootFrame() } catch (e: Throwable) { GameState.bootError = "${e.javaClass.simpleName}: ${e.message}"; throw e }
             return
         }
+        // a page is open: one more frame is drawn, frozen and blurred, then nothing is rendered until it closes
+        val overlay = overlayOpen()
+        if (frozen && !overlay) {
+            frozen = false; GameState.frozen = false
+            lastNs = System.nanoTime()
+            live.resync()                     // the real boats kept moving: pick them up where ACTV says they are now
+        }
+        if (frozen) { drawFrozen(); return }
+        frameBody()
+        if (overlay) freezeFrame()
+    }
+
+    private fun frameBody() {
         val now = System.nanoTime()
         val rawDt = (now - lastNs) / 1e9f
         val dt = rawDt.coerceIn(0.001f, 0.05f)
@@ -535,7 +585,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // bad weather: the fog closes in and the render distance drops with it (fewer chunks = steady FPS)
         drawDist = if (Settings.liveWeather || Weather.override > 0) min(Settings.renderDistance, Weather.renderCap()) else Settings.renderDistance
         streamer.radius = drawDist
-        if (Controls.screen == Screen.MENU) {
+        if (Controls.screen == Screen.MENU || (Controls.menuContext && Controls.screen != Screen.NONE)) {
             // title screen: an orbiting flyover of the whole city (light model, no streaming work for it) while the
             // chunks around the start position stream in, so "Gioca" drops you straight into a loaded Venice
             streamer.update(boat.x, boat.y, cos(boat.heading), sin(boat.heading), 2)
@@ -569,7 +619,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             if (boat.splash > 1.5f) Audio.event(Audio.EV_SPLASH, boat.splash)
             distance += hypot(boat.x - ox, boat.y - oy)
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
-            wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
+            if (!Settings.simple) wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
         live.update(if (paused) 0f else dt, camX, camY)
         if (!paused) watchEvents(sdt)
@@ -628,7 +678,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val r = refl!!
         val camMove = hypot(camX - reflCamX, camY - reflCamY) + abs(camZ - reflCamZ)
         val turn = abs(LiveBoats.wrap(yaw - reflYaw))
-        if (camMove > 0.35f || turn > 0.012f || reflAge >= 2 || !reflValid) {
+        if (Settings.simple) { /* no reflection pass at all */ }
+        else if (camMove > 0.35f || turn > 0.012f || reflAge >= 2 || !reflValid) {
             r.bind()
             glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
             if (Settings.reflections) drawOpaque(vp, mirror, -0.05f, min(260f, drawDist), bm, true)
@@ -751,6 +802,20 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private fun drawWater(vp: FloatArray, r: Target) {
+        if (Settings.simple) {
+            // low-end: flat water with baked ripples and the sky projected on it, nothing simulated, no reflection pass
+            val w = waterSimple
+            w.use(); common(w, vp, ident, -1000f, false)
+            w.vec3("uCenter", floor(camX / 40f) * 40f, floor(camY / 40f) * 40f, 0f); w.f("uWaveAmp", boat.waveAmp)
+            glActiveTexture(GL_TEXTURE10); glBindTexture(GL_TEXTURE_2D, waterN); w.i("uWaterN", 10)
+            glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, wake.tex); w.i("uWake", 7)
+            w.vec3("uWakeO", 0f, 0f, 0.001f); w.vec2("uWakeDir", 1f, 0f)
+            glUniform4f(w.loc("uBoat"), boat.x, boat.y, boat.heading, abs(boat.surge)); glUniform2f(w.loc("uHull"), Boat.HALF_LEN, Boat.HALF_BEAM)
+            w.f("uGridHalf", 1e6f); waterNear?.draw()
+            w.f("uGridHalf", 160f); waterMid?.draw()
+            w.f("uGridHalf", 1f); waterFar?.draw()
+            return
+        }
         water.use(); common(water, vp, ident, -1000f)
         val cx = floor(camX / 40f) * 40f; val cy = floor(camY / 40f) * 40f
         water.vec3("uCenter", cx, cy, 0f); water.f("uWaveAmp", boat.waveAmp)
@@ -793,6 +858,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (n == 0) return
         smokeMesh.upload(smokeData, n)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
+        if (Settings.simple) return
         val sp = smokeP ?: return
         sp.use(); common(sp, vp, ident, -1000f, false); foam(sp)
         smokeMesh.draw()

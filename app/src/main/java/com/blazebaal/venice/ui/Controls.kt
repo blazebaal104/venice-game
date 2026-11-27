@@ -34,6 +34,8 @@ object Controls {
     @Volatile var menuBoatYaw = 0f
     /** rad/s, set by the finger, integrated and damped by the renderer */
     @Volatile var menuBoatSpin = 0f
+    /** true while the player is in the title-screen flow (menu, and settings/credits opened from it) */
+    @Volatile var menuContext = true
     @Volatile var menuBoatTouchT = 0L
     @Volatile var menuBoatDragging = false
     val paused get() = screen != Screen.NONE
@@ -65,6 +67,8 @@ object GameState {
     @Volatile var bootStage = ""
     @Volatile var bootError = ""
     @Volatile var booted = false
+    /** a page is open over the game and the renderer has frozen on a blurred frame (no GPU work until it closes) */
+    @Volatile var frozen = false
     @Volatile var x = 0f
     @Volatile var y = 0f
     @Volatile var heading = 0f
@@ -99,6 +103,8 @@ object Settings {
 
     // ---- graphics
     @Volatile var quality = BALANCED
+    /** "Semplice" graphics for low-end phones: simple water, no planar reflection, no wake simulation, no HDR/bloom/shadows */
+    @Volatile var simple = false
     /** radius (m) of the loaded world: everything past it is unloaded and hidden in the fog. 256 m = one chunk (map tile). */
     @Volatile var renderDistance = 512f
     @Volatile var vegetationDistance = 180f
@@ -131,9 +137,15 @@ object Settings {
     @Volatile var language = 0           // 0 italiano, 1 english
 
     /** highest internal resolution (fraction of the screen) the dynamic scaler may use */
-    fun maxScale() = if (resolution > 0) resolution / 100f else when (quality) { PERFORMANCE -> 0.8f; else -> 1.0f }
+    fun maxScale() = if (resolution > 0) resolution / 100f else if (simple) 0.75f else when (quality) { PERFORMANCE -> 0.8f; else -> 1.0f }
     /** lowest it may drop to: never below 70 % any more, that is what made the city look like 144p */
-    fun minScale() = if (resolution > 0) resolution / 100f else when (quality) { PERFORMANCE -> 0.65f; BALANCED -> 0.8f; else -> 0.85f }
+    fun minScale() = if (resolution > 0) resolution / 100f else if (simple) 0.6f else when (quality) { PERFORMANCE -> 0.65f; BALANCED -> 0.8f; else -> 0.85f }
+    /** the two looks: realistic (everything) or simple (playable on an A15) */
+    fun applyMode(simpleMode: Boolean) {
+        simple = simpleMode
+        if (simpleMode) { applyPreset(PERFORMANCE); renderDistance = 384f; vegetationDistance = 80f; detailDistance = 120f; shadows = false; reflections = false; bloom = false; sharpen = 0.3f }
+        else { applyPreset(BALANCED); sharpen = 0.5f }
+    }
 
     /** Quality presets set the distances too; the player can still fine-tune them afterwards. */
     fun applyPreset(q: Int) {
@@ -167,6 +179,7 @@ object Settings {
         volMaster = p.getFloat("volMaster", 0.8f); volEngine = p.getFloat("volEngine", 0.8f); volAmbience = p.getFloat("volAmbience", 0.6f)
         liveWeather = p.getBoolean("liveWeather", true); language = p.getInt("language", 0)
         liveVaporetti = p.getBoolean("liveVaporetti", true)
+        simple = p.getBoolean("simple", false)
     }
     fun save(ctx: Context) {
         ctx.getSharedPreferences("venice", Context.MODE_PRIVATE).edit()
@@ -179,6 +192,6 @@ object Settings {
             .putBoolean("vibration", vibration).putInt("speedUnit", speedUnit).putFloat("hudScale", hudScale).putBoolean("northUp", minimapNorthUp)
             .putFloat("volMaster", volMaster).putFloat("volEngine", volEngine).putFloat("volAmbience", volAmbience)
             .putBoolean("liveWeather", liveWeather).putBoolean("liveVaporetti", liveVaporetti).putInt("language", language)
-            .apply()
+            .putBoolean("simple", simple).apply()
     }
 }

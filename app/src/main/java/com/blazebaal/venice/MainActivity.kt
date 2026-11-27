@@ -72,6 +72,17 @@ class MainActivity : Activity(), GameActions {
         root.addView(screens)
         setContentView(root)
         hideSystemUi()
+        // while a page is open and the renderer has frozen on its blurred frame, stop the GL loop entirely (no GPU,
+        // no CPU in the background); restart it the moment the page closes
+        val h = android.os.Handler(mainLooper)
+        h.post(object : Runnable {
+            override fun run() {
+                val overlay = Controls.screen == Screen.PAUSE || Controls.screen == Screen.SETTINGS || Controls.screen == Screen.CREDITS || Controls.screen == Screen.MAP
+                val want = if (overlay && GameState.frozen) GLSurfaceView.RENDERMODE_WHEN_DIRTY else GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                if (glView.renderMode != want) glView.renderMode = want
+                h.postDelayed(this, 50)
+            }
+        })
     }
 
     /** Pick the display mode with the highest refresh rate at the current resolution. */

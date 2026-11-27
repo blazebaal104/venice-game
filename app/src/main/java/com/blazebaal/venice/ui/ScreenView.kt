@@ -48,7 +48,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     init {
         gui.onFeedback = { if (Settings.vibration) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY) }
-        val tick = object : Runnable { override fun run() { if (Controls.screen != Screen.NONE) invalidate(); postDelayed(this, 33) } }
+        // 60 fps while a page scrolls or glides (the GL view is frozen meanwhile, so this is the only work), 30 otherwise
+        val tick = object : Runnable { override fun run() { if (Controls.screen != Screen.NONE) invalidate(); postDelayed(this, if (Controls.screen == Screen.SETTINGS || gui.gliding) 16 else 33) } }
         post(tick)
     }
 
@@ -62,6 +63,9 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             else -> {}
         }
         if (s != Screen.MAP) MapLayer.dropRegion()
+        if (s == Screen.MENU) Controls.menuContext = true
+        if (s == Screen.NONE) Controls.menuContext = false
+        if (s != Screen.MENU) Controls.menuBoatRect = IntArray(4)
         teleportOpen = false
         gui.consumeScroll()
         Controls.screen = s
@@ -284,7 +288,7 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
 
     // ================================================================ PAUSE
     private fun drawPause() {
-        dim(150)
+        dim(80)
         val colW = min(300 * dp, W * 0.36f)
         val x0 = m + 10 * dp
         title("PAUSA", x0, m + 34 * dp, 28f)
@@ -360,28 +364,40 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     private val tabs = listOf("GRAFICA", "CONTROLLI", "AUDIO", "HUD E MAPPA", "METEO E MONDO", "ARCHIVIO", "INFO")
 
     private fun drawSettings() {
-        if (settingsReturn == Screen.MENU) { drawMenuBackdrop() } else dim(185)
+        if (settingsReturn == Screen.MENU) { drawMenuBackdrop() } else dim(70)
         if (gui.iconButton(m + 22 * dp, m + 22 * dp, 22 * dp, "back")) { Settings.save(context); open(settingsReturn); return }
         title("IMPOSTAZIONI", m + 58 * dp, m + 32 * dp, 24f)
-        // tabs
-        val tabW = min(190 * dp, W * 0.24f)
+        // sections (left): big, and a scrollable column of their own
+        val tabW = min(260 * dp, W * 0.29f)
         val tabTop = m + 60 * dp
-        val th = min(44 * dp, (H - tabTop - m) / tabs.size - 6 * dp)
-        for ((i, t) in tabs.withIndex()) {
-            val r = RectF(m, tabTop + i * (th + 6 * dp), m + tabW, tabTop + i * (th + 6 * dp) + th)
-            val on = i == tab
-            if (on) { ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW; c.drawRoundRect(r, 10 * dp, 10 * dp, ink.fill) }
-            else ink.glass(r, 10 * dp)
-            ink.label(t, r.left + 14 * dp, r.centerY() + 5 * dp, 13f, if (on) Theme.INK else Theme.TEXT, spacing = 0.06f)
-            if (!on && gui.tapped(r)) { tab = i; scrollY = 0f }
-        }
-        // content panel (scrollable)
+        val th = 58 * dp; val tg = 8 * dp
+        val tabCol = RectF(m, tabTop, m + tabW, H - m)
         val panel = RectF(m + tabW + 16 * dp, tabTop, W - m, H - m)
+        // one finger, two lists: the drag scrolls whichever side it started on
+        val d = if (gui.isDraggingSlider) { gui.consumeScroll(); 0f } else gui.consumeScroll()
+        if (gui.downX < panel.left) tabScroll = (tabScroll + d).coerceIn(min(0f, tabCol.height() - tabs.size * (th + tg) + tg), 0f)
+        else {
+            val lo = min(0f, panel.height() - contentH - 24 * dp)
+            scrollY = (scrollY + d).coerceIn(lo, 0f)
+            if (scrollY <= lo || scrollY >= 0f) gui.stopFling()
+        }
+        val ts = c.save(); c.clipRect(tabCol)
+        for ((i, t) in tabs.withIndex()) {
+            val top = tabTop + tabScroll + i * (th + tg)
+            val r = RectF(m, top, m + tabW, top + th)
+            val on = i == tab
+            if (on) { ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW; c.drawRoundRect(r, 12 * dp, 12 * dp, ink.fill) }
+            else ink.glass(r, 12 * dp)
+            var fs = 16.5f; while (fs > 11f && ink.width(t, fs, spacing = 0.06f) > r.width() - 32 * dp) fs -= 0.5f
+            ink.label(t, r.left + 18 * dp, r.centerY() + fs * 0.36f * dp, fs, if (on) Theme.INK else Theme.TEXT, spacing = 0.06f)
+            if (!on && gui.tapped(r)) { tab = i; scrollY = 0f; gui.stopFling() }
+        }
+        c.restoreToCount(ts)
+        // content panel (scrollable)
         ink.glass(panel, 16 * dp)
-        if (!gui.isDraggingSlider) scrollY = (scrollY + gui.consumeScroll()).coerceIn(min(0f, panel.height() - contentH - 20 * dp), 0f) else gui.consumeScroll()
         val save = c.save(); c.clipRect(panel)
         var y = panel.top + 18 * dp + scrollY
-        val x = panel.left + 20 * dp; val w = panel.width() - 40 * dp
+        val x = panel.left + 26 * dp; val w = panel.width() - 52 * dp
         val start = y
         y = when (tab) {
             0 -> graphics(x, y, w)
@@ -396,35 +412,40 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         c.restoreToCount(save)
     }
 
-    private fun drawMenuBackdrop() { dim(175) }
+    private fun drawMenuBackdrop() { dim(60) }
 
-    private val ROW get() = 70 * dp
+    private val ROW get() = 86 * dp
+    private var tabScroll = 0f
     /** One settings row: label + wrapped description on the left, the control's rect on the right (never overlapping). */
-    private fun row(x: Float, y: Float, w: Float, label: String, desc: String? = null, h: Float = 70f): RectF {
-        val cw = min(w * 0.46f, 340 * dp)
-        val textW = w - cw - 20 * dp
-        var ls = 15f; while (ls > 11f && ink.width(label, ls) > textW) ls -= 0.5f
-        ink.label(label, x, y + (if (desc == null) 39f else 27f) * dp, ls, Theme.TEXT)
+    private fun row(x: Float, y: Float, w: Float, label: String, desc: String? = null, h: Float = 86f): RectF {
+        val cw = min(w * 0.46f, 360 * dp)
+        val textW = w - cw - 24 * dp
+        var ls = 17f; while (ls > 12f && ink.width(label, ls) > textW) ls -= 0.5f
+        ink.label(label, x, y + (if (desc == null) 48f else 33f) * dp, ls, Theme.TEXT)
         if (desc != null) {
             // wrap to at most two lines in the label column
-            val words = desc.split(' '); var line = ""; var ly = y + 45 * dp; var lines = 0
+            val words = desc.split(' '); var line = ""; var ly = y + 54 * dp; var lines = 0
             for (wd in words) {
                 val t = if (line.isEmpty()) wd else "$line $wd"
-                if (ink.width(t, 11f, Theme.condensed) > textW && line.isNotEmpty()) {
-                    ink.label(if (lines == 1) "$line…" else line, x, ly, 11f, Theme.TEXT_DIM, face = Theme.condensed)
-                    lines++; ly += 14 * dp; line = wd
+                if (ink.width(t, 12.5f, Theme.condensed) > textW && line.isNotEmpty()) {
+                    ink.label(if (lines == 1) "$line…" else line, x, ly, 12.5f, Theme.TEXT_DIM, face = Theme.condensed)
+                    lines++; ly += 16 * dp; line = wd
                     if (lines >= 2) { line = ""; break }
                 } else line = t
             }
-            if (line.isNotEmpty() && lines < 2) ink.label(line, x, ly, 11f, Theme.TEXT_DIM, face = Theme.condensed)
+            if (line.isNotEmpty() && lines < 2) ink.label(line, x, ly, 12.5f, Theme.TEXT_DIM, face = Theme.condensed)
         }
         ink.stroke.color = Theme.EDGE; ink.stroke.strokeWidth = 1 * dp; c.drawLine(x, y + h * dp, x + w, y + h * dp, ink.stroke)
-        return RectF(x + w - cw, y + (h * dp - 40 * dp) / 2, x + w, y + (h * dp + 40 * dp) / 2)
+        return RectF(x + w - cw, y + (h * dp - 46 * dp) / 2, x + w, y + (h * dp + 46 * dp) / 2)
     }
-    private fun section(x: Float, y: Float, t: String): Float { ink.label(t, x, y + 30 * dp, 10.5f, Theme.YELLOW, spacing = 0.18f); return y + 40 * dp }
+    private fun section(x: Float, y: Float, t: String): Float { ink.label(t, x, y + 34 * dp, 12f, Theme.YELLOW, spacing = 0.18f); return y + 46 * dp }
 
     private fun graphics(x: Float, y0: Float, w: Float): Float {
         var y = section(x, y0, "QUALITÀ")
+        val mode = gui.segmented(row(x, y, w, "Grafica", if (Settings.simple) "Semplice: acqua leggera, niente riflessi calcolati, niente ombre: per telefoni meno potenti" else "Realistica: acqua simulata, riflessi, ombre, luci HDR"),
+            listOf("Realistica", "Semplice"), if (Settings.simple) 1 else 0)
+        if ((mode == 1) != Settings.simple) Settings.applyMode(mode == 1)
+        y += ROW
         val q = gui.segmented(row(x, y, w, "Preimpostazione", "Imposta tutto il resto in un colpo"), listOf("Prestazioni", "Bilanciata", "Qualità", "Ultra"), Settings.quality)
         if (q != Settings.quality) Settings.applyPreset(q)
         y += ROW

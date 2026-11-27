@@ -11,6 +11,10 @@ class Gui(val ink: Ink) {
     // pointer state
     var downX = -1f; var downY = -1f; var curX = -1f; var curY = -1f
     var pressed = false; private var dragging = false
+    /** gesture direction, decided once the finger has moved past the slop: 0 undecided, 1 vertical (scroll), 2 horizontal */
+    private var axis = 0
+    // fling: the list keeps gliding after a quick swipe and slows down
+    private var flingV = 0f; private var lastMoveNs = 0L; private var lastFrameNs = 0L
     private var tapX = -1f; private var tapY = -1f
     var scrollDy = 0f
     private var activeSlider: String? = null
@@ -18,23 +22,39 @@ class Gui(val ink: Ink) {
 
     fun touch(e: MotionEvent) {
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; curX = e.x; curY = e.y; pressed = true; dragging = false; activeSlider = null }
+            MotionEvent.ACTION_DOWN -> { downX = e.x; downY = e.y; curX = e.x; curY = e.y; pressed = true; dragging = false; activeSlider = null; axis = 0; flingV = 0f; lastMoveNs = System.nanoTime() }
             MotionEvent.ACTION_MOVE -> {
-                if (!dragging && hypot(e.x - downX, e.y - downY) > 10 * dp) dragging = true
-                if (dragging && activeSlider == null) scrollDy += e.y - curY
+                if (!dragging && hypot(e.x - downX, e.y - downY) > 9 * dp) {
+                    dragging = true
+                    // the first clear direction wins: up/down always scrolls, even starting on a slider
+                    axis = if (abs(e.x - downX) > abs(e.y - downY) * 1.2f) 2 else 1
+                }
+                if (dragging && axis == 1) {
+                    val dy = e.y - curY; scrollDy += dy
+                    val now = System.nanoTime(); val dt = max(1L, now - lastMoveNs) / 1e9f; lastMoveNs = now
+                    flingV = flingV * 0.6f + (dy / dt) * 0.4f
+                }
                 curX = e.x; curY = e.y
             }
             MotionEvent.ACTION_UP -> {
-                if (!dragging) { tapX = e.x; tapY = e.y }
-                pressed = false; dragging = false; activeSlider = null
+                if (!dragging) { tapX = e.x; tapY = e.y; flingV = 0f }
+                if (System.nanoTime() - lastMoveNs > 80_000_000L) flingV = 0f
+                pressed = false; dragging = false; activeSlider = null; axis = 0
             }
-            MotionEvent.ACTION_CANCEL -> { pressed = false; dragging = false; activeSlider = null }
+            MotionEvent.ACTION_CANCEL -> { pressed = false; dragging = false; activeSlider = null; axis = 0; flingV = 0f }
         }
     }
 
     /** Call after drawing a frame: a tap only counts for the frame that follows it. */
     fun endFrame() { tapX = -1f; tapY = -1f }
-    fun consumeScroll(): Float { val d = scrollDy; scrollDy = 0f; return d }
+    fun consumeScroll(): Float {
+        val now = System.nanoTime(); val dt = if (lastFrameNs == 0L) 0f else ((now - lastFrameNs) / 1e9f).coerceAtMost(0.05f); lastFrameNs = now
+        if (!pressed && abs(flingV) > 20f) { scrollDy += flingV * dt; flingV *= exp(-dt * 3.2f) } else if (!pressed) flingV = 0f
+        val d = scrollDy; scrollDy = 0f; return d
+    }
+    /** stop a glide (page changed, list hit its end) */
+    fun stopFling() { flingV = 0f }
+    val gliding get() = abs(flingV) > 20f
 
     fun tapped(r: RectF): Boolean {
         if (tapX >= 0 && r.contains(tapX, tapY)) { tapX = -1f; tapY = -1f; onFeedback?.invoke(); return true }
@@ -107,7 +127,15 @@ class Gui(val ink: Ink) {
         val c = ink.c
         val track = RectF(r.left + 10 * dp, r.centerY() - 3 * dp, r.right - 10 * dp, r.centerY() + 3 * dp)
         var value = v
-        if (pressed && activeSlider == null && RectF(r.left, r.top - 6 * dp, r.right, r.bottom + 6 * dp).contains(downX, downY)) activeSlider = id
+        val hit = RectF(track.left - 14 * dp, track.centerY() - 22 * dp, track.right + 14 * dp, track.centerY() + 22 * dp)
+        if (pressed && activeSlider == null && axis == 2 && hit.contains(downX, downY)) activeSlider = id
+        if (tapX >= 0 && hit.contains(tapX, tapY)) {
+            curX = tapX; activeSlider = id
+            var tt = ((curX - track.left) / track.width()).coerceIn(0f, 1f)
+            value = min + (max - min) * tt
+            if (step > 0f) value = (round((value - min) / step) * step + min).coerceIn(min, max)
+            tapX = -1f; tapY = -1f; activeSlider = null; onFeedback?.invoke()
+        }
         if (pressed && activeSlider == id) {
             var t = ((curX - track.left) / track.width()).coerceIn(0f, 1f)
             value = min + (max - min) * t

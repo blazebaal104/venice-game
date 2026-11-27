@@ -942,6 +942,38 @@ void main() {
     o = vec4(c * k * k, 1.0);
 }
 """
+    // ------------------------------------------------------------------ "Semplice" water (low-end phones)
+    // No wave simulation, no second render of the city for reflections: two lookups of the baked ripple map,
+    // the sky projected by the ripple normal (a gradient, not a lit reflection), sun glitter, fog.
+    val WATER_SIMPLE_FS = """#version 300 es
+precision highp float;
+$COMMON
+in vec3 vW; in float vFade;
+uniform sampler2D uWaterN; uniform float uWaveAmp;
+out vec4 o;
+void main() {
+    vec2 p = vW.xy;
+    vec2 r = (texture(uWaterN, p * 0.045 + uTime * vec2(0.010, 0.006)).rg * 2.0 - 1.0) * 0.6
+           + (texture(uWaterN, p * 0.11 - uTime * vec2(0.012, 0.017)).rg * 2.0 - 1.0) * 0.4;
+    vec3 n = normalize(vec3(-r * (0.30 + uWaveAmp * 0.6), 1.0));
+    vec3 v = normalize(uCam - vW);
+    float fres = 0.04 + 0.96 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    vec3 rd = reflect(-v, n);
+    vec3 sky = mix(uFogCol, uSkyZenith, clamp(rd.z * 1.6, 0.0, 1.0));
+    vec3 deep = vec3(0.035, 0.095, 0.088) * (uSkyAmb * 1.4 + uSunCol * 0.3);
+    vec3 col = mix(deep, sky, fres * 0.85);
+    vec3 h = normalize(uSunDir + v);
+    col += uSunCol * pow(max(dot(n, h), 0.0), 280.0) * 1.8;
+    o = vec4(fog(col, vW), 1.0);
+}
+"""
+
+    const val COPY_FS = """#version 300 es
+precision mediump float;
+in vec2 vUv; uniform sampler2D uTex; uniform vec3 uTint;
+out vec4 o;
+void main() { o = vec4(texture(uTex, vUv).rgb * uTint, 1.0); }
+"""
     const val BLUR_FS = """#version 300 es
 precision mediump float;
 in vec2 vUv; uniform sampler2D uTex; uniform vec2 uDir;

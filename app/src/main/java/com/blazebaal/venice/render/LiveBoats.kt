@@ -707,6 +707,15 @@ class LiveBoats(private val world: WorldMap) {
         out[12] = b.px; out[13] = b.py; out[14] = z; out[15] = 1f
     }
 
+    /** after a pause: every boat is placed again from the latest ACTV report (or the timetable), as a real
+     *  boat would have moved on meanwhile; nothing is extrapolated from the moment the game froze */
+    fun resync() {
+        for (b in boats.values) { b.fresh = true; b.leg = null; b.planning = false; b.reqId++; b.hasFix = false; b.simStop = -1 }
+        lastFeed = -1L; simClock = 0f
+        smokeN = 0
+        for (b in boats.values) b.trailCount = 0
+    }
+
     fun shutdown() { worker.shutdownNow() }
 
     class Marker(val x: Float, val y: Float, val h: Float, val line: String, val head: String)
