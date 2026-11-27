@@ -361,7 +361,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val w = max(64, (width * scale).toInt()); val h = max(64, (height * scale).toInt())
         scene?.release(); refl?.release(); bloomA?.release(); bloomB?.release()
         scene = Target(w, h, true, true)
-        refl = Target(max(32, (w * 0.42f).toInt()), max(32, (h * 0.42f).toInt()), true, true)
+        refl = Target(max(32, (w * 0.42f).toInt()), max(32, (h * 0.42f).toInt()), true, true); reflValid = false
         bloomA = Target(w / 4, h / 4, true, false); bloomB = Target(w / 4, h / 4, true, false)
         GameState.renderScale = scale
     }
@@ -380,6 +380,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     private var menuScene: MenuScene? = null; private var menuT = 0f; 
     private lateinit var dimP: Program
+    private var reflCamX = 0f; private var reflCamY = 0f; private var reflCamZ = 0f; private var reflYaw = 0f; private var reflAge = 0; private var reflValid = false
 
     private fun drawMenu(dt: Float) {
         adaptResolution(dt.coerceAtMost(0.1f))
@@ -565,18 +566,25 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (Settings.shadows) renderCityShadow(camX + cos(yaw) * 120f, camY + sin(yaw) * 120f)
         renderBoatShadow(bm)
 
-        // ---- reflection pass: low resolution, nearby city only, no shadows (sky only when reflections are off)
+        // ---- reflection pass: low resolution, nearby city only, no shadows (sky only when reflections are off).
+        // A still or slowly drifting camera reuses it for up to 2 frames: under the ripples nobody can tell, and it
+        // is a whole second pass over the nearby city.
         val r = refl!!
-        r.bind()
-        glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
-        drawSky(vp, true)
-        if (Settings.reflections) drawOpaque(vp, mirror, -0.05f, min(260f, drawDist), bm, true)
+        val camMove = hypot(camX - reflCamX, camY - reflCamY) + abs(camZ - reflCamZ)
+        val turn = abs(LiveBoats.wrap(yaw - reflYaw))
+        if (camMove > 0.35f || turn > 0.012f || reflAge >= 2 || !reflValid) {
+            r.bind()
+            glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+            if (Settings.reflections) drawOpaque(vp, mirror, -0.05f, min(260f, drawDist), bm, true)
+            drawSky(vp, true)                // after the city: only the sky pixels that are actually visible get shaded
+            reflCamX = camX; reflCamY = camY; reflCamZ = camZ; reflYaw = yaw; reflAge = 0; reflValid = true
+        } else reflAge++
 
-        // ---- main HDR scene
+        // ---- main HDR scene: opaque first, then the sky only where nothing covers it (early depth rejection)
         sc.bind()
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
-        drawSky(vp, false)
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
+        drawSky(vp, false)
         drawWater(vp, r)
         drawTrails(vp)
         drawSpray(vp)
