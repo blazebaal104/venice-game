@@ -29,6 +29,10 @@ object Controls {
     @Volatile var teleportX = Float.NaN; @Volatile var teleportY = Float.NaN
 
     @Volatile var screen = Screen.MENU
+    /** title screen: where the boat preview is drawn (screen px: left, top, right, bottom) and how it is turned */
+    @Volatile var menuBoatRect = IntArray(4)
+    @Volatile var menuBoatYaw = 0f
+    @Volatile var menuBoatDragging = false
     val paused get() = screen != Screen.NONE
 
     fun steer(): Float {

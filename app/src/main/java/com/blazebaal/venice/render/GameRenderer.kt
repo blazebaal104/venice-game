@@ -356,6 +356,82 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         else if (goodT > 5f && scale < maxS - 0.01f && time - lastDrop > 12f) { scale = min(maxS, scale + 0.05f); goodT = 0f }
     }
 
+    private var menuScene: MenuScene? = null; private var menuT = 0f; private var previewDisc: Mesh? = null
+    private var autoYaw = 0f
+
+    private fun drawMenu(dt: Float) {
+        adaptResolution(dt.coerceAtMost(0.1f))
+        ensureTargets()
+        val ms = menuScene ?: MenuScene(ctx).also { menuScene = it }
+        menuT += dt
+        updateAtmosphere(dt)
+        val sc = scene!!
+        val e = ms.camera(menuT)
+        val view = Mat4.lookAt(e[0], e[1], e[2], e[3], e[4], e[5], 0f, 0f, 1f)
+        val proj = Mat4.perspective(Math.toRadians(50.0).toFloat(), sc.w.toFloat() / sc.h, 20f, 9000f)
+        val vp = Mat4.mul(proj, view)
+        val savedDist = drawDist; drawDist = 4000f
+        val cx = camX; val cy = camY; val cz = camZ
+        camX = e[0]; camY = e[1]; camZ = e[2]
+        sc.bind()
+        glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+        drawSky(vp, false)
+        ms.draw(vp, e, menuT, sunDir, sunCol, skyAmb, fogCol)
+        // the hand-built landmarks, bridges and pontoons on top (the light model has no Basilica, Campanile...)
+        val saveStart = fogStart; val saveEnd = fogEnd; val saveDens = fogDens
+        fogStart = 1700f; fogEnd = 5200f; fogDens = 1f / 6000f
+        generic.use(); common(generic, vp, ident, -1000f, false); generic.f("uFadeDist", 0f)
+        generic.i("uAtlas", 6); generic.i("uSign", 8)
+        glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, signTex)
+        for (l in landmarks) if (hypot(l.x - e[3], l.y - e[4]) < 2600f) {
+            glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, l.atlas)
+            glUniform4f(generic.loc("uSignRect"), l.signRect[0], l.signRect[1], l.signRect[2], l.signRect[3])
+            generic.mat4("uModel", l.model); l.mesh.draw()
+        }
+        // the player's boat, floating in its own little viewport and turning slowly (drag to turn it)
+        val r = Controls.menuBoatRect
+        if (r[2] > r[0] && r[3] > r[1] && width > 0) {
+            val kx = sc.w.toFloat() / width; val ky = sc.h.toFloat() / height
+            val vx = (r[0] * kx).toInt(); val vw = ((r[2] - r[0]) * kx).toInt(); val vh = ((r[3] - r[1]) * ky).toInt(); val vy = sc.h - (r[3] * ky).toInt()
+            glEnable(GL_SCISSOR_TEST); glScissor(vx, vy, vw, vh); glViewport(vx, vy, vw, vh)
+            glClearColor(0.012f, 0.02f, 0.035f, 1f); glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+            if (Controls.menuBoatDragging) autoYaw = 0f else autoYaw += dt * 0.35f
+            val yaw = Controls.menuBoatYaw + autoYaw
+            val bob = sin(menuT * 1.3f) * 0.05f
+            val bvp = Mat4.mul(Mat4.perspective(Math.toRadians(32.0).toFloat(), vw.toFloat() / max(1, vh), 0.5f, 100f),
+                Mat4.lookAt(-cos(0.65f) * 13.5f, 0f, sin(0.65f) * 13.5f + 0.8f, 0f, 0f, 0.6f, 0f, 0f, 1f))
+            fogStart = 1e5f; fogEnd = 0f; fogDens = 0f
+            common(generic, bvp, ident, -1000f, false)
+            generic.vec3("uCam", -cos(0.65f) * 13.5f, 0f, sin(0.65f) * 13.5f + 0.8f)
+            val disc = previewDisc ?: MeshBuilder(4096).run {
+                color(0.05f, 0.20f, 0.22f, 0.92f)
+                val n = 64
+                for (i in 0 until n) { val a0 = i * 2f * PI.toFloat() / n; val a1 = (i + 1) * 2f * PI.toFloat() / n
+                    quad(Vec3(0f, 0f, 0f), Vec3(0f, 0f, 0f), Vec3(cos(a0) * 7.5f, sin(a0) * 7.5f, 0f), Vec3(cos(a1) * 7.5f, sin(a1) * 7.5f, 0f)) }
+                Mesh(floats())
+            }.also { previewDisc = it }
+            generic.mat4("uModel", ident); disc.draw()
+            var m = Mat4.mul(Mat4.translation(0f, 0f, bob), Mat4.rotZ(yaw))
+            m = Mat4.mul(m, Mat4.rotY(-0.03f + sin(menuT * 0.9f) * 0.012f))
+            val s = Mat4.identity(); s[0] = Boat.SCALE; s[5] = Boat.SCALE; s[10] = Boat.SCALE
+            m = Mat4.mul(Mat4.mul(m, s), Mat4.translation(-2.22f, 0f, 0f))
+            boatMesh?.let { generic.mat4("uModel", m); it.draw() }
+            glDisable(GL_SCISSOR_TEST); glViewport(0, 0, sc.w, sc.h)
+        }
+        fogStart = saveStart; fogEnd = saveEnd; fogDens = saveDens
+        camX = cx; camY = cy; camZ = cz; drawDist = savedDist
+        // post: tone map + sharpen straight to the screen (no bloom on the menu)
+        glDisable(GL_DEPTH_TEST)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
+        compP.use()
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sc.tex); compP.i("uScene", 0)
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bloomA!!.tex); compP.i("uBloom", 1)
+        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", if (sc.isHdr) 0.85f else 1.45f)
+        compP.f("uSharpen", Settings.sharpen); compP.f("uBloomK", 0f)
+        skyTri?.draw()
+        glEnable(GL_DEPTH_TEST)
+    }
+
     private fun boatModel(): FloatArray {
         var m = Mat4.translation(boat.x, boat.y, boat.z)
         m = Mat4.mul(m, Mat4.rotZ(boat.heading)); m = Mat4.mul(m, Mat4.rotY(-boat.pitch)); m = Mat4.mul(m, Mat4.rotX(boat.roll))
@@ -374,15 +450,13 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // bad weather: the fog closes in and the render distance drops with it (fewer chunks = steady FPS)
         drawDist = if (Settings.liveWeather || Weather.override > 0) min(Settings.renderDistance, Weather.renderCap()) else Settings.renderDistance
         streamer.radius = drawDist
-        // title screen: the page covers the whole view, so don't render the city - just stream in the chunks around
-        // the start position so "Gioca" drops you straight into a loaded Venice
         if (Controls.screen == Screen.MENU) {
+            // title screen: an orbiting flyover of the whole city (light model, no streaming work for it) while the
+            // chunks around the start position stream in, so "Gioca" drops you straight into a loaded Venice
             streamer.update(boat.x, boat.y, cos(boat.heading), sin(boat.heading), 2)
             GameState.tilesLoaded = streamer.tiles.size; GameState.tilesWanted = streamer.wanted
             GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
-            glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
-            glClearColor(0.05f, 0.08f, 0.12f, 1f); glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
-            lastNs = System.nanoTime()
+            drawMenu(dt)
             return
         }
         adaptResolution(rawDt.coerceAtMost(0.1f))

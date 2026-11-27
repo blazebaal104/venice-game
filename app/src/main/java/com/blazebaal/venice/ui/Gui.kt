@@ -81,7 +81,9 @@ class Gui(val ink: Ink) {
         for ((i, o) in options.withIndex()) {
             val cell = RectF(r.left + i * w + 2 * dp, r.top + 2 * dp, r.left + (i + 1) * w - 2 * dp, r.bottom - 2 * dp)
             if (i == sel) { ink.fill.color = Theme.YELLOW; c.drawRoundRect(cell, 7 * dp, 7 * dp, ink.fill) }
-            ink.label(o, cell.centerX(), cell.centerY() + 4.5f * dp, 13f, if (i == sel) Theme.INK else Theme.TEXT, Paint.Align.CENTER)
+            var sz = 13f
+            while (sz > 8.5f && ink.width(o, sz) > cell.width() - 8 * dp) sz -= 0.5f
+            ink.label(o, cell.centerX(), cell.centerY() + sz * 0.35f * dp, sz, if (i == sel) Theme.INK else Theme.TEXT, Paint.Align.CENTER)
             if (i != sel && tapped(cell)) out = i
         }
         return out
@@ -120,4 +122,20 @@ class Gui(val ink: Ink) {
     }
 
     val isDraggingSlider get() = activeSlider != null
+
+    /** "‹ value ›" picker for long option lists; returns the new index. */
+    fun stepper(r: RectF, options: List<String>, sel: Int): Int {
+        val c = ink.c
+        ink.fill.style = Paint.Style.FILL; ink.fill.color = Color.argb(60, 255, 255, 255)
+        c.drawRoundRect(r, 9 * dp, 9 * dp, ink.fill)
+        val bw = r.height()
+        val left = RectF(r.left, r.top, r.left + bw, r.bottom); val right = RectF(r.right - bw, r.top, r.right, r.bottom)
+        ink.icon("back", left.centerX(), left.centerY(), Theme.YELLOW); ink.icon("next", right.centerX(), right.centerY(), Theme.YELLOW)
+        var sz = 13.5f; val t = options[sel]
+        while (sz > 9f && ink.width(t, sz) > r.width() - 2 * bw - 8 * dp) sz -= 0.5f
+        ink.label(t, r.centerX(), r.centerY() + sz * 0.35f * dp, sz, Theme.TEXT, Paint.Align.CENTER)
+        if (tapped(left)) return (sel + options.size - 1) % options.size
+        if (tapped(right)) return (sel + 1) % options.size
+        return sel
+    }
 }
