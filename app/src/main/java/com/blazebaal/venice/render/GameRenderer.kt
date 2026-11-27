@@ -10,6 +10,7 @@ import android.opengl.GLSurfaceView
 import com.blazebaal.venice.core.*
 import com.blazebaal.venice.live.Weather
 import com.blazebaal.venice.ui.Screen
+import com.blazebaal.venice.ui.Events
 import com.blazebaal.venice.ui.Controls
 import com.blazebaal.venice.ui.GameState
 import com.blazebaal.venice.ui.Settings
@@ -227,6 +228,48 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         }
     }
 
+    // ---------------------------------------------------------------- what's happening, as HUD texts
+    private var planArmed = true; private var trimCat = -1; private var airT = 0f; private var lastEngine = true; private var lastLever = 0f
+    private fun watchEvents(dt: Float) {
+        val kmh = boat.speedKmh()
+        if (planArmed && kmh > 32f && boat.surge > 0f) { Events.post("PLANATA", Events.GOOD, "lo scafo è sul plano"); planArmed = false }
+        if (kmh < 22f) planArmed = true
+        // the water column / wake type follows the trim
+        val tp = Controls.trimPct
+        val cat = when { tp < 35 -> 0; tp < 58 -> 1; tp < 78 -> 2; else -> 3 }
+        if (kmh > 45f && cat != trimCat) {
+            when (cat) {
+                0 -> Events.post("SCIA BASSA", Events.WATER, "trim giù · prua nell'acqua, più presa in curva", "trimcat", 1200)
+                1 -> Events.post("SCIA LARGA", Events.WATER, "assetto neutro", "trimcat", 1200)
+                2 -> Events.post("COLONNA D'ACQUA", Events.GOOD, "assetto ideale · massima velocità", "trimcat", 1200)
+                else -> Events.post("COLONNA ALTA", Events.WARN, "troppo trim · la prua comincia a saltare", "trimcat", 1200)
+            }
+            trimCat = cat
+        }
+        if (kmh < 35f) trimCat = -1
+        if (boat.porpoise > 0.35f) Events.post("ASSETTO TROPPO ALTO", Events.BAD, "abbassa il trim", cooldownMs = 5000)
+        if (boat.impact > 0f) {
+            when (boat.impactKind) {
+                3 -> Events.post("URTO CON IL VAPORETTO", Events.BAD, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
+                2 -> Events.post("URTO CONTRO IL PONTILE", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
+                else -> Events.post("URTO", Events.WARN, "contro la fondamenta · ${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
+            }
+            boat.impact = 0f
+        }
+        if (boat.scrape > 0.25f) Events.post("STRISCIATA", Events.WARN, "sul marmo della fondamenta", cooldownMs = 2500)
+        if (boat.airborne) airT += dt else { if (airT > 0.45f) Events.post("SALTO", Events.GOOD, String.format("%.1f s in aria", airT).replace('.', ',')); airT = 0f }
+        if (kmh > 138f) Events.post("VELOCITÀ MASSIMA", Events.GOOD, "140 km/h", cooldownMs = 20000)
+        if (Controls.engineOn != lastEngine) { Events.post(if (Controls.engineOn) "MOTORE ACCESO" else "MOTORE SPENTO", Events.INFO, key = "engine", cooldownMs = 300); lastEngine = Controls.engineOn }
+        val lv = Controls.throttle()
+        if (lv < -0.05f && lastLever >= -0.05f) Events.post("RETROMARCIA", Events.INFO, cooldownMs = 2000)
+        lastLever = lv
+        // waypoint reached: it disappears
+        if (GameState.hasWaypoint() && hypot(GameState.wpX - boat.x, GameState.wpY - boat.y) < 28f) {
+            Events.post("ARRIVATO", Events.WATER, GameState.wpName.uppercase(), cooldownMs = 500)
+            GameState.clearWaypoint()
+        }
+    }
+
     /** Fog distances from the render distance + fog setting, and fog / sky colours from the live weather. */
     private fun updateAtmosphere(dt: Float) {
         val live = Settings.liveWeather && Weather.live
@@ -326,6 +369,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
         live.update(dt, time)
+        if (!paused) watchEvents(sdt)
         GameState.x = boat.x; GameState.y = boat.y; GameState.heading = boat.heading; GameState.speedKmh = boat.speedKmh()
         GameState.distanceM = distance.toFloat()
         topKmh = max(topKmh, boat.speedKmh()); GameState.topSpeedKmh = topKmh; GameState.tripSeconds = tripTime
