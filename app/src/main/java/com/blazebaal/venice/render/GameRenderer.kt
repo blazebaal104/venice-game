@@ -53,42 +53,6 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private val visible = ArrayList<GpuTile>(128)
 
     private var lastNs = 0L; private var time = 0f; private var glErr = 0
-    // ---- on-device probe: the real HDR values of three pixels after each stage of the frame (once a second, FPS
-    // overlay on): which stage turns them black. Points: water right of the boat, right bank, left bank.
-    private var probeT = 0f; private var probing = false
-    private val probeOut = StringBuilder()
-    private val probeBuf = java.nio.ByteBuffer.allocateDirect(16).order(java.nio.ByteOrder.nativeOrder())
-    private val PROBE = floatArrayOf(0.68f, 0.42f, 0.78f, 0.78f, 0.13f, 0.72f)
-    private fun half(h: Int): Float {
-        val s = (h shr 15) and 1; val e = (h shr 10) and 0x1f; val m = h and 0x3ff
-        val v = when (e) { 0 -> m / 1024f * 6.1035156e-5f; 31 -> if (m == 0) Float.POSITIVE_INFINITY else Float.NaN; else -> (1f + m / 1024f) * 2f.pow(e - 15) }
-        return if (s == 1) -v else v
-    }
-    private fun fmt(v: Float) = when { v.isNaN() -> "NaN"; v.isInfinite() -> "inf"; abs(v) >= 100f -> String.format(java.util.Locale.US, "%.0f", v); else -> String.format(java.util.Locale.US, "%.2f", v) }
-    private fun probe(tag: String, sc: Target) {
-        if (!probing) return
-        while (glGetError() != GL_NO_ERROR) { }
-        probeOut.append(tag).append(' ')
-        for (k in 0 until 3) {
-            val x = (sc.w * PROBE[k * 2]).toInt(); val y = (sc.h * PROBE[k * 2 + 1]).toInt()
-            probeBuf.clear()
-            var r: Float; var g: Float; var b: Float
-            if (!sc.isHdr) {
-                glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, probeBuf)
-                r = (probeBuf.get(0).toInt() and 255) / 255f; g = (probeBuf.get(1).toInt() and 255) / 255f; b = (probeBuf.get(2).toInt() and 255) / 255f
-            } else {
-                glReadPixels(x, y, 1, 1, GL_RGBA, GL_FLOAT, probeBuf)
-                if (glGetError() == GL_NO_ERROR) { r = probeBuf.getFloat(0); g = probeBuf.getFloat(4); b = probeBuf.getFloat(8) }
-                else {
-                    probeBuf.clear(); glReadPixels(x, y, 1, 1, GL_RGBA, GL_HALF_FLOAT, probeBuf)
-                    if (glGetError() == GL_NO_ERROR) { r = half(probeBuf.getShort(0).toInt() and 0xffff); g = half(probeBuf.getShort(2).toInt() and 0xffff); b = half(probeBuf.getShort(4).toInt() and 0xffff) }
-                    else { r = -9f; g = -9f; b = -9f }
-                }
-            }
-            probeOut.append(fmt(r)).append('/').append(fmt(g)).append('/').append(fmt(b)).append(if (k < 2) "  " else "")
-        }
-        probeOut.append(" | ")
-    }
     private var fpsAcc = 0f; private var fpsN = 0
     private var frameEma = 1f / 60f; private var badT = 0f; private var goodT = 0f; private var lastDrop = -100f
     private var camX = 0f; private var camY = 0f; private var camZ = 3f
@@ -648,6 +612,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun drawMenu(dt: Float) {
         adaptResolution(dt.coerceAtMost(0.1f))
         ensureTargets()
+        resetState()
         val ms = menuScene ?: MenuScene(ctx).also { menuScene = it }
         menuT += dt
         updateAtmosphere(dt)
@@ -752,7 +717,14 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         if (overlay) freezeFrame()
     }
 
+    /** a known GL state at the start of every frame: whatever a pass left behind can't carry over */
+    private fun resetState() {
+        glDepthMask(true); glColorMask(true, true, true, true); glDisable(GL_BLEND); glDisable(GL_SCISSOR_TEST)
+        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS); glDisable(GL_CULL_FACE)
+    }
+
     private fun frameBody() {
+        resetState()
         val now = System.nanoTime()
         val rawDt = (now - lastNs) / 1e9f
         val dt = rawDt.coerceIn(0.001f, 0.05f)
@@ -808,7 +780,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             if (boat.splash > 1.5f) Audio.event(Audio.EV_SPLASH, boat.splash)
             distance += hypot(boat.x - ox, boat.y - oy)
             fx.update(sdt, boat, if (Controls.engineOn) thr else 0f)
-            // (the wake simulation no longer drives the water: the water is a calm, self-contained surface)
+            if (!Settings.simple) wake.update(sdt, boat, if (Controls.engineOn) thr else 0f, world)
         }
         LiveBoats.playerX = boat.x; LiveBoats.playerY = boat.y
         live.update(if (paused) 0f else dt, camX, camY)
@@ -894,7 +866,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
 
         val bm = boatModel()
-        // sun shadow maps off: everything that read them is where the picture went black
+        if (Settings.shadows && !Settings.simple) renderCityShadow(camX + cos(yaw) * 120f, camY + sin(yaw) * 120f)
+        if (!Settings.simple) renderBoatShadow(bm)
 
         // ---- reflection pass: low resolution, nearby city only, no shadows (sky only when reflections are off).
         // A still or slowly drifting camera reuses it for up to 2 frames: under the ripples nobody can tell, and it
@@ -902,7 +875,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val r = refl!!
         val camMove = hypot(camX - reflCamX, camY - reflCamY) + abs(camZ - reflCamZ)
         val turn = abs(LiveBoats.wrap(yaw - reflYaw))
-        if (true) { /* the water doesn't use a reflection pass any more */ }
+        if (Settings.simple) { /* no reflection pass at all */ }
         else if (camMove > 0.35f || turn > 0.012f || reflAge >= 2 || !reflValid) {
             r.bind()
             glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
@@ -914,21 +887,15 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // ---- main HDR scene: opaque first, then the sky only where nothing covers it (early depth rejection)
         sc.bind()
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
-        probeT += dt; probing = Settings.showFps && probeT > 1f; if (probing) { probeT = 0f; probeOut.setLength(0) }
         drawOpaque(vp, ident, -1000f, drawDist, bm, false)
-        probe("O", sc)
         drawGrass(vp)
         drawGulls(vp)
         drawSky(vp, false)
-        probe("C", sc)
         drawWater(vp, r)
-        probe("A", sc)
         drawTrails(vp)
         drawSpray(vp)
         drawSmoke(vp)
         if (Settings.liveWeather || Weather.override > 0) { val w = Weather.windVec(); rain.draw(vp, camX, camY, camZ, boat.time, Weather.rainIntensity(), w[0] * 0.6f, w[1] * 0.6f, fogCol) }
-        probe("T", sc)
-        if (probing) GameState.diag2 = probeOut.toString()
 
         // ---- post
         glDisable(GL_DEPTH_TEST)
@@ -972,7 +939,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, boatShadow.tex); p.i("uShadowB", 9)
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[0]); p.i("uAlb", 3)
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[1]); p.i("uNrm", 4)
-        p.mat4("uLightVP", lightVP); p.mat4("uLightVPB", lightVPB); p.f("uShadowOn", 0f)
+        p.mat4("uLightVP", lightVP); p.mat4("uLightVPB", lightVPB); p.f("uShadowOn", if (shadows && Settings.shadows && !Settings.simple && cityShadow.tex != 0) 1f else 0f)
     }
 
     private fun drawOpaque(vp: FloatArray, mir: FloatArray, clipZ: Float, maxDist: Float, bm: FloatArray, reflection: Boolean) {
@@ -1035,7 +1002,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     private fun drawWater(vp: FloatArray, r: Target) {
-        if (true) {
+        if (Settings.simple) {
             // one water for every mode: flat, baked ripples, the sky projected on it, a sun glint - nothing simulated,
             // no reflection pass, no shadow map
             val w = waterSimple
@@ -1169,8 +1136,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val n = live.buildTrails(trailData, min(drawDist, 380f), camX, camY)
         if (n == 0) return
         trailMesh.upload(trailData, n * 5)
-        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
         val tp = trailP ?: return
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
         tp.use(); common(tp, vp, ident, -1000f, false); foam(tp)
         trailMesh.draw(GL_TRIANGLES)
         glDepthMask(true); glDisable(GL_BLEND)
@@ -1191,9 +1158,11 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         }
         if (n == 0) return
         smokeMesh.upload(smokeData, n)
-        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
+        // (checked BEFORE touching GL state: returning in between left depth writes off - nothing cleared the depth
+        // buffer from then on and the whole static scene failed the depth test: the black picture)
         if (Settings.simple) return
         val sp = smokeP ?: return
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
         sp.use(); common(sp, vp, ident, -1000f, false); foam(sp)
         smokeMesh.draw()
         glDepthMask(true); glDisable(GL_BLEND)

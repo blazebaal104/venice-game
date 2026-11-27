@@ -204,7 +204,6 @@ class HudView(ctx: Context) : View(ctx) {
         drawEvents()
         if (Settings.showFps) ink.label("${GameState.fps.roundToInt()} FPS · ${(GameState.renderScale * 100).roundToInt()}% · ${GameState.tilesLoaded} chunk", margin + 2 * s, margin + 118 * s, 10f, Theme.TEXT_DIM, face = Theme.condensed)
         if (Settings.showFps) ink.label(GameState.diag, margin + 2 * s, margin + 132 * s, 8.5f, Theme.TEXT_DIM, face = Theme.condensed)
-        if (Settings.showFps) ink.label(GameState.diag2, margin + 2 * s, margin + 144 * s, 8.5f, Theme.TEXT_DIM, face = Theme.condensed)
         if (GameState.loading) drawLoading()
         ink.dp = base
     }
