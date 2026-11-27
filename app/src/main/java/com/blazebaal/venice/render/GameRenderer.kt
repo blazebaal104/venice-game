@@ -116,7 +116,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) fleetMeshes[i] = loadMesh("live/$n.mesh")
         wake.fleet = live
         smokeP = Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke"); trailP = Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail")
-        smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 24000)
+        smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 24000 * 5)
         boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
         Obstacles.stops = stopBoxes
         findWater()
@@ -678,10 +678,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private fun drawTrails(vp: FloatArray) {
         val n = live.buildTrails(trailData, min(drawDist, 700f), camX, camY)
         if (n == 0) return
-        trailMesh.upload(trailData, n)
+        trailMesh.upload(trailData, n * 5)
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
         trailP.use(); common(trailP, vp, ident, -1000f)
-        trailMesh.draw()
+        trailMesh.draw(GL_TRIANGLES)
         glDepthMask(true); glDisable(GL_BLEND)
     }
 

@@ -178,30 +178,6 @@ class DynMesh(val stride: Int, layout: IntArray, capacityFloats: Int) {
     fun draw(mode: Int) { if (count == 0) return; glBindVertexArray(vao); glDrawArrays(mode, 0, count) }
 }
 
-/** A vertex buffer rewritten every frame (orphaned, no sync stall), drawn as a triangle list. */
-class DynMesh(val stride: Int, layout: IntArray, val maxVerts: Int) {
-    val vao: Int; private val vbo: Int
-    private val buf = ByteBuffer.allocateDirect(maxVerts * stride * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-    var count = 0
-    init {
-        val a = IntArray(1); glGenVertexArrays(1, a, 0); vao = a[0]; glGenBuffers(1, a, 0); vbo = a[0]
-        glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo)
-        glBufferData(GL_ARRAY_BUFFER, maxVerts * stride * 4, null, GL_STREAM_DRAW)
-        var off = 0
-        for ((loc, n) in layout.withIndex()) { glEnableVertexAttribArray(loc); glVertexAttribPointer(loc, n, GL_FLOAT, false, stride * 4, off * 4); off += n }
-        glBindVertexArray(0)
-    }
-    fun upload(data: FloatArray, verts: Int) {
-        count = minOf(verts, maxVerts)
-        if (count == 0) return
-        buf.position(0); buf.put(data, 0, count * stride); buf.position(0)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo)
-        glBufferData(GL_ARRAY_BUFFER, maxVerts * stride * 4, null, GL_STREAM_DRAW)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, count * stride * 4, buf)
-    }
-    fun draw() { if (count == 0) return; glBindVertexArray(vao); glDrawArrays(GL_TRIANGLES, 0, count) }
-}
-
 /** Instanced quads: a static 6-vertex corner buffer (location 3) + per-instance data rewritten every frame. */
 class InstMesh(val stride: Int, layout: IntArray, val maxInstances: Int) {
     val vao: Int; private val vbo: Int; private val cornerVbo: Int
