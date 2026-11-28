@@ -60,7 +60,10 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private var distance = 0.0
 
     // lighting (linear HDR): Venetian late-afternoon sun from the south-west
-    private val sunDir = run { val az = Math.toRadians(228.0); val el = Math.toRadians(32.0); floatArrayOf((sin(az) * cos(el)).toFloat(), (cos(az) * cos(el)).toFloat(), sin(el).toFloat()) }
+    private val afternoonSun = run { val az = Math.toRadians(228.0); val el = Math.toRadians(32.0); floatArrayOf((sin(az) * cos(el)).toFloat(), (cos(az) * cos(el)).toFloat(), sin(el).toFloat()) }
+    /** the light of this moment (render/DayCycle), or the fixed afternoon with "Sempre giorno" */
+    private val sunDir = afternoonSun.copyOf()
+    private var lightInit = false
     private val sunClear = floatArrayOf(3.3f, 2.95f, 2.45f)
     private val sunCol = sunClear.copyOf()
     private val skyAmb = floatArrayOf(0.34f, 0.42f, 0.56f)
@@ -70,6 +73,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     // clear-day values; blended towards overcast / fog by the live weather every frame
     private val fogClear = floatArrayOf(0.62f, 0.68f, 0.76f); private val fogGrey = floatArrayOf(0.66f, 0.68f, 0.70f)
     private val zenithClear = floatArrayOf(0.16f, 0.30f, 0.62f); private val zenithGrey = floatArrayOf(0.42f, 0.46f, 0.52f)
+    private val fogGreyDay = fogGrey.copyOf(); private val zenithGreyDay = zenithGrey.copyOf()
     private val fogCol = fogClear.copyOf()
     private val zenith = zenithClear.copyOf()
     private var fogDens = 1f / 640f
@@ -503,7 +507,31 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     }
 
     /** Fog distances from the render distance + fog setting, and fog / sky colours from the live weather. */
+    private fun dayLight() {
+        if (Settings.dayNight == 1 && GameState.hourOverride.isNaN()) {
+            afternoonSun.copyInto(sunDir)
+            floatArrayOf(3.3f, 2.95f, 2.45f).copyInto(sunClear); floatArrayOf(0.62f, 0.68f, 0.76f).copyInto(fogClear); floatArrayOf(0.16f, 0.30f, 0.62f).copyInto(zenithClear)
+            floatArrayOf(0.34f, 0.42f, 0.56f).copyInto(skyAmb); floatArrayOf(0.20f, 0.18f, 0.15f).copyInto(groundAmb)
+            winLit = 0f; stars = 0f; dusk = 0f; nightExposure = 1f
+            for (i in 0..2) { fogGrey[i] = fogGreyDay[i]; zenithGrey[i] = zenithGreyDay[i] }
+            return
+        }
+        DayCycle.update(GameState.hourOverride)
+        DayCycle.sunDir.copyInto(sunDir); DayCycle.sunCol.copyInto(sunClear); DayCycle.horizon.copyInto(fogClear); DayCycle.zenith.copyInto(zenithClear)
+        DayCycle.skyAmb.copyInto(skyAmb); DayCycle.groundAmb.copyInto(groundAmb)
+        // overcast at night is dark too: the grey targets scale with how much light there is
+        val lum = (fogClear[0] * 0.3f + fogClear[1] * 0.59f + fogClear[2] * 0.11f) / 0.67f
+        for (i in 0..2) { fogGrey[i] = fogGreyDay[i] * min(1f, lum); zenithGrey[i] = zenithGreyDay[i] * min(1f, lum) }
+        winLit = DayCycle.windows; stars = if (Settings.simple) 0f else DayCycle.stars; dusk = if (Settings.simple) 0f else DayCycle.dusk
+        nightExposure = DayCycle.exposure
+    }
+    private var winLit = 0f; private var stars = 0f; private var dusk = 0f; private var nightExposure = 1f
+    private var dayClock = 0f
+
     private fun updateAtmosphere(dt: Float) {
+        dayClock -= dt
+        if (dayClock <= 0f || !lightInit) { dayClock = 1f; dayLight() }
+        if (!lightInit) { lightInit = true; sunClear.copyInto(sunCol); fogClear.copyInto(fogCol); zenithClear.copyInto(zenith) }
         val live = (Settings.liveWeather && Weather.live) || Weather.override > 0
         val grey = if (live) Weather.gloom() else 0f
         // overcast dims the sun; rain soaks the city slowly and it dries slowly
@@ -685,7 +713,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         compP.use()
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sc.tex); compP.i("uScene", 0)
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bloomA!!.tex); compP.i("uBloom", 1)
-        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", if (sc.isHdr) 0.85f else 1.45f)
+        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", (if (sc.isHdr) 0.85f else 1.45f) * nightExposure)
         compP.f("uSharpen", Settings.sharpen); compP.f("uBloomK", 0f)
         skyTri?.draw()
         glEnable(GL_DEPTH_TEST)
@@ -744,6 +772,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             GameState.tilesLoaded = streamer.tiles.size; GameState.tilesWanted = streamer.wanted
             GameState.loading = streamer.tiles.size < min(4, streamer.wanted)
             Audio.menu = true
+            updateAtmosphere(dt)
             drawMenu(dt)
             return
         }
@@ -907,7 +936,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         compP.use()
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sc.tex); compP.i("uScene", 0)
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, ba.tex); compP.i("uBloom", 1)
-        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", (if (sc.isHdr) 0.85f else 1.45f) * (1f + flash * 1.6f))
+        glUniform2f(compP.loc("uTexel"), 1f / sc.w, 1f / sc.h); compP.f("uExposure", (if (sc.isHdr) 0.85f else 1.45f) * (1f + flash * 1.6f) * nightExposure)
         // sharpen more when the internal resolution is lower
         compP.f("uSharpen", Settings.sharpen * 0.5f * (1f + (1f - scale) * 1.5f))       // gentler: sharpening amplified shimmer
         compP.f("uBloomK", if (Settings.bloom) 1f else 0f)
@@ -919,6 +948,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         glDepthMask(false)
         sky.use(); sky.mat4("uInvVP", Mat4.invert(vp)); sky.vec3("uSunDir", sunDir); sky.vec3("uFogCol", fogCol); sky.vec3("uSkyZenith", zenith); sky.vec3("uSunCol", sunCol)
         sky.f("uMirrorSky", if (mirrored) 1f else 0f); sky.f("uTime", time)
+        sky.f("uStars", stars); sky.f("uDusk", dusk); sky.vec3("uTrueSun", DayCycle.trueSun)
         sky.f("uCloudCover", if (Settings.liveWeather || Weather.override > 0) Weather.clouds() else 0.55f)
         sky.f("uHazeH", (34f / drawDist).coerceIn(0.02f, 0.25f))
         if ((Settings.liveWeather && Weather.live) || Weather.override > 0) { val w = Weather.windVec(); sky.vec2("uWind", w[0] * 0.4f, w[1] * 0.4f) } else sky.vec2("uWind", 1f, 0.375f)
@@ -930,7 +960,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         p.mat4("uVP", vp); p.mat4("uMirror", mir)
         p.vec3("uSunDir", sunDir); p.vec3("uSunCol", sunCol); p.vec3("uSkyAmb", skyAmb); p.vec3("uGroundAmb", groundAmb)
         p.vec3("uFogCol", fogCol); p.vec3("uSkyZenith", zenith); p.f("uFogDens", fogDens); p.f("uFogStart", fogStart); p.f("uFogEnd", fogEnd); p.f("uWet", wet); p.vec3("uCam", camX, camY, camZ); p.f("uTime", boat.time)
-        p.f("uClipZ", clipZ)
+        p.f("uClipZ", clipZ); p.f("uWinLit", winLit)
         glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, cityShadow.tex); p.i("uShadow", 2)
         glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D, boatShadow.tex); p.i("uShadowB", 9)
         glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, texArr[0]); p.i("uAlb", 3)

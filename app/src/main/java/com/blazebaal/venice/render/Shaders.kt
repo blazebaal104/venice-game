@@ -10,6 +10,7 @@ uniform vec3 uSunDir; uniform vec3 uSunCol; uniform vec3 uSkyAmb; uniform vec3 u
 uniform float uFogDens; uniform vec3 uCam; uniform float uTime;
 uniform float uFogStart; uniform float uFogEnd;     // render distance: fog is total at uFogEnd, where chunks unload
 uniform float uWet;                                  // 0 dry .. 1 soaked: rain darkens stone, plaster and wood
+uniform float uWinLit;                               // share of windows lit from inside (night, render/DayCycle)
 uniform highp sampler2DShadow uShadow; uniform mat4 uLightVP; uniform float uShadowOn;
 uniform highp sampler2DShadow uShadowB; uniform mat4 uLightVPB;      // boat-only shadow, re-rendered every frame
 uniform float uClipZ;
@@ -418,6 +419,18 @@ void main() {
                     + uSunCol * pow(max(dot(reflect(-uSunDir, n), vdir), 0.0), 400.0) * sunShadow(vW, n) * 4.0;
                 if (shape == 2 || shape == 3 || shape == 6) { vec2 rd = fract(vec2(lx, fz) / 0.11) - 0.5; glass *= 0.85 + 0.3 * smoothstep(0.35, 0.5, length(rd)); }
                 glass = mix(glass, lin(vec3(0.28, 0.24, 0.20)) * (uSkyAmb + uSunCol * 0.3), mull);
+                // after dark: rooms lit from inside - warm lamps, a few cooler ones, curtains glowing, shops brightest
+                if (uWinLit > 0.001) {
+                    float on = step(hash11(wid * 5.31 + 0.7), uWinLit * (shop ? 1.7 : 1.0));
+                    if (on > 0.5) {
+                        float tint = hash11(wid * 2.9);
+                        vec3 lamp = tint > 0.8 ? vec3(0.95, 0.88, 0.75) : (tint > 0.35 ? vec3(1.0, 0.68, 0.36) : vec3(1.0, 0.58, 0.28));
+                        float pool = 0.55 + 0.45 * smoothstep(-0.2, 0.9, q.y - (y1 - y0) * 0.35) * (1.0 - 0.5 * abs(lx) / max(hw, 0.1));
+                        vec3 emit = lamp * (shop ? 3.2 : 1.9) * pool * (0.7 + 0.6 * hash11(wid * 8.1));
+                        if (!shop && hash11(wid * 1.7) > 0.55) emit *= 0.75;           // through the curtains
+                        glass += emit * (1.0 - mull) * (grille ? 0.55 : 1.0);
+                    }
+                }
                 if (grille) { float gb = max(step(abs(fract(lx / 0.13) - 0.5), 0.07), step(abs(fract(fz / 0.45) - 0.5), 0.04)); glass = mix(glass, lin(vec3(0.03)) * uSkyAmb, gb); }
                 o = vec4(fog(glass, vW), 1.0);
                 return;
@@ -899,7 +912,9 @@ precision highp float;
 in vec2 vP;
 uniform mat4 uInvVP; uniform vec3 uSunDir; uniform vec3 uFogCol; uniform vec3 uSkyZenith; uniform vec3 uSunCol; uniform float uMirrorSky;
 uniform float uTime; uniform float uCloudCover; uniform float uHazeH; uniform vec2 uWind;
+uniform float uStars; uniform float uDusk; uniform vec3 uTrueSun;
 out vec4 o;
+float h31(vec3 p) { p = fract(p * vec3(.1031, .1030, .0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
 float h21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
     return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
@@ -919,6 +934,28 @@ void main() {
     vec3 col = mix(uFogCol * 1.15, uSkyZenith, pow(max(h, 0.0), 0.5));
     float s = max(dot(d, uSunDir), 0.0);
     col += uSunCol * (pow(s, 1800.0) * 60.0 + pow(s, 64.0) * 0.5 + pow(s, 6.0) * 0.18);
+    // around sunset and dawn: the glowing band on the horizon under the sun, and the pink belt opposite it
+    if (uDusk > 0.001) {
+        vec2 sd = normalize(uTrueSun.xy + 1e-4); vec2 hd = normalize(d.xy + 1e-4);
+        float toward = max(dot(hd, sd), 0.0);
+        float low = 1.0 - smoothstep(0.0, 0.32, h);
+        col += vec3(1.0, 0.42, 0.14) * uDusk * low * (0.25 + 0.9 * pow(toward, 3.0)) * 0.55;
+        col += vec3(0.55, 0.30, 0.42) * uDusk * (1.0 - smoothstep(0.02, 0.25, h)) * pow(max(-dot(hd, sd), 0.0), 2.0) * 0.18;
+    }
+    // night: stars (fewer near the hazy horizon), twinkling
+    if (uStars > 0.001 && d.z > 0.0) {
+        vec3 sp = d * 420.0; vec3 cell = floor(sp);
+        float hs = h31(cell);
+        if (hs > 0.9975) {
+            vec3 c = cell + 0.5 + (vec3(h31(cell + 1.3), h31(cell + 2.7), h31(cell + 5.1)) - 0.5) * 0.6;
+            float r = length(sp - c);
+            float mag = (hs - 0.9975) / 0.0025;
+            float tw = 0.75 + 0.25 * sin(uTime * (2.0 + 5.0 * h31(cell + 9.0)) + hs * 60.0);
+            col += vec3(0.85 + 0.15 * h31(cell + 4.0), 0.88, 1.0) * smoothstep(0.55, 0.0, r) * (0.3 + 1.6 * mag * mag) * tw * uStars * smoothstep(0.03, 0.3, d.z);
+        }
+        // the Milky Way, faint
+        col += vec3(0.010, 0.011, 0.016) * uStars * smoothstep(0.55, 0.85, fbm3(d.xy / (d.z + 0.35) * 2.2 + 3.0)) * smoothstep(0.05, 0.4, d.z);
+    }
     if (d.z > 0.015) {
         // cloud layer ~1.5 km up, drifting with the wind
         vec2 P = d.xy / d.z * 1.5;                      // km on the cloud deck

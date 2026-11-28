@@ -61,6 +61,8 @@ object Controls {
 }
 
 object GameState {
+    /** testing: show this local hour instead of the clock (NaN: real time) */
+    @Volatile var hourOverride = Float.NaN
     /** the previous session's crash, shown once on the menu (empty: none) */
     @Volatile var lastCrash = ""
     // boot: the loading screen shows these until everything is ready
@@ -145,6 +147,8 @@ object Settings {
     @Volatile var liveWeather = true
     @Volatile var liveVaporetti = true
     @Volatile var language = 0           // 0 italiano, 1 english
+    /** 0 the real time of day in Venice (sun, moon, night), 1 always afternoon */
+    @Volatile var dayNight = 0
 
     /** highest internal resolution (fraction of the screen) the dynamic scaler may use */
     fun maxScale() = if (resolution > 0) resolution / 100f else if (simple) 0.75f else when (quality) { PERFORMANCE -> 0.8f; else -> 1.0f }
@@ -190,6 +194,7 @@ object Settings {
         liveWeather = p.getBoolean("liveWeather", true); language = p.getInt("language", 0)
         liveVaporetti = p.getBoolean("liveVaporetti", true)
         simple = p.getBoolean("simple", false)
+        dayNight = p.getInt("dayNight", 0)
     }
     fun save(ctx: Context) {
         ctx.getSharedPreferences("venice", Context.MODE_PRIVATE).edit()
@@ -202,6 +207,6 @@ object Settings {
             .putBoolean("vibration", vibration).putInt("speedUnit", speedUnit).putFloat("hudScale", hudScale).putBoolean("northUp", minimapNorthUp)
             .putFloat("volMaster", volMaster).putFloat("volEngine", volEngine).putFloat("volAmbience", volAmbience)
             .putBoolean("liveWeather", liveWeather).putBoolean("liveVaporetti", liveVaporetti).putInt("language", language)
-            .putBoolean("simple", simple).apply()
+            .putBoolean("simple", simple).putInt("dayNight", dayNight).apply()
     }
 }

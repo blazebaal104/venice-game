@@ -510,7 +510,9 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     }
 
     private fun world(x: Float, y0: Float, w: Float): Float {
-        var y = section(x, y0, "METEO REALE")
+        var y = section(x, y0, "GIORNO E NOTTE")
+        Settings.dayNight = gui.segmented(row(x, y, w, "Ora del giorno", "Il sole, la luna e il buio di Venezia adesso, o sempre pomeriggio"), listOf("Ora reale", "Sempre giorno"), Settings.dayNight); y += ROW
+        y = section(x, y, "METEO REALE")
         Settings.liveWeather = gui.toggle(row(x, y, w, "Meteo reale di Venezia", "Nuvole, pioggia, nebbia, vento e onde come fuori dalla finestra"), Settings.liveWeather); y += ROW
         Weather.override = gui.stepper(row(x, y, w, "Anteprima meteo", "Prova un tempo diverso da quello reale (solo per vederlo)"), listOf("Reale", "Sereno", "Nuvoloso", "Pioggia", "Temporale", "Nebbia"), Weather.override); y += ROW
         val st = if (!Weather.live) "In attesa di connessione · uso il clima medio del mese (${Weather.temperature.roundToInt()}°)"

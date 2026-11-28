@@ -167,7 +167,10 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   // lighting constants (GameRenderer)
   const az = Number(P.get('az') || 228) * Math.PI / 180, el = Number(P.get('el') || 32) * Math.PI / 180;
   const sunDir = new Float32Array([Math.sin(az)*Math.cos(el), Math.cos(az)*Math.cos(el), Math.sin(el)]);
-  const sunCol = [3.3,2.95,2.45], skyAmb = [0.34,0.42,0.56], groundAmb = [0.20,0.18,0.15], fogCol = [0.62,0.68,0.76], zenith = [0.16,0.30,0.62];
+  let sunCol = [3.3,2.95,2.45], skyAmb = [0.34,0.42,0.56], groundAmb = [0.20,0.18,0.15], fogCol = [0.62,0.68,0.76], zenith = [0.16,0.30,0.62];
+  let LT = null;   // render/DayCycle values for ?hour= (light.json written by the dev tool)
+  if (P.get('hour')) { try { const all = await (await fetch('light.json')).json(); LT = all[String(Number(P.get('hour')).toFixed(1))]; } catch (e) {} }
+  if (LT) { sunDir.set(LT.sunDir); sunCol = LT.sunCol; skyAmb = LT.skyAmb; groundAmb = LT.groundAmb; fogCol = LT.fog; zenith = LT.zenith; }
   const B = sc.boat; const time = B.t, amp = B.amp;
   let cam, tgt;
   const spk = Math.min(1, B.kmh / 130), spS = spk*spk*(3-2*spk);
@@ -201,7 +204,7 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   gl.uniformMatrix4fv(S.depth.u('uLightVP'), false, lightVPB); gl.uniformMatrix4fv(S.depth.u('uModel'), false, bm); draw(boat); gl.disable(gl.POLYGON_OFFSET_FILL);
   function common(p, mir, clipZ) { gl.useProgram(p); gl.uniformMatrix4fv(p.u('uVP'), false, vp); gl.uniformMatrix4fv(p.u('uMirror'), false, mir);
     gl.uniform3fv(p.u('uSunDir'), sunDir); gl.uniform3fv(p.u('uSunCol'), sunCol); gl.uniform3fv(p.u('uSkyAmb'), skyAmb); gl.uniform3fv(p.u('uGroundAmb'), groundAmb);
-    gl.uniform3fv(p.u('uFogCol'), fogCol); gl.uniform3fv(p.u('uSkyZenith'), zenith); gl.uniform1f(p.u('uFogDens'), 1/640); gl.uniform3fv(p.u('uCam'), cam); gl.uniform1f(p.u('uTime'), time);
+    gl.uniform3fv(p.u('uFogCol'), fogCol); gl.uniform3fv(p.u('uSkyZenith'), zenith); gl.uniform1f(p.u('uFogDens'), 1/640); gl.uniform1f(p.u('uWinLit'), LT ? LT.win : 0); gl.uniform3fv(p.u('uCam'), cam); gl.uniform1f(p.u('uTime'), time);
     gl.uniform1f(p.u('uClipZ'), clipZ);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, stex); gl.uniform1i(p.u('uShadow'), 2);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D_ARRAY, arr[0]); gl.uniform1i(p.u('uAlb'), 3);
@@ -209,7 +212,7 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
     gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, btex); gl.uniform1i(p.u('uShadowB'), 9); gl.uniformMatrix4fv(p.u('uLightVPB'), false, lightVPB);
     gl.uniformMatrix4fv(p.u('uLightVP'), false, lightVP); gl.uniform1f(p.u('uShadowOn'), shOn ? 1 : 0); }
   let shOn = true;
-  function sky(mir) { gl.depthMask(false); gl.useProgram(S.sky); gl.uniformMatrix4fv(S.sky.u('uInvVP'), false, M.inv(vp)); gl.uniform3fv(S.sky.u('uSunDir'), sunDir); gl.uniform3fv(S.sky.u('uFogCol'), fogCol); gl.uniform3fv(S.sky.u('uSkyZenith'), zenith); gl.uniform3fv(S.sky.u('uSunCol'), sunCol); gl.uniform1f(S.sky.u('uMirrorSky'), mir ? 1 : 0); gl.uniform1f(S.sky.u('uTime'), time); gl.uniform1f(S.sky.u('uCloudCover'), Number(P.get('clouds') || 0.55)); draw(tri); gl.depthMask(true); }
+  function sky(mir) { gl.depthMask(false); gl.useProgram(S.sky); gl.uniformMatrix4fv(S.sky.u('uInvVP'), false, M.inv(vp)); gl.uniform3fv(S.sky.u('uSunDir'), sunDir); gl.uniform3fv(S.sky.u('uFogCol'), fogCol); gl.uniform3fv(S.sky.u('uSkyZenith'), zenith); gl.uniform3fv(S.sky.u('uSunCol'), sunCol); gl.uniform1f(S.sky.u('uMirrorSky'), mir ? 1 : 0); gl.uniform1f(S.sky.u('uTime'), time); gl.uniform1f(S.sky.u('uCloudCover'), Number(P.get('clouds') || 0.55)); gl.uniform1f(S.sky.u('uStars'), LT ? LT.stars : 0); gl.uniform1f(S.sky.u('uDusk'), LT ? LT.dusk : 0); gl.uniform3fv(S.sky.u('uTrueSun'), LT ? LT.trueSun : [0,0,1]); draw(tri); gl.depthMask(true); }
   const near = (t, maxD) => Math.hypot(t.ox+128-cam[0], t.oy+128-cam[1]) < maxD + 200;
   function opaque(mir, clipZ, maxD) {
     if (mir === ident) { common(S.ground, mir, clipZ); gl.uniform1i(S.ground.u('uMask'), 0); gl.uniform1i(S.ground.u('uClass'), 1);
@@ -240,7 +243,7 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   gl.useProgram(S.blur); gl.uniform1i(S.blur.u('uTex'), 0);
   for (let k = 0; k < 1; k++) { bindT(bB); gl.bindTexture(gl.TEXTURE_2D, bA.tex); gl.uniform2f(S.blur.u('uDir'), 1.5/bA.w, 0); draw(tri); bindT(bA); gl.bindTexture(gl.TEXTURE_2D, bB.tex); gl.uniform2f(S.blur.u('uDir'), 0, 1.5/bA.h); draw(tri); }
   bindT(null); gl.useProgram(S.composite); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, scene.tex); gl.uniform1i(S.composite.u('uScene'), 0);
-  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bA.tex); gl.uniform1i(S.composite.u('uBloom'), 1); gl.uniform2f(S.composite.u('uTexel'), 1/W, 1/H); gl.uniform1f(S.composite.u('uExposure'), Number(P.get('exp') || 0.85)); draw(tri);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bA.tex); gl.uniform1i(S.composite.u('uBloom'), 1); gl.uniform2f(S.composite.u('uTexel'), 1/W, 1/H); gl.uniform1f(S.composite.u('uExposure'), Number(P.get('exp') || 0.85) * (LT ? LT.exposure : 1)); draw(tri);
   gl.finish();
   document.title = 'DONE ' + gl.getError();
 } catch (e) { document.title = 'ERR ' + e; } })();
