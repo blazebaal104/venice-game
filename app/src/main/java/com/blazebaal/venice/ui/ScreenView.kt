@@ -107,8 +107,8 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
     }
 
     // ---------------------------------------------------------------- drawing
-    private val loadingScreen by lazy { LoadingScreen(dp) }
-    private var loadLastNs = 0L; private var loadFade = 0f; private var loadShown = 0f
+    private val loadingScreen by lazy { LoadingScreen(dp, context) }
+    private var loadLastNs = 0L; private var loadFade = 0f; private var loadShown = 0f; private var loadPhase = 0
 
     override fun onDraw(canvas: Canvas) {
         if (!GameState.booted) {
@@ -117,23 +117,41 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             loadShown += dt
             c = canvas; ink.c = canvas
             val glReady = GameState.bootProgress >= 1f
-            if (!glReady && loadFade > 0f) { loadFade = 0f; loadShown = 0f }      // GL context rebuilt after a resume: show it again
+            if (!glReady && loadPhase > 0) { loadPhase = 0; loadFade = 0f; loadShown = 0f }      // GL context rebuilt after a resume: show it again
             val tiles = if (glReady) (GameState.tilesLoaded.toFloat() / max(1, min(4, GameState.tilesWanted))).coerceIn(0f, 1f) else 0f
             val p = 0.85f * GameState.bootProgress + 0.15f * tiles
-            if (glReady && !GameState.loading && loadShown > 2.2f) loadFade += dt
+            // the transition, in three clean steps - nothing of the menu shows until the loading screen is gone:
+            //  1. the loading picture fades to black (0.7 s)
+            //  2. black, until the 3D title screen behind has drawn a good number of frames (and at least 0.35 s)
+            //  3. the menu comes up out of the black (0.8 s)
             val stage = if (glReady) (if (GameState.loading) "Costruisco i quartieri intorno a te" else "Venezia è pronta") else GameState.bootStage
-            // transition: the sunset fades to black (0.6 s), a beat of black while the menu settles behind,
-            // then the menu comes up out of the black (0.7 s) - nothing pops in on screen
             ink.fill.style = Paint.Style.FILL
-            if (loadFade < 0.6f) {
-                if (loadFade > 0f) { ink.fill.color = Color.BLACK; c.drawRect(0f, 0f, W, H, ink.fill) }
-                loadingScreen.draw(canvas, W, H, dt, p, stage, 1f - loadFade / 0.6f, GameState.bootError)
-            } else {
-                drawMenu(); gui.endFrame()
-                ink.fill.color = Color.argb(((1f - ((loadFade - 0.9f) / 0.7f)).coerceIn(0f, 1f) * 255).toInt(), 0, 0, 0)
-                c.drawRect(0f, 0f, W, H, ink.fill)
+            fun ease(x: Float): Float { val t = x.coerceIn(0f, 1f); return t * t * (3f - 2f * t) }
+            when {
+                loadPhase == 0 -> {
+                    if (glReady && !GameState.loading && loadShown > 2.2f) { loadPhase = 1; loadFade = 0f }
+                    loadingScreen.draw(canvas, W, H, dt, p, stage, 1f, GameState.bootError)
+                }
+                loadPhase == 1 -> {
+                    loadFade += dt
+                    ink.fill.color = Color.BLACK; c.drawRect(0f, 0f, W, H, ink.fill)
+                    loadingScreen.draw(canvas, W, H, dt, p, stage, 1f - ease(loadFade / 0.7f), GameState.bootError)
+                    if (loadFade >= 0.7f) { loadPhase = 2; loadFade = 0f; GameState.menuFrames = 0 }
+                }
+                loadPhase == 2 -> {
+                    loadFade += dt
+                    ink.fill.color = Color.BLACK; c.drawRect(0f, 0f, W, H, ink.fill)
+                    if (loadFade >= 0.35f && GameState.menuFrames >= 12) { loadPhase = 3; loadFade = 0f }
+                    if (loadFade > 4f) { loadPhase = 3; loadFade = 0f }            // never stuck on black
+                }
+                else -> {
+                    loadFade += dt
+                    drawMenu(); gui.endFrame()
+                    ink.fill.color = Color.argb(((1f - ease(loadFade / 0.8f)) * 255).toInt(), 0, 0, 0)
+                    c.drawRect(0f, 0f, W, H, ink.fill)
+                    if (loadFade >= 0.8f) GameState.booted = true
+                }
             }
-            if (loadFade >= 1.6f) GameState.booted = true
             postInvalidateOnAnimation()
             return
         }

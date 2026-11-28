@@ -5,7 +5,9 @@
 // Mirrors GameRenderer.onDrawFrame (same shaders, constants and passes) for a frame exported by WebExport.kt.
 // Query: ?cam=x,y,z&tgt=x,y,z (optional; default = the game's chase camera)
 const P = new URLSearchParams(location.search);
-const W = 1280, H = 720;
+const W = Number(P.get('w') || 1280), H = Number(P.get('h') || 720);
+document.getElementById('c').width = W; document.getElementById('c').height = H;
+const FAR = Number(P.get('far') || 720);
 const gl = document.getElementById('c').getContext('webgl2', {antialias: false, preserveDrawingBuffer: true});
 gl.getExtension('EXT_color_buffer_float'); gl.getExtension('OES_texture_float_linear');
 async function txt(u) { return (await fetch(u)).text(); }
@@ -213,7 +215,7 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   gl.uniformMatrix4fv(S.depth.u('uLightVP'), false, lightVPB); gl.uniformMatrix4fv(S.depth.u('uModel'), false, bm); draw(boat); gl.disable(gl.POLYGON_OFFSET_FILL);
   function common(p, mir, clipZ) { gl.useProgram(p); gl.uniformMatrix4fv(p.u('uVP'), false, vp); gl.uniformMatrix4fv(p.u('uMirror'), false, mir);
     gl.uniform3fv(p.u('uSunDir'), sunDir); gl.uniform3fv(p.u('uSunCol'), sunCol); gl.uniform3fv(p.u('uSkyAmb'), skyAmb); gl.uniform3fv(p.u('uGroundAmb'), groundAmb);
-    gl.uniform3fv(p.u('uFogCol'), fogCol); gl.uniform3fv(p.u('uSkyZenith'), zenith); gl.uniform1f(p.u('uFogDens'), 1/640); gl.uniform1f(p.u('uWinLit'), LT ? LT.win : 0); gl.uniform3fv(p.u('uCam'), cam); gl.uniform1f(p.u('uTime'), time);
+    gl.uniform3fv(p.u('uFogCol'), fogCol); gl.uniform3fv(p.u('uSkyZenith'), zenith); gl.uniform1f(p.u('uFogDens'), 1/(FAR*0.9)); gl.uniform1f(p.u('uWinLit'), LT ? LT.win : 0); gl.uniform3fv(p.u('uCam'), cam); gl.uniform1f(p.u('uTime'), time);
     gl.uniform1f(p.u('uClipZ'), clipZ);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, stex); gl.uniform1i(p.u('uShadow'), 2);
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D_ARRAY, arr[0]); gl.uniform1i(p.u('uAlb'), 3);
@@ -238,7 +240,7 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   const refl = target(Math.floor(W*0.42), Math.floor(H*0.42), true), scene = target(W, H, true), bA = target(W/4, H/4, false), bB = target(W/4, H/4, false);
   gl.enable(gl.DEPTH_TEST); gl.clearColor(0,0,0,1);
   bindT(refl); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); shOn = false; sky(true); opaque(mirror, -0.05, 260); shOn = true;
-  bindT(scene); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); sky(false); opaque(ident, -1000, 720);
+  bindT(scene); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); sky(false); opaque(ident, -1000, FAR);
   common(S.water, ident, -1000); gl.uniform3fv(S.water.u('uCenter'), [Math.floor(cam[0]/50)*50, Math.floor(cam[1]/50)*50, 0]); gl.uniform1f(S.water.u('uWaveAmp'), amp);
   gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, refl.tex); gl.uniform1i(S.water.u('uRefl'), 5); gl.uniform2f(S.water.u('uScreen'), W, H);
   gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, wkTex); gl.uniform1i(S.water.u('uWake'), 7); gl.uniform3f(S.water.u('uWakeO'), WK.ox, WK.oy, WK.size); gl.uniform2f(S.water.u('uWakeDir'), WK.dx, WK.dy);

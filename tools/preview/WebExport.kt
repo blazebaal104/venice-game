@@ -45,7 +45,7 @@ fun main(args: Array<String>) {
     for (key in map.tileKeys()) {
         val tx = key % map.tilesX; val ty = key / map.tilesX
         val (ox, oy) = map.tileOrigin(tx, ty)
-        if (hypot(ox + 128 - cx, oy + 128 - cy) > 950) continue
+        if (hypot(ox + 128 - cx, oy + 128 - cy) > (System.getenv("RADIUS")?.toFloat() ?: 950f)) continue
         val tile = map.load(tx, ty) ?: continue
         val m = mesher.build(tile)
         val id = "${tx}_$ty"
@@ -107,12 +107,13 @@ fun main(args: Array<String>) {
             for ((i, v) in cat.variants.withIndex()) places.add(floatArrayOf(gx + (i % 12) * 13f, gy + (i / 12) * 5.5f, 0f, v.id.toFloat()))
         } else {
             val (tx, ty) = world.tileCoords(cx, cy)
-            for (j in ty - 1..ty + 1) for (i in tx - 1..tx + 1) world.tile(i, j)?.let { places.addAll(Moorings.place(it, cat)) }
+            val mr = ((System.getenv("MOOR_R")?.toFloat() ?: 300f) / 256f).toInt() + 1
+            for (j in ty - mr..ty + mr) for (i in tx - mr..tx + mr) world.tile(i, j)?.let { places.addAll(Moorings.place(it, cat)) }
         }
         val all = ArrayList<Float>()
         val sentinels = arrayOf(floatArrayOf(1f, 0f, 1f), floatArrayOf(0f, 1f, 1f), floatArrayOf(1f, 1f, 0f), floatArrayOf(0f, 0f, 1f), floatArrayOf(1f, 0f, 0f), floatArrayOf(0f, 1f, 0f))
         for (b in places) {
-            if (show == null && hypot(b[0] - cx, b[1] - cy) > 300f) continue
+            if (show == null && hypot(b[0] - cx, b[1] - cy) > (System.getenv("MOOR_R")?.toFloat() ?: 300f)) continue
             val v = cat.variants[b[3].toInt()]
             val d = (part("hull_" + v.base) ?: continue) + BoatCatalog.mergeParts(v, { part(it) })
             val c = cos(b[2]); val sn = sin(b[2])

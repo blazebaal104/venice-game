@@ -70,6 +70,8 @@ object GameState {
     @Volatile var bootStage = ""
     @Volatile var bootError = ""
     @Volatile var booted = false
+    /** frames of the 3D title screen drawn so far (the loading screen only lifts once the menu behind it is settled) */
+    @Volatile var menuFrames = 0
     /** a page is open over the game and the renderer has frozen on a blurred frame (no GPU work until it closes) */
     @Volatile var frozen = false
     @Volatile var x = 0f

@@ -648,6 +648,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         resetState()
         val ms = menuScene ?: MenuScene(ctx).also { menuScene = it }
         menuT += dt
+        GameState.menuFrames++
         updateAtmosphere(dt)
         val sc = scene!!
         val e = ms.camera(menuT)

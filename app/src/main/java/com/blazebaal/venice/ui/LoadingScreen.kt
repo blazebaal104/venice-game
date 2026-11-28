@@ -1,4 +1,8 @@
-// The loading screen: Venice at sunset, drawn live on the Canvas while the game loads underneath.
+// The loading screen: an aerial view of Venice rendered with the game's own engine (assets/loading: San Marco at
+// sunset, the Grand Canal from the Accademia in the morning, the Bacino at the blue hour, Rialto by night - the one
+// matching the time of day outside, sometimes another), drifting slowly (a slow push-in and pan), with a few gulls
+// crossing by day. If the picture can't be loaded, the procedural sunset below is drawn instead:
+// Venice at sunset, drawn live on the Canvas while the game loads underneath.
 // Sky gradient with a low sun and drifting clouds, the San Marco basin skyline (Campanile, the Basilica's domes,
 // Palazzo Ducale, the Salute, San Giorgio) in two depth layers, the lagoon below mirroring it all with a wavy
 // reflection and a shimmering sun path, a few gulls, and now and then a gondola or a vaporetto crossing with its wake.
@@ -8,14 +12,28 @@ package com.blazebaal.venice.ui
 import android.graphics.*
 import kotlin.math.*
 
-class LoadingScreen(private val dp: Float) {
+class LoadingScreen(private val dp: Float, private val ctx: android.content.Context? = null) {
+    private val scene: Pair<Bitmap, Boolean>? by lazy {
+        try {
+            com.blazebaal.venice.render.DayCycle.update()
+            val e = com.blazebaal.venice.render.DayCycle.sunElev
+            val matching = when { e < -6f -> "rialto_night"; e < 2f -> "bacino"; e < 16f -> "sanmarco"; else -> "accademia" }
+            val all = listOf("sanmarco", "accademia", "bacino", "rialto_night")
+            val pick = if (rnd.nextFloat() < 0.7f) matching else all[rnd.nextInt(all.size)]
+            val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+            val bmp = ctx!!.assets.open("loading/$pick.jpg").use { BitmapFactory.decodeStream(it, null, opts) }!!
+            Pair(bmp, pick != "rialto_night")
+        } catch (e: Throwable) { null }
+    }
+    private val imgPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    private var vignette: Shader? = null
     private var w = 0f; private var h = 0f
     private val far = Path(); private val near = Path()
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG)
     private var skyShader: Shader? = null; private var waterShader: Shader? = null; private var sunGlow: Shader? = null
     private var horizon = 0f
-    private val rnd = java.util.Random(11)
+    private val rnd = java.util.Random()
     private val glints = FloatArray(90 * 3)
     // the boat currently crossing: type 0 gondola, 1 vaporetto; x from the left edge, direction
     private var boatT = -1f; private var boatType = 1; private var boatDir = 1; private var boatSpeed = 0f; private var nextBoat = 0.25f; private var firstBoat = true
@@ -101,6 +119,8 @@ class LoadingScreen(private val dp: Float) {
         shown += dt
         val t = shown
         val save = c.saveLayerAlpha(0f, 0f, w, h, (alpha * 255).toInt())
+        val sc = scene
+        if (sc != null) { drawScene(c, sc.first, sc.second, t); overlay(c, t, progress, stage, error); c.restoreToCount(save); return }
         // ---- sky, sun, glow, clouds
         paint.shader = skyShader; c.drawRect(0f, 0f, w, horizon, paint); paint.shader = null
         val sunX = w * 0.70f; val sunY = horizon - h * 0.08f + sin(t * 0.15f) * h * 0.004f; val sunR = h * 0.085f
@@ -165,6 +185,39 @@ class LoadingScreen(private val dp: Float) {
             drawBoat(c, bx, by, boatType, boatDir, boatT)
             if (f > 1f) { boatT = -1f; nextBoat = 6f + rnd.nextFloat() * 8f }
         }
+        overlay(c, t, progress, stage, error)
+        c.restoreToCount(save)
+    }
+
+    /** the picture, covering the screen, with a slow push-in and drift; gulls crossing by day; a soft vignette */
+    private fun drawScene(c: Canvas, bmp: Bitmap, day: Boolean, t: Float) {
+        val k = max(w / bmp.width, h / bmp.height)
+        val zoom = 1.04f + 0.06f * (1f - exp(-t / 14f))
+        val dx = sin(t * 0.035f) * w * 0.012f; val dy = -t * h * 0.0006f
+        c.save()
+        c.translate(w / 2 + dx, h / 2 + dy); c.scale(k * zoom, k * zoom); c.translate(-bmp.width / 2f, -bmp.height / 2f)
+        c.drawBitmap(bmp, 0f, 0f, imgPaint)
+        c.restore()
+        if (day) {
+            paint.style = Paint.Style.STROKE; paint.strokeCap = Paint.Cap.ROUND
+            for (k2 in 0 until 5) {
+                val sp = 0.012f + k2 * 0.004f
+                val gx = ((k2 * 0.29f + t * sp) % 1.25f - 0.12f) * w; val gy = h * (0.12f + 0.07f * k2) + sin(t * 0.6f + k2) * h * 0.012f
+                val flap = sin(t * (4.5f + k2 * 0.4f) + k2 * 1.7f) * 0.7f; val s = (6f + k2 * 1.6f) * dp
+                paint.strokeWidth = (1.4f + k2 * 0.25f) * dp; paint.color = Color.argb(200, 245, 245, 240)
+                val g = Path(); g.moveTo(gx - s, gy - s * 0.3f * (1 + flap)); g.quadTo(gx - s * 0.4f, gy - s * 0.55f, gx, gy); g.quadTo(gx + s * 0.4f, gy - s * 0.55f, gx + s, gy - s * 0.3f * (1 + flap))
+                c.drawPath(g, paint)
+            }
+            paint.style = Paint.Style.FILL
+        }
+        if (vignette == null) vignette = RadialGradient(w / 2, h * 0.45f, max(w, h) * 0.75f, intArrayOf(Color.argb(0, 0, 0, 0), Color.argb(0, 0, 0, 0), Color.argb(150, 0, 0, 0)), floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP)
+        paint.shader = vignette; c.drawRect(0f, 0f, w, h, paint); paint.shader = null
+        // a dark band under the title and the progress bar so they read on any picture
+        paint.shader = LinearGradient(0f, h * 0.72f, 0f, h, Color.argb(0, 0, 0, 0), Color.argb(170, 0, 0, 0), Shader.TileMode.CLAMP); c.drawRect(0f, h * 0.72f, w, h, paint)
+        paint.shader = LinearGradient(0f, 0f, 0f, h * 0.25f, Color.argb(140, 0, 0, 0), Color.argb(0, 0, 0, 0), Shader.TileMode.CLAMP); c.drawRect(0f, 0f, w, h * 0.25f, paint); paint.shader = null
+    }
+
+    private fun overlay(c: Canvas, t: Float, progress: Float, stage: String, error: String) {
         // ---- title and progress
         val m = 26 * dp
         text.typeface = Theme.black; text.textSize = 46 * dp; text.color = Color.argb(235, 255, 244, 230); text.textScaleX = 1.0f
@@ -189,7 +242,6 @@ class LoadingScreen(private val dp: Float) {
             text.textSize = 10 * dp; text.color = Theme.RED; text.textAlign = Paint.Align.CENTER
             c.drawText(error.take(140), w / 2, by0 + 18 * dp, text); text.textAlign = Paint.Align.LEFT
         }
-        c.restoreToCount(save)
     }
 
     private fun drawBoat(c: Canvas, x: Float, y: Float, type: Int, dir: Int, t: Float) {
