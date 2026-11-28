@@ -1153,6 +1153,16 @@ out vec3 vW; out float vPart; out float vSpan;
 void main() {
     vec3 p = aPos.xyz * 1.1; float part = aPos.w;
     float phase = aI1.x, amp = aI1.y, fold = aI1.z, bank = aI1.w;
+    // perched (wings folded), the 4th value is the long call instead of the bank: head thrown up, bill open,
+    // wings held a little away from the body
+    float call = fold > 0.95 ? bank : 0.0;
+    if (fold > 0.95) bank = 0.0;
+    if (call > 0.0 && (part < 0.5 || part > 2.5) && p.x > 0.13) {
+        float a = call * 1.05 + (part > 2.5 && p.z < 0.052 ? call * 0.45 : 0.0);
+        vec2 q = p.xz - vec2(0.11, 0.06);
+        p.xz = vec2(0.11, 0.06) + vec2(q.x * cos(a) - q.y * sin(a), q.x * sin(a) + q.y * cos(a));
+    }
+    if (call > 0.0 && part > 0.5 && part < 2.5) fold -= call * 0.22;
     float span = abs(p.y); float sg = p.y < 0.0 ? -1.0 : 1.0;
     if (part > 0.5 && part < 2.5) {
         float sh = 0.06, el = 0.40;

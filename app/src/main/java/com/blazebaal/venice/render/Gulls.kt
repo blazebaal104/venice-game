@@ -17,6 +17,11 @@ class Gulls(private val world: WorldMap) {
         var phase = 0f; var amp = 0f; var fold = 1f; var bank = 0f; var flapT = 0f; var flapOn = 0f
         var cx = 0f; var cy = 0f; var cz = 25f; var rad = 40f; var dir = 1f; var life = 40f
         var tx = 0f; var ty = 0f; var tz = 0f; var spot = 0L; var callT = 5f; var speed = 9f
+        // the long call when perched: notes left, time to the next one, the head-throw pose
+        var notes = 0; var noteT = 0f; var pose = 0f
+        // canal flyers re-pick their heading along the water now and then
+        var steerT = 0f; var want = 0f
+        var follow = -1
     }
     private val birds = ArrayList<G>()
     /** gull calls to play: x, y, strength */
@@ -95,7 +100,7 @@ class Gulls(private val world: WorldMap) {
             for (b in t.buildings) {
                 if (b.ringSizes.isEmpty() || b.height < 6f) continue
                 val bx = b.xy[0] + t.ox; val by = b.xy[1] + t.oy
-                if (abs(bx - x) > 110f || abs(by - y) > 110f || hash(bx, by) > 0.05f) continue
+                if (abs(bx - x) > 110f || abs(by - y) > 110f || hash(bx, by) > 0.11f) continue
                 out.add(floatArrayOf(bx, by, Z.GROUND + b.height + 0.02f))
             }
         }
@@ -105,6 +110,10 @@ class Gulls(private val world: WorldMap) {
     fun update(dt: Float, camX: Float, camY: Float, boatX: Float, boatY: Float, boatSpeed: Float, cityness: Float, windX: Float, windY: Float, boats: List<FloatArray>) {
         if (dt <= 0f) return
         clock += dt
+        // gulls are out from first light through the day; at night they roost quietly (DayCycle: sun height)
+        val e = if (com.blazebaal.venice.ui.Settings.dayNight == 1) 30f else DayCycle.sunElev
+        val active = ((e + 7f) / 11f).coerceIn(0f, 1f)
+        val dawn = if (e > -5f && e < 12f) 1f else 0f                       // the dawn racket: more calling
         // ---- populate: perched birds on the spots around, a few in the air (more over the city)
         scanT -= dt
         if (scanT <= 0f) {
@@ -113,32 +122,53 @@ class Gulls(private val world: WorldMap) {
             spots(camX, camY, sp)
             var perched = birds.count { it.state == PERCH }
             for (s in sp) {
-                if (perched >= 16 || birds.size >= maxN - 4) break
+                if (perched >= 20 || birds.size >= maxN - 4) break
                 val k = key(s[0], s[1])
                 if (!free(k) || hypot(s[0] - boatX, s[1] - boatY) < 25f) continue
                 birds.add(G(s[0], s[1], s[2], hash(s[1], s[0]) * 6.283f).also { it.spot = k; it.callT = rr(20f, 90f) })
                 perched++
             }
             val flying = birds.count { it.state != PERCH }
-            val want = (2 + 6 * cityness).toInt()
+            val want = ((3 + 7 * cityness) * active).toInt()
             if (flying < want && birds.size < maxN) {
                 val a = rr(0f, 6.283f); val d = rr(50f, 120f)
-                birds.add(G(camX + cos(a) * d, camY + sin(a) * d, rr(16f, 36f), rr(0f, 6.283f)).also { startFly(it, rr(25f, 60f)) })
+                val g = G(camX + cos(a) * d, camY + sin(a) * d, rr(16f, 36f), rr(0f, 6.283f))
+                // what this one is doing: circling on the air, flying down a canal low over the water, wandering
+                // across the roofs, or tailing a boat for scraps
+                val r = rnd.nextFloat()
+                when {
+                    r < 0.32f -> startFly(g, rr(25f, 60f))
+                    r < 0.62f -> { val w = nearestWater(g.x, g.y); g.x = w[0]; g.y = w[1]; g.z = rr(5f, 10f); startCanal(g) }
+                    r < 0.88f -> startWander(g)
+                    else -> { g.z = rr(7f, 12f); startFollow(g, boats) }
+                }
+                birds.add(g)
             }
         }
+        lastBoats = boats
         // ---- behave
         for (g in birds) {
             g.t += dt
             when (g.state) {
                 PERCH -> {
-                    g.fold = 1f; g.amp = 0f; g.bank = 0f
+                    g.fold = 1f; g.amp = 0f
                     val near = hypot(g.x - boatX, g.y - boatY)
                     var scare = near < 13f || (near < 26f && boatSpeed > 8f)
                     for (b in boats) if (hypot(b[0] - g.x, b[1] - g.y) < 14f) scare = true
-                    if (scare || rnd.nextFloat() < dt / 240f) takeOff(g, boatX, boatY)
-                    g.callT -= dt
-                    if (g.callT <= 0f) { g.callT = rr(25f, 90f); calls.add(floatArrayOf(g.x, g.y, 0.6f)) }
-                    if (rnd.nextFloat() < dt / 6f) g.h += rr(-0.6f, 0.6f)          // looks round
+                    if (scare || rnd.nextFloat() < dt / 240f * active) takeOff(g, boatX, boatY)
+                    // the long call: throws its head back and laughs ("ha-ha-ha-haaa"), more of it at dawn, none at night
+                    g.callT -= dt * active * (1f + 2f * dawn)
+                    if (g.callT <= 0f && g.notes == 0) {
+                        g.callT = rr(20f, 75f)
+                        if (rnd.nextFloat() < 0.55f) { g.notes = 4 + rnd.nextInt(5); g.noteT = 0.45f } else calls.add(floatArrayOf(g.x, g.y, 0.6f))
+                    }
+                    if (g.notes > 0) {
+                        g.pose = min(1f, g.pose + dt * 4f)
+                        g.noteT -= dt
+                        if (g.noteT <= 0f) { calls.add(floatArrayOf(g.x, g.y, if (g.notes == 1) 0.9f else 0.65f)); g.notes--; g.noteT = rr(0.22f, 0.34f) }
+                        g.bank = g.pose * (0.85f + 0.15f * sin(g.t * 22f))
+                    } else { g.pose = max(0f, g.pose - dt * 2.5f); g.bank = g.pose }
+                    if (rnd.nextFloat() < dt / 6f && g.notes == 0) g.h += rr(-0.6f, 0.6f)          // looks round
                 }
                 TAKEOFF -> {
                     g.fold = max(0f, g.fold - dt * 5f); g.amp = 1.0f
@@ -152,6 +182,8 @@ class Gulls(private val world: WorldMap) {
             }
         }
         birds.removeAll { it.state == LEAVING && hypot(it.x - camX, it.y - camY) > 170f }
+        // nightfall: the ones in the air go to roost
+        if (active < 0.05f) for (g in birds) if (g.state == FLY || g.state == CANAL || g.state == WANDER || g.state == FOLLOW) { g.state = LEAVING; g.t = 0f }
         // ---- to the GPU
         var n = 0
         for (g in birds) {
@@ -168,6 +200,44 @@ class Gulls(private val world: WorldMap) {
             glBufferData(GL_ARRAY_BUFFER, maxN * 32, null, GL_DYNAMIC_DRAW)
             glBufferSubData(GL_ARRAY_BUFFER, 0, n * 32, buf)
         }
+    }
+
+    private var lastBoats: List<FloatArray> = emptyList()
+    private fun startCanal(g: G) {
+        g.state = CANAL; g.t = 0f; g.life = rr(25f, 60f); g.cz = rr(5f, 11f); g.speed = rr(9f, 11.5f); g.flapT = rr(1f, 3f)
+        g.want = waterHeading(g.x, g.y, g.h); g.h = g.want; g.steerT = 0.7f
+    }
+    private fun startWander(g: G) {
+        g.state = WANDER; g.t = 0f; g.life = rr(40f, 90f); g.speed = rr(8f, 10f); g.flapT = rr(1f, 4f); pickWander(g)
+    }
+    private fun pickWander(g: G) {
+        val a = g.h + rr(-1.4f, 1.4f); val d = rr(40f, 110f)
+        g.tx = g.x + cos(a) * d; g.ty = g.y + sin(a) * d; g.tz = rr(18f, 42f)
+    }
+    private fun startFollow(g: G, boats: List<FloatArray>) {
+        var bi = -1; var bd = 200f
+        for ((i, b) in boats.withIndex()) { if (b[2] < 2f) continue; val d = hypot(b[0] - g.x, b[1] - g.y); if (d < bd) { bd = d; bi = i } }
+        if (bi < 0) { startWander(g); return }
+        g.state = FOLLOW; g.t = 0f; g.life = rr(30f, 80f); g.follow = boats[bi][7].toInt(); g.speed = 10f; g.rad = rr(0f, 6f); g.flapT = rr(1f, 3f)
+    }
+    private fun nearestWater(x: Float, y: Float): FloatArray {
+        if (world.solid(x, y) < 0.5f) return floatArrayOf(x, y)
+        for (r in 10..150 step 10) for (k in 0 until 12) { val a = k * 0.5236f; val px = x + cos(a) * r; val py = y + sin(a) * r; if (world.solid(px, py) < 0.5f) return floatArrayOf(px, py) }
+        return floatArrayOf(x, y)
+    }
+    /** of the headings within +-70 degrees, the one with the longest run of open water ahead (a canal) */
+    private fun waterHeading(x: Float, y: Float, h: Float): Float {
+        var best = h; var bs = -1f
+        for (k in -4..4) {
+            val a = h + k * 0.3f
+            var run = 0f
+            var d = 6f
+            while (d <= 90f) { if (world.solid(x + cos(a) * d, y + sin(a) * d) > 0.5f) break; run = d; d += 6f }
+            val score = run - abs(k) * 4f
+            if (score > bs) { bs = score; best = a }
+        }
+        if (bs < 10f) best = h + PI.toFloat() * 0.6f            // dead end: turn away
+        return best
     }
 
     private fun takeOff(g: G, fromX: Float, fromY: Float) {
@@ -192,6 +262,28 @@ class Gulls(private val world: WorldMap) {
         when {
             g.state == LAND -> { tx = g.tx; ty = g.ty; tz = g.tz + 0.15f }
             g.state == LEAVING -> { tx = g.x + cos(g.h) * 50f; ty = g.y + sin(g.h) * 50f; tz = g.cz + 10f }
+            g.state == CANAL -> {
+                // low along the canal: every so often look for the heading with the longest run of open water
+                g.steerT -= dt
+                if (g.steerT <= 0f) { g.steerT = 0.7f; g.want = waterHeading(g.x, g.y, g.h) }
+                tx = g.x + cos(g.want) * 30f; ty = g.y + sin(g.want) * 30f; tz = g.cz
+                if (g.t > g.life) { g.state = LEAVING; g.t = 0f; g.cz = rr(20f, 30f) }
+            }
+            g.state == WANDER -> {
+                if (hypot(g.tx - g.x, g.ty - g.y) < 12f || g.t > 25f) { pickWander(g); g.t = 0f; g.life -= 25f }
+                tx = g.tx; ty = g.ty; tz = g.tz
+                if (g.life < 0f) { g.state = FLY; g.t = 0f; g.life = rr(10f, 30f); g.cx = g.x; g.cy = g.y; g.rad = rr(22f, 45f) }
+            }
+            g.state == FOLLOW -> {
+                val b = lastBoats.firstOrNull { it.size > 7 && it[7].toInt() == g.follow }
+                if (b == null || g.t > g.life) { g.state = LEAVING; g.t = 0f; tx = g.x; ty = g.y; tz = g.z }
+                else {
+                    // hanging in the air behind the stern, weaving a little
+                    val bh = b[6]; val side = sin(g.t * 0.6f + g.rad) * 6f
+                    tx = b[0] - cos(bh) * 14f - sin(bh) * side; ty = b[1] - sin(bh) * 14f + cos(bh) * side; tz = 9f + 2f * sin(g.t * 0.4f)
+                    if (g.speed < b[2] + 2f) g.speed = min(13f, b[2] + 3f)
+                }
+            }
             else -> {
                 g.cx += wx * 0.15f * dt; g.cy += wy * 0.15f * dt
                 val a = atan2(g.y - g.cy, g.x - g.cx) + g.dir * 0.5f
@@ -227,7 +319,8 @@ class Gulls(private val world: WorldMap) {
         g.amp += ((if (flapping) 0.9f else 0.08f) - g.amp) * min(1f, dt * 4f)
         g.phase += dt * 2f * PI.toFloat() * (if (flapping) 3.4f else 0.6f)
         if (g.phase > 1000f) g.phase -= 1000f
-        if (g.state == FLY) { g.callT -= dt; if (g.callT <= 0f) { g.callT = rr(6f, 22f); calls.add(floatArrayOf(g.x, g.y, 0.8f)) } }
+        if (g.state != LAND && g.state != LEAVING) { g.callT -= dt; if (g.callT <= 0f) { g.callT = rr(6f, 22f); calls.add(floatArrayOf(g.x, g.y, 0.8f)) } }
+        if (g.state == CANAL || g.state == FOLLOW) g.z = max(g.z, 3.5f)
         if (g.state == LAND && dist < 0.5f && abs(g.z - g.tz) < 0.6f) {
             g.x = g.tx; g.y = g.ty; g.z = g.tz; g.state = PERCH; g.t = 0f; g.amp = 0f; g.bank = 0f; g.callT = rr(3f, 30f)
             taken[g.spot] = clock
@@ -241,5 +334,6 @@ class Gulls(private val world: WorldMap) {
         glBindVertexArray(0)
     }
 
-    companion object { const val PERCH = 0; const val TAKEOFF = 1; const val FLY = 2; const val LAND = 3; const val LEAVING = 4 }
+    companion object { const val PERCH = 0; const val TAKEOFF = 1; const val FLY = 2; const val LAND = 3; const val LEAVING = 4
+        const val CANAL = 5; const val WANDER = 6; const val FOLLOW = 7 }
 }
