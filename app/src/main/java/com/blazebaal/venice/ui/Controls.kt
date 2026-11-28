@@ -145,6 +145,9 @@ object Settings {
     @Volatile var volMaster = 0.8f
     @Volatile var volEngine = 0.8f
     @Volatile var volAmbience = 0.6f
+    /** menu click: 0 off, 1 tick, 2 pop, 3 bell, 4 wood, 5 drop */
+    @Volatile var clickSound = 2
+    @Volatile var volUi = 0.8f
     // ---- world
     @Volatile var liveWeather = true
     @Volatile var liveVaporetti = true
@@ -197,6 +200,7 @@ object Settings {
         liveVaporetti = p.getBoolean("liveVaporetti", true)
         simple = p.getBoolean("simple", false)
         dayNight = p.getInt("dayNight", 0)
+        clickSound = p.getInt("clickSound", 2); volUi = p.getFloat("volUi", 0.8f)
     }
     fun save(ctx: Context) {
         ctx.getSharedPreferences("venice", Context.MODE_PRIVATE).edit()
@@ -209,6 +213,6 @@ object Settings {
             .putBoolean("vibration", vibration).putInt("speedUnit", speedUnit).putFloat("hudScale", hudScale).putBoolean("northUp", minimapNorthUp)
             .putFloat("volMaster", volMaster).putFloat("volEngine", volEngine).putFloat("volAmbience", volAmbience)
             .putBoolean("liveWeather", liveWeather).putBoolean("liveVaporetti", liveVaporetti).putInt("language", language)
-            .putBoolean("simple", simple).putInt("dayNight", dayNight).apply()
+            .putBoolean("simple", simple).putInt("dayNight", dayNight).putInt("clickSound", clickSound).putFloat("volUi", volUi).apply()
     }
 }

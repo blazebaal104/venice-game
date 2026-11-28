@@ -43,8 +43,13 @@ class MooredBoats(private val ctx: Context, private val world: WorldMap) {
     }
 
     /** the tiles around (x, y): placements computed once per tile; near-list and collision boxes refreshed */
+    private var lastX = Float.NaN; private var lastY = Float.NaN; private var lastNs = 0L
     fun update(x: Float, y: Float, radius: Float) {
         if (catalog.variants.isEmpty()) return
+        // the lists only need refreshing when the camera has moved a little (no garbage every frame)
+        val now = System.nanoTime()
+        if (!lastX.isNaN() && hypot(x - lastX, y - lastY) < 4f && now - lastNs < 400_000_000L) return
+        lastX = x; lastY = y; lastNs = now
         val (tx, ty) = world.tileCoords(x, y)
         val r = ceil(radius / TILE_SIZE).toInt()
         if (tx != lastTx || ty != lastTy) {

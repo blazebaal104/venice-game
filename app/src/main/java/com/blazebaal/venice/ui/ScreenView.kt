@@ -514,6 +514,11 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         Settings.volMaster = gui.slider("vm", row(x, y, w, "Generale", "${(Settings.volMaster * 100).roundToInt()}%"), Settings.volMaster, 0f, 1f, 0.05f); y += ROW
         Settings.volEngine = gui.slider("ve", row(x, y, w, "Motore", "${(Settings.volEngine * 100).roundToInt()}%"), Settings.volEngine, 0f, 1f, 0.05f); y += ROW
         Settings.volAmbience = gui.slider("va", row(x, y, w, "Ambiente", "Acqua, gabbiani, campane · ${(Settings.volAmbience * 100).roundToInt()}%"), Settings.volAmbience, 0f, 1f, 0.05f); y += ROW
+        y = section(x, y, "MENU")
+        val prevClick = Settings.clickSound
+        Settings.clickSound = gui.stepper(row(x, y, w, "Suono dei tasti", "Il clic dei pulsanti nei menu"), listOf("Nessuno", "Tic", "Pop", "Campanella", "Legno", "Goccia"), Settings.clickSound); y += ROW
+        if (Settings.clickSound != prevClick) com.blazebaal.venice.audio.Audio.ui()          // hear it right away
+        Settings.volUi = gui.slider("vu", row(x, y, w, "Volume dei tasti", "${(Settings.volUi * 100).roundToInt()}%"), Settings.volUi, 0f, 1f, 0.05f); y += ROW
         ink.label("Tutti i suoni sono generati in tempo reale: motore, acqua, vaporetti, gabbiani, campane, pioggia.", x, y + 22 * dp, 11.5f, Theme.TEXT_DIM, face = Theme.condensed)
         return y + 34 * dp
     }

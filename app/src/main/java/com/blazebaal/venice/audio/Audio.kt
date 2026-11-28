@@ -83,6 +83,30 @@ object Audio {
     private const val SR = 24000
     private const val N = 512
     private class Clip(val sr: Int, val pcm: ShortArray, val marks: IntArray) { val n = pcm.size; val step = sr / SR.toFloat() }
+
+    /** Click sounds for the menus, built once each: 1 tick, 2 soft pop, 3 glass bell, 4 wood block, 5 water drop.
+     *  Plain additive synthesis with a fast attack and an exponential decay: short, quiet, never harsh. */
+    private val uiTones = HashMap<Int, Clip>()
+    private fun uiTone(style: Int, back: Boolean): Clip = uiTones.getOrPut(style * 2 + if (back) 1 else 0) {
+        val semis = if (back) -5f else 0f
+        val k = 2f.pow(semis / 12f)
+        val dur = when (style) { 1 -> 0.035f; 2 -> 0.09f; 3 -> 0.45f; 4 -> 0.08f; else -> 0.16f }
+        val n = (SR * dur).toInt()
+        val pcm = ShortArray(n)
+        for (i in 0 until n) {
+            val t = i / SR.toFloat()
+            val att = min(1f, t / 0.0015f)
+            val v = when (style) {
+                1 -> sin(2 * PI.toFloat() * 2400f * k * t) * exp(-t * 140f) * 0.6f + sin(2 * PI.toFloat() * 4100f * k * t) * exp(-t * 220f) * 0.25f
+                2 -> { val f = 520f * k * (1f + 0.9f * exp(-t * 60f)); sin(2 * PI.toFloat() * f * t) * exp(-t * 38f) * 0.8f }
+                3 -> (sin(2 * PI.toFloat() * 1318f * k * t) * 0.55f + sin(2 * PI.toFloat() * 2637f * k * t) * 0.22f * exp(-t * 9f) + sin(2 * PI.toFloat() * 3952f * k * t) * 0.1f * exp(-t * 14f)) * exp(-t * 7.5f)
+                4 -> (sin(2 * PI.toFloat() * 880f * k * t) * 0.6f + sin(2 * PI.toFloat() * 2310f * k * t) * 0.3f * exp(-t * 60f)) * exp(-t * 55f)
+                else -> { val f = 900f * k * (1f + 1.4f * (1f - exp(-t * 30f))); sin(2 * PI.toFloat() * f * t) * exp(-t * 26f) * 0.7f }
+            }
+            pcm[i] = (v * att * 26000f).toInt().coerceIn(-32767, 32767).toShort()
+        }
+        Clip(SR, pcm, IntArray(0))
+    }
     @Volatile private var bank: Map<String, Clip> = emptyMap()
     private fun loadBank(c: Context) {
         try {
@@ -253,9 +277,13 @@ object Audio {
         val type = e[0]; val s = e[1]
         val p = pan(e[2], e[3])
         if (type == EV_UI) {
-            // a drop falling into water, short and close: the menus' click (on its own bus, never faded out)
-            val c = pick("plip", 2) ?: return
-            if (uiVoices.size < 6) uiVoices.add(Voice(c, T_CLIP, (if (s > 1.5f) 0.82f else 1.12f) * rr(0.97f, 1.03f), 0.42f, 0.55f, 0.55f, 0, coef(7000f), 0f))
+            // the menus' click (on its own bus, never faded out): a short, clean synthesized tone, the sound picked
+            // in Settings > Audio; going back plays it a step lower
+            val style = com.blazebaal.venice.ui.Settings.clickSound
+            if (style == 0) return
+            val c = uiTone(style, s > 1.5f)
+            val g = 0.5f * com.blazebaal.venice.ui.Settings.volUi
+            if (uiVoices.size < 6 && g > 0.001f) uiVoices.add(Voice(c, T_CLIP, 1f, g, 0.55f, 0.55f, 0, coef(12000f), 0f))
             return
         }
         if (menu && type != EV_THUNDER) return                       // nothing of the world while on the menu
