@@ -173,8 +173,8 @@ class Boat(var x: Float, var y: Float, var heading: Float) {
                 if (d < 0.75f && d > 1e-4f) { pushX += dx / d * (0.75f - d); pushY += dy / d * (0.75f - d); if (0.75f - d > deepest) { deepest = 0.75f - d; iterKind = 4 } }      // 4: a pole in the water (bricola / palina)
             }
             // oriented boxes: vaporetto pontoons and gangways, then line piers
-            for (list in arrayOf(Obstacles.stops, pierBoxes, Obstacles.boats)) for (o in list) {
-                val lk = if (list === Obstacles.boats) 3 else 2
+            for (list in arrayOf(Obstacles.stops, pierBoxes, Obstacles.boats, Obstacles.moored)) for (o in list) {
+                val lk = if (list === Obstacles.boats) 3 else if (list === Obstacles.moored) o[5].toInt() else 2
                 // oriented box: x, y, rotation, half length, half width
                 if (abs(o[0] - x) > o[3] + 9f || abs(o[1] - y) > o[3] + 9f) continue
                 val oc = cos(o[2]); val os = sin(o[2])

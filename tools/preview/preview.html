@@ -113,6 +113,15 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
       lms.push({m: bm[b.n], model: M.mul(M.mul(M.T(b.x, b.y, 0), M.Rz(b.rot * Math.PI / 180)), sc4), x: b.x, y: b.y, at: bown[b.n] || bat});
     }
   }
+  {
+    const mb = await bin('exp/moored.bin');
+    if (mb && mb.byteLength > 0) {
+      const dim = await loadImg('exp/boat_decals.png'); const dt = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, dt);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, dim); gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      lms.push({m: mesh(mb, 12, L4), model: M.I(), x: 0, y: 0, always: true, sign: dt, signRect: [0, 0, 1, 1]});
+    }
+  }
   if (sc.stops && sc.stops.length) {
     const sm = {}; for (const l of [12, 16, 22]) sm[l] = mesh(await bin(`exp/lm_actv${l}.bin`), 12, L4);
     const mkTex = async (u) => { const im = await loadImg(u); const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
@@ -223,7 +232,7 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
     common(S.generic, mir, clipZ); for (const t of tiles) { if (!near(t, mir === ident ? maxD : 140)) continue; gl.uniformMatrix4fv(S.generic.u('uModel'), false, M.T(t.ox, t.oy, 0)); draw(t.g); if (mir === ident && near(t, 150)) draw(t.d); }
     gl.uniform1i(S.generic.u('uAtlas'), 6); gl.uniform1i(S.generic.u('uSign'), 8);
     gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, window.signTex || null);
-    for (const l of lms) if (l.always || Math.hypot(l.x-cam[0], l.y-cam[1]) < maxD + 100) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, l.at); gl.uniform4fv(S.generic.u('uSignRect'), l.rect || [0, 0, 0, 0]); gl.uniformMatrix4fv(S.generic.u('uModel'), false, l.model); draw(l.m); }
+    for (const l of lms) if (l.always || Math.hypot(l.x-cam[0], l.y-cam[1]) < maxD + 100) { gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, l.at); gl.uniform4fv(S.generic.u('uSignRect'), l.signRect || l.rect || [0, 0, 0, 0]); gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, l.sign || window.signTex || null); gl.uniformMatrix4fv(S.generic.u('uModel'), false, l.model); draw(l.m); }
     gl.uniformMatrix4fv(S.generic.u('uModel'), false, bm); draw(boat);
   }
   const refl = target(Math.floor(W*0.42), Math.floor(H*0.42), true), scene = target(W, H, true), bA = target(W/4, H/4, false), bB = target(W/4, H/4, false);
@@ -234,6 +243,8 @@ async function loadImg(u) { const b = await (await fetch(u)).blob(); return awai
   gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, refl.tex); gl.uniform1i(S.water.u('uRefl'), 5); gl.uniform2f(S.water.u('uScreen'), W, H);
   gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, wkTex); gl.uniform1i(S.water.u('uWake'), 7); gl.uniform3f(S.water.u('uWakeO'), WK.ox, WK.oy, WK.size); gl.uniform2f(S.water.u('uWakeDir'), WK.dx, WK.dy);
   gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, waterN); gl.uniform1i(S.water.u('uWaterN'), 10);
+  if (!window.foamTex) { const im = await loadImg('foam.png'); const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, im); gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT); window.foamTex = t; }
+  gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, window.foamTex); gl.uniform1i(S.water.u('uFoamT'), 11);
   gl.uniform4f(S.water.u('uBoat'), B.x, B.y, B.h, WK.surge); gl.uniform2f(S.water.u('uHull'), WK.hl, WK.hb);
   gl.uniform1f(S.water.u('uGridHalf'), 1e6); draw(wNear); gl.uniform1f(S.water.u('uGridHalf'), 160); draw(wMid); gl.uniform1f(S.water.u('uGridHalf'), 1); draw(wFar);
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);

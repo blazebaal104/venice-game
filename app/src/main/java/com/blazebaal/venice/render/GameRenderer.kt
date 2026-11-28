@@ -153,6 +153,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             wake.fleet = live
             smokeMesh = InstMesh(6, intArrayOf(3, 3), LiveBoats.MAX_SMOKE); trailMesh = DynMesh(5, intArrayOf(2, 3), 9000 * 5)
         },
+        "Le barche ormeggiate" to { moored = MooredBoats(ctx, world).also { it.init { a -> loadAtlasBitmap(a) } } },
         "Metto in acqua" to {
             boat = Boat(-330f, 380f, Math.toRadians(41.0).toFloat())
             Obstacles.stops = stopBoxes
@@ -187,7 +188,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
 
     companion object {
         /** bump whenever CityMesher output changes, so cached tiles on players' phones are rebuilt */
-        const val MESHER_VERSION = 9
+        const val MESHER_VERSION = 10
     }
 
     private fun loadMesh(asset: String): Mesh? = try {
@@ -229,6 +230,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     } catch (e: Exception) { 0 }
 
     private var signTex = 0
+    private var moored: MooredBoats? = null
     private lateinit var live: LiveBoats
     private val fleetMeshes = arrayOfNulls<Mesh>(4); private val fleetLod = arrayOfNulls<Mesh>(4)
     private val boatModel = FloatArray(16)
@@ -477,6 +479,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
                 3 -> Events.post("URTO CON IL VAPORETTO", Events.BAD, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 2 -> Events.post("URTO CONTRO IL PONTILE", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 4 -> Events.post("URTO CONTRO UNA BRICOLA", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
+                5, 6, 7, 8 -> Events.post("URTO CON UNA BARCA ORMEGGIATA", Events.WARN, "${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
                 else -> Events.post("URTO", Events.WARN, "contro la fondamenta · ${(boat.impact * 3.6f).roundToInt()} km/h", "urto")
             }
             Audio.event(Audio.EV_IMPACT, boat.impact, kind = boat.impactKind.toFloat())
@@ -810,6 +813,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         }
         LiveBoats.playerX = boat.x; LiveBoats.playerY = boat.y
         live.update(if (paused) 0f else dt, camX, camY)
+        moored?.update(camX, camY, mooredDist())
         gulls?.let { gl ->
             val w = if ((Settings.liveWeather && Weather.live) || Weather.override > 0) Weather.windVec() else floatArrayOf(2.5f, 1.2f)
             gl.update(if (paused) 0f else dt, camX, camY, boat.x, boat.y, abs(boat.surge), ((0.11f - boat.waveAmp) / 0.075f).coerceIn(0f, 1f), w[0], w[1], LiveBoats.audio)
@@ -1025,8 +1029,14 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
                 generic.mat4("uModel", boatModel); vm.draw()
             }
         }
+        // boats moored along the quays: full detail up close, the light hull further out and in the reflection
+        moored?.let { mb ->
+            mb.draw(generic, camX, camY, boat.time, boat.waveAmp, if (reflection) 90f else mooredDist(), if (Settings.simple) 30f else 55f, reflection) { x, y, r -> sphereVisible(x, y, 1.5f, r) }
+            glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, signTex)
+        }
         boatMesh?.let { generic.mat4("uModel", bm); it.draw() }
     }
+    private fun mooredDist() = min(Settings.detailDistance, if (Settings.simple) 150f else 230f)
 
     private fun drawWater(vp: FloatArray, r: Target) {
         if (Settings.simple) {

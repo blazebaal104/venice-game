@@ -118,6 +118,7 @@ $COMMON
 in vec3 vW; in vec3 vN; in vec2 vUv; in vec4 vA;
 uniform sampler2D uAtlas; uniform sampler2D uSign; uniform vec4 uSignRect;
 uniform float uFadeDist;     // > 0: dissolve out (dithered) towards this distance - vegetation and close-up detail
+uniform float uPaintOn; uniform vec4 uPaint[6];
 out vec4 o;
 void main() {
     if (vW.z < uClipZ) discard;
@@ -127,7 +128,20 @@ void main() {
     }
     vec3 n = normalize(vN);
     if (!gl_FrontFacing) n = -n;
-    float m = vA.x;
+    // moored boats: plain-colour vertices in one of six marker colours take the variant's paint (render/MooredBoats)
+    vec4 A = vA;
+    if (uPaintOn > 0.5 && vA.x < 0.0) {
+        vec3 c = vA.yzw;
+        int slot = -1;
+        if (all(lessThan(abs(c - vec3(1.0, 0.0, 1.0)), vec3(0.002)))) slot = 0;
+        else if (all(lessThan(abs(c - vec3(0.0, 1.0, 1.0)), vec3(0.002)))) slot = 1;
+        else if (all(lessThan(abs(c - vec3(1.0, 1.0, 0.0)), vec3(0.002)))) slot = 2;
+        else if (all(lessThan(abs(c - vec3(0.0, 0.0, 1.0)), vec3(0.002)))) slot = 3;
+        else if (all(lessThan(abs(c - vec3(1.0, 0.0, 0.0)), vec3(0.002)))) slot = 4;
+        else if (all(lessThan(abs(c - vec3(0.0, 1.0, 0.0)), vec3(0.002)))) slot = 5;
+        if (slot >= 0) A = uPaint[slot];
+    }
+    float m = A.x;
     vec3 alb; float rough; float f0 = 0.04;
     if (m >= 0.0) {
         // m >= 200: hand-built landmark - albedo (with baked weathering/AO) from its own atlas,
@@ -140,9 +154,9 @@ void main() {
         float s = 1.0 / layerScale(layer);
         vec3 w = pow(abs(n), vec3(4.0)); w /= (w.x + w.y + w.z);
         vec3 nx, ny, nz;
-        vec4 ax = matSample(vW.yz * s, layer, vA.yzw, nx);
-        vec4 ay = matSample(vW.xz * s, layer, vA.yzw, ny);
-        vec4 az = matSample(vW.xy * s, layer, vA.yzw, nz);
+        vec4 ax = matSample(vW.yz * s, layer, A.yzw, nx);
+        vec4 ay = matSample(vW.xz * s, layer, A.yzw, ny);
+        vec4 az = matSample(vW.xy * s, layer, A.yzw, nz);
         vec4 a = ax * w.x + ay * w.y + az * w.z;
         alb = a.rgb; rough = a.a;
 
@@ -162,7 +176,7 @@ void main() {
         vec3 t = abs(n.z) > 0.9 ? vec3(1, 0, 0) : normalize(vec3(-n.y, n.x, 0.0));
         n = perturb(n, t, cross(n, t), tn, 0.8);
     } else {
-        alb = vA.yzw; float gloss = -m - 1.0; rough = mix(0.85, 0.12, clamp(gloss, 0.0, 1.0)); f0 = gloss > 0.6 ? 0.08 : 0.04;
+        alb = A.yzw; float gloss = -m - 1.0; rough = mix(0.85, 0.12, clamp(gloss, 0.0, 1.0)); f0 = gloss > 0.6 ? 0.08 : 0.04;
         alb *= 0.93 + 0.14 * noise(vW.xy * 3.1 + vW.z * 2.7);
     }
     float wet = smoothstep(0.5, -0.05, vW.z);

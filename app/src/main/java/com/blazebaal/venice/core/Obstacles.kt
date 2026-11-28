@@ -6,6 +6,8 @@ object Obstacles {
     @Volatile var stops: List<FloatArray> = emptyList()
     /** live ACTV vaporetti, same box format, refreshed every frame */
     @Volatile var boats: List<FloatArray> = emptyList()
+    /** boats moored along the quays near the player: same box format + what they're made of (Audio impact kind) */
+    @Volatile var moored: List<FloatArray> = emptyList()
 }
 
 /** Areas where a hand-built landmark replaces the map's generic buildings and street props (oriented rectangles:

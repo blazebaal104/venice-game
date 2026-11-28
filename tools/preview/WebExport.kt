@@ -92,6 +92,46 @@ fun main(args: Array<String>) {
         }
     }
     sb.append("]")
+    // moored boats: the game's catalogue + placement, merged and painted on the CPU into one world-space mesh
+    // (SHOWROOM=x,y lays every variant out in a grid on open water instead)
+    run {
+        val catF = File(assets, "boats/catalog.txt")
+        if (!catF.exists()) return@run
+        val cat = BoatCatalog(catF.readLines())
+        val parts = HashMap<String, FloatArray?>()
+        fun part(n: String) = parts.getOrPut(n) { File(assets, "boats/parts/$n.mesh").let { if (it.exists()) readMesh(it) else null } }
+        val places = ArrayList<FloatArray>()
+        val show = System.getenv("SHOWROOM")
+        if (show != null) {
+            val (gx, gy) = show.split(",").map { it.toFloat() }
+            for ((i, v) in cat.variants.withIndex()) places.add(floatArrayOf(gx + (i % 12) * 13f, gy + (i / 12) * 5.5f, 0f, v.id.toFloat()))
+        } else {
+            val (tx, ty) = world.tileCoords(cx, cy)
+            for (j in ty - 1..ty + 1) for (i in tx - 1..tx + 1) world.tile(i, j)?.let { places.addAll(Moorings.place(it, cat)) }
+        }
+        val all = ArrayList<Float>()
+        val sentinels = arrayOf(floatArrayOf(1f, 0f, 1f), floatArrayOf(0f, 1f, 1f), floatArrayOf(1f, 1f, 0f), floatArrayOf(0f, 0f, 1f), floatArrayOf(1f, 0f, 0f), floatArrayOf(0f, 1f, 0f))
+        for (b in places) {
+            if (show == null && hypot(b[0] - cx, b[1] - cy) > 300f) continue
+            val v = cat.variants[b[3].toInt()]
+            val d = (part("hull_" + v.base) ?: continue) + BoatCatalog.mergeParts(v, { part(it) })
+            val c = cos(b[2]); val sn = sin(b[2])
+            var i = 0
+            while (i < d.size) {
+                val x = d[i]; val y = d[i + 1]; val nx = d[i + 3]; val ny = d[i + 4]
+                d[i] = b[0] + x * c - y * sn; d[i + 1] = b[1] + x * sn + y * c
+                d[i + 3] = nx * c - ny * sn; d[i + 4] = nx * sn + ny * c
+                if (d[i + 8] < 0f) for ((k, sv) in sentinels.withIndex()) if (abs(d[i + 9] - sv[0]) < 0.002f && abs(d[i + 10] - sv[1]) < 0.002f && abs(d[i + 11] - sv[2]) < 0.002f) {
+                    for (q in 0..3) d[i + 8 + q] = v.paint[k * 4 + q]; break
+                }
+                i += STRIDE
+            }
+            for (f in d) all.add(f)
+        }
+        writeF(File(out, "moored.bin"), all.toFloatArray())
+        File(assets, "boats/decals.png").copyTo(File(out, "boat_decals.png"), true)
+        println("moored boats: ${places.size} placed, ${all.size / STRIDE / 3} tris exported")
+    }
     // ACTV stops (shared pontoon model, per-stop length, side and name slot)
     sb.append(",\"stops\":[")
     val actv = File(assets, "landmarks/actv.txt")

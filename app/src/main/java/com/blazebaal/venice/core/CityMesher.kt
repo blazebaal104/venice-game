@@ -68,7 +68,7 @@ class CityMesher {
         fac.style(0f, 0f, 0f, 0f)
         for (w in t.walls) safe("quay") { quay(w) }
         if (!minimal) {
-            for (w in t.walls) safe("moorings") { mooredBoats(w, t) }
+            // moored boats are drawn by render/MooredBoats (shared hull models, not baked into the tile)
             // bridges are hand-built models placed by GameRenderer.loadBridges (assets/bridges), nothing generic is meshed here
             for (p in t.piers) safe("pier") { linePier(p) }
             for (p in t.pierPolys) safe("pier polygon") { polyPier(p) }
@@ -875,111 +875,6 @@ class CityMesher {
             gen.quad(Vec3(aox, aoy, Z.GROUND - 0.22f), Vec3(box, boy, Z.GROUND - 0.22f), Vec3(box, boy, zt), Vec3(aox, aoy, zt))
             gen.quad(Vec3(ax, ay, Z.GROUND - 0.22f), Vec3(bx, by, Z.GROUND - 0.22f), Vec3(box, boy, Z.GROUND - 0.22f), Vec3(aox, aoy, Z.GROUND - 0.22f))
             u += len
-        }
-    }
-
-    // ------------------------------------------------------------------ boats moored along the fondamenta
-    /** Small boats tied up along a quay wall: only on canals at least ~9 m wide, never under a bridge, at a vaporetto
-     *  stop or inside a landmark area. Sandoli, fibreglass barchini, varnished topi, and gondolas near San Marco. */
-    private fun mooredBoats(p: FloatArray, t: TileData) {
-        val n = p.size / 2
-        if (n < 2) return
-        var acc = 0f
-        for (i in 0 until n - 1) {
-            val ax = p[i * 2]; val ay = p[i * 2 + 1]; val bx = p[i * 2 + 2]; val by = p[i * 2 + 3]
-            val dx = bx - ax; val dy = by - ay; val len = sqrt(dx * dx + dy * dy)
-            if (len < 6f) { acc += len; continue }
-            val tx = dx / len; val ty = dy / len; val nx = ty; val ny = -tx     // water side (as in quay())
-            var u = 3f + rnd(i * 31 + n, 1) * 6f
-            while (u < len - 3f) {
-                val seed = ((t.tx * 7919 + t.ty * 104729) * 31 + i * 977 + (u * 10).toInt()) and 0x7fffffff
-                val kind = rnd(seed, 1)
-                val wx = t.ox + ax + tx * u; val wy = t.oy + ay + ty * u
-                val gondolaZone = hypot(wx - 0f, wy - 0f) < 700f || hypot(wx + 240f, wy - 454f) < 350f
-                val type = when { gondolaZone && kind < 0.45f -> 3; kind < 0.38f -> 0; kind < 0.75f -> 1; else -> 2 }
-                val len2 = when (type) { 3 -> 10.8f; 0 -> 6.6f; 1 -> 5.4f; else -> 7.6f }
-                val beam = when (type) { 3 -> 1.4f; 0 -> 1.25f; 1 -> 2.0f; else -> 2.3f }
-                val off = 0.35f + beam / 2
-                val cx = ax + tx * u + nx * off; val cy = ay + ty * u + ny * off
-                if (rnd(seed, 2) < 0.5f && type != 3 || !mooringClear(t, cx, cy, nx, ny, tx, ty, len2)) { u += 4f + rnd(seed, 3) * 5f; continue }
-                boat(cx, cy, atan2(ty, tx) + (if (rnd(seed, 4) < 0.5f) PI.toFloat() else 0f), type, len2, beam, seed)
-                u += len2 + 0.8f + rnd(seed, 5) * 3f
-            }
-            acc += len
-        }
-    }
-
-    private fun mooringClear(t: TileData, cx: Float, cy: Float, nx: Float, ny: Float, tx: Float, ty: Float, len: Float): Boolean {
-        // stays inside this tile, open water under the hull, and the canal is wide enough to still get past
-        for (k in -1..1) for (o in floatArrayOf(-0.2f, 1.2f, 4f, 8.5f)) {
-            val x = cx + tx * k * len * 0.5f + nx * o; val y = cy + ty * k * len * 0.5f + ny * o
-            if (x < 1f || y < 1f || x > TILE_SIZE - 1f || y > TILE_SIZE - 1f) return false
-            if (t.solidAt(x, y) > 0.15f) return false
-        }
-        for (br in t.bridges) for (j in 0 until br.xy.size / 2) if (hypot(br.xy[j * 2] - cx, br.xy[j * 2 + 1] - cy) < 14f + br.width) return false
-        for (br in t.bridges) for (j in 0 until br.xy.size / 2 - 1) {
-            val ax = br.xy[j * 2]; val ay = br.xy[j * 2 + 1]; val ex = br.xy[j * 2 + 2] - ax; val ey = br.xy[j * 2 + 3] - ay
-            val l2 = ex * ex + ey * ey; if (l2 < 1e-4f) continue
-            val k = (((cx - ax) * ex + (cy - ay) * ey) / l2).coerceIn(0f, 1f)
-            if (hypot(ax + ex * k - cx, ay + ey * k - cy) < len * 0.5f + 6f) return false
-        }
-        for (pt in t.points) if (pt.type == Feature.STOP && hypot(pt.x - cx, pt.y - cy) < 40f) return false
-        if (Exclusions.zones.isNotEmpty() && Exclusions.inside(t.ox + cx, t.oy + cy)) return false
-        return true
-    }
-
-    /** type 0 sandolo (dark wood), 1 fibreglass barchino, 2 varnished wooden topo, 3 gondola */
-    private fun boat(cx: Float, cy: Float, rot: Float, type: Int, len: Float, beam: Float, seed: Int) {
-        val c = cos(rot); val s = sin(rot)
-        fun P(lx: Float, ly: Float, z: Float) = Vec3(cx + c * lx - s * ly, cy + s * lx + c * ly, z)
-        val N = 10
-        val sheer = when (type) { 3 -> 0.55f; 1 -> 0.6f; 2 -> 0.75f; else -> 0.4f }
-        val bottom = -0.22f
-        // plan: pointed bow (+x), fuller stern; gondola and sandolo pointed at both ends, ends sweeping up
-        fun hw(f: Float): Float {
-            val a = abs(f)
-            return when (type) { 0, 3 -> beam / 2 * (1f - a.pow(2.2f)); else -> beam / 2 * (if (f > 0) 1f - f.pow(2.0f) else 1f - (a.pow(4f)) * 0.35f) }
-        }
-        fun zs(f: Float) = sheer + when (type) { 3 -> 0.55f * abs(f).pow(3f); 0 -> 0.25f * abs(f).pow(3f); else -> 0.18f * max(f, 0f).pow(2f) }
-        val hull = when (type) {
-            3 -> floatArrayOf(0.04f, 0.04f, 0.045f); 0 -> floatArrayOf(0.20f, 0.15f, 0.11f)
-            1 -> if (rnd(seed, 20) < 0.5f) floatArrayOf(0.88f, 0.89f, 0.88f) else floatArrayOf(0.80f, 0.84f, 0.86f)
-            else -> floatArrayOf(0.48f, 0.30f, 0.16f)
-        }
-        val stripe = Palette.SHUTTER[1 + (rnd(seed, 21) * 3).toInt().coerceAtMost(2)]
-        for (k in 0 until N) {
-            val f0 = -1f + 2f * k / N; val f1 = -1f + 2f * (k + 1) / N
-            val x0 = f0 * len / 2; val x1 = f1 * len / 2
-            for (sd in intArrayOf(-1, 1)) {
-                det.color(hull[0], hull[1], hull[2], if (type == 2 || type == 3) 0.6f else 0.3f)
-                det.quad(P(x0, sd * hw(f0) * 0.55f, bottom), P(x1, sd * hw(f1) * 0.55f, bottom), P(x1, sd * hw(f1), zs(f1)), P(x0, sd * hw(f0), zs(f0)))
-                if (type == 1) { det.color(stripe[0], stripe[1], stripe[2], 0.4f); det.quad(P(x0, sd * hw(f0) * 1.01f, zs(f0) - 0.14f), P(x1, sd * hw(f1) * 1.01f, zs(f1) - 0.14f), P(x1, sd * hw(f1) * 1.01f, zs(f1) - 0.04f), P(x0, sd * hw(f0) * 1.01f, zs(f0) - 0.04f)) }
-            }
-            // deck / floorboards seen from above
-            if (type == 2 || type == 1) det.mat(L.PLANKS, 0.8f, 0.72f, 0.62f) else det.color(hull[0] * 1.4f + 0.05f, hull[1] * 1.4f + 0.04f, hull[2] * 1.4f + 0.03f, 0.2f)
-            det.quad(P(x0, -hw(f0) * 0.92f, zs(f0) - 0.25f), P(x1, -hw(f1) * 0.92f, zs(f1) - 0.25f), P(x1, hw(f1) * 0.92f, zs(f1) - 0.25f), P(x0, hw(f0) * 0.92f, zs(f0) - 0.25f))
-        }
-        // gunwale cap
-        det.color(0.55f, 0.42f, 0.28f, 0.5f)
-        if (type == 3) {
-            // gondola: the steel ferro on the bow, the forcola, red-velvet seat
-            det.color(0.85f, 0.86f, 0.88f, 0.8f); det.box(P(len / 2 - 0.1f, 0f, 0f).x, P(len / 2 - 0.1f, 0f, 0f).y, zs(1f) + 0.35f, 0.04f, 0.18f, 0.4f, rot)
-            det.color(0.30f, 0.20f, 0.12f, 0.4f); val fo = P(-len * 0.3f, hw(-0.6f) * 0.8f, 0f); det.box(fo.x, fo.y, sheer + 0.45f, 0.08f, 0.08f, 0.35f, rot)
-            det.color(0.50f, 0.06f, 0.06f, 0.2f); val se = P(-0.5f, 0f, 0f); det.box(se.x, se.y, sheer - 0.05f, 0.7f, 0.5f, 0.15f, rot)
-        } else {
-            // a tarp over the boat (blue, green or grey) or an outboard on the transom
-            if (rnd(seed, 30) < 0.4f) {
-                val tc = arrayOf(floatArrayOf(0.12f, 0.25f, 0.55f), floatArrayOf(0.15f, 0.35f, 0.22f), floatArrayOf(0.45f, 0.47f, 0.48f))[(rnd(seed, 31) * 3).toInt().coerceAtMost(2)]
-                det.color(tc[0], tc[1], tc[2], 0.3f)
-                for (k in 0 until N) {
-                    val f0 = -0.85f + 1.7f * k / N; val f1 = -0.85f + 1.7f * (k + 1) / N
-                    val x0 = f0 * len / 2; val x1 = f1 * len / 2
-                    for (sd in intArrayOf(-1, 1)) det.quad(P(x0, sd * hw(f0), zs(f0)), P(x1, sd * hw(f1), zs(f1)), P(x1, 0f, zs(f1) + 0.22f), P(x0, 0f, zs(f0) + 0.22f))
-                }
-            } else if (type != 0) {
-                det.color(0.10f, 0.11f, 0.12f, 0.5f); val o = P(-len / 2 - 0.15f, 0f, 0f); det.box(o.x, o.y, sheer + 0.2f, 0.18f, 0.22f, 0.35f, rot)
-                if (type == 2) { det.color(0.30f, 0.32f, 0.34f, 0.5f); val cs = P(len * 0.05f, 0f, 0f); det.box(cs.x, cs.y, sheer + 0.15f, 0.35f, 0.4f, 0.4f, rot) }
-            }
         }
     }
 

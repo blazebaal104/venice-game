@@ -319,6 +319,24 @@ object Audio {
                 play(pick("metal", 4), 0.45f * g, rr(0.75f, 0.9f), p, delay = 0.03f, send = 0.5f)
                 synth(T_THUD, 0.5f * g, 0.9f, p, f = 38f)
             }
+            5 -> {   // a moored fibreglass boat: hollow plastic knock, it rocks and its fenders squeak
+                synth(T_THUD, 0.45f * g, 0.5f, p, f = rr(95f, 130f))
+                play(clip("bump"), 0.55f * g, rr(0.9f, 1.15f), p, lp = 3200f)
+                play(pick("slap", 5), 0.35f * g, rr(0.9f, 1.1f), p, delay = 0.12f, lp = 2500f)
+            }
+            6 -> {   // a moored wooden boat: planks knocking, the frames creaking
+                play(pick("wood", 4), 0.7f * g, rr(0.65f, 0.8f), p, lp = 2800f, send = 0.4f)
+                play(pick("thock", 2), 0.4f * g, rr(0.8f, 0.95f), p, delay = 0.02f)
+                play(pick("creak", 2), 0.3f * g, rr(0.8f, 1f), p, delay = 0.25f, send = 0.4f)
+            }
+            7 -> {   // a rib's inflatable tube: a soft rubbery bounce
+                synth(T_THUD, 0.35f * g, 0.45f, p, f = rr(60f, 80f))
+                play(clip("bump"), 0.45f * g, rr(0.55f, 0.7f), p, lp = 900f)
+            }
+            8 -> {   // a moored steel work boat: a clang and a long ring
+                play(clip("metal0"), 0.7f * g, rr(0.55f, 0.7f), p, lp = 2600f, send = 0.6f)
+                play(pick("metal", 4), 0.35f * g, rr(0.8f, 1f), p, delay = 0.04f, send = 0.5f)
+            }
             4 -> {   // bricola: a bundle of oak piles - a dull thock, the pole groaning after
                 play(pick("thock", 2), 0.9f * g, rr(0.55f, 0.7f), p, lp = 3000f, send = 0.5f)
                 play(clip("wood0"), 0.5f * g, rr(0.75f, 0.9f), p)
