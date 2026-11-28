@@ -124,6 +124,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
             copyP = Program(Shaders.POST_VS, Shaders.COPY_FS, "copy")
             smokeP = try { Program(Shaders.SMOKE_VS, Shaders.SMOKE_FS, "smoke") } catch (e: Throwable) { android.util.Log.e("Venice", "smoke off", e); null }
             trailP = try { Program(Shaders.TRAIL_VS, Shaders.TRAIL_FS, "trail") } catch (e: Throwable) { android.util.Log.e("Venice", "trails off", e); null }
+            trailRealP = try { Program(Shaders.TRAIL_VS, Shaders.TRAIL_REAL_FS, "trail-real") } catch (e: Throwable) { android.util.Log.e("Venice", "real trails off", e); null }
         },
         "Carico pietra, intonaco e legno" to { texArr = TexArrays.load(ctx, L.COUNT) },
         "Preparo ombre e acqua" to {
@@ -231,7 +232,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
     private lateinit var live: LiveBoats
     private val fleetMeshes = arrayOfNulls<Mesh>(4); private val fleetLod = arrayOfNulls<Mesh>(4)
     private val boatModel = FloatArray(16)
-    private var smokeP: Program? = null; private var trailP: Program? = null
+    private var smokeP: Program? = null; private var trailP: Program? = null; private var trailRealP: Program? = null
     private lateinit var smokeMesh: InstMesh; private lateinit var trailMesh: DynMesh
     private val smokeData = FloatArray(LiveBoats.MAX_SMOKE * 6); private val trailData = FloatArray(9000 * 5)
     private val stopBoxes = ArrayList<FloatArray>()
@@ -1162,7 +1163,8 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         val n = live.buildTrails(trailData, min(drawDist, 380f), camX, camY)
         if (n == 0) return
         trailMesh.upload(trailData, n * 5)
-        val tp = trailP ?: return
+        // simple mode keeps the cheap ribbon; realistic gets the full wake (falls back to the ribbon if it won't compile)
+        val tp = (if (Settings.simple) trailP else trailRealP ?: trailP) ?: return
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(false)
         tp.use(); common(tp, vp, ident, -1000f, false); foam(tp)
         trailMesh.draw(GL_TRIANGLES)

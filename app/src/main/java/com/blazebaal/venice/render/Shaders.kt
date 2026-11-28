@@ -889,6 +889,45 @@ void main() {
 }
 """
 
+    /** "Realistico" boat trail: churned water at the stern, a turbulent centre wake that breaks into streaks along
+     *  the direction of travel, lacy foam lines where the wake meets calm water, and the long glassy slick the wake
+     *  leaves behind once the foam has gone. Soft edges everywhere: no ribbon. */
+    val TRAIL_REAL_FS = """#version 300 es
+precision highp float;
+$COMMON
+uniform sampler2D uFoamT;
+in vec3 vW; in vec3 vInfo;
+out vec4 o;
+void main() {
+    float age = vInfo.x, side = vInfo.y, across = abs(side), str = vInfo.z;
+    float fade = pow(1.0 - age, 1.3);
+    // flow-aligned coordinates: along the trail (its age) and across it, so the foam streaks run with the wake
+    float streak = texture(uFoamT, vec2(age * 7.0, side * 0.75 + 0.13)).r;
+    float lace = texture(uFoamT, vW.xy * 0.21 + vec2(0.31, 0.7)).g;
+    float fine = texture(uFoamT, vW.xy * 0.73).r;
+    float wob = (lace - 0.5) * 0.22 + (streak - 0.5) * 0.18;
+    float a2 = across + wob;
+    // churned white water right behind the stern
+    float churn = (1.0 - smoothstep(0.0, 0.07, age)) * (1.0 - smoothstep(0.25, 1.0, a2));
+    // turbulent centre wake: narrower than the trail, torn into streaks, thinning out with age
+    float centre = (1.0 - smoothstep(0.15, 0.7, a2)) * smoothstep(0.3 + 0.55 * age, 0.85, streak * 0.55 + lace * 0.45);
+    // lacy lines at the outer edges, broken up
+    float d = (a2 - 0.84) / 0.075;
+    float edge = exp(-d * d) * smoothstep(0.4, 0.75, fine * 0.5 + streak * 0.5) * (1.0 - age);
+    float foam = clamp(churn * 1.3 + centre + edge * 0.6, 0.0, 1.0) * str * fade;
+    foam *= smoothstep(0.35, 0.65, fine * 0.4 + lace * 0.6 + churn);        // sparkle holes in the foam
+    // the slick: smoothed, darker water that lingers long after the foam has gone
+    float slick = (1.0 - smoothstep(0.35, 1.0, a2)) * (1.0 - 0.6 * age) * 0.16 * min(1.0, str * 1.5);
+    float a = max(foam * 0.88, slick);
+    a *= 1.0 - smoothstep(0.82, 1.0, across);
+    if (a < 0.008) discard;
+    vec3 foamCol = vec3(0.92, 0.95, 0.96) * (uSunCol * 0.55 + uSkyAmb * 1.3);
+    vec3 slickCol = vec3(0.02, 0.05, 0.06) * (uSkyAmb * 2.2 + uSunCol * 0.1);
+    vec3 col = mix(slickCol, foamCol, clamp(foam * 0.88 / max(a, 1e-4), 0.0, 1.0));
+    o = vec4(fog(col, vW), min(a, 0.9));
+}
+"""
+
     // ------------------------------------------------------------------ shadow depth
     const val DEPTH_VS = """#version 300 es
 layout(location=0) in vec3 aPos;
