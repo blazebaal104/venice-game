@@ -142,6 +142,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         "Le barene" to { grassP = Program(Shaders.GRASS_VS, Shaders.GRASS_FS, "grass"); grass = MarshGrass(world) },
         "I gabbiani" to { try { gullP = Program(Shaders.GULL_VS, Shaders.GULL_FS, "gulls"); gulls = Gulls(world) } catch (e: Throwable) { android.util.Log.e("Venice", "gulls", e); gullP = null; gulls = null } },
         "La flotta ACTV" to {
+            Obstacles.stops = stopBoxes; LiveBoats.cacheDir = ctx.filesDir
             live = LiveBoats(world); live.setStops(stopList)
             for ((i, n) in listOf("motobattello", "motoscafo", "motonave", "lancione").withIndex()) { fleetMeshes[i] = loadMesh("live/$n.mesh"); fleetLod[i] = loadMesh("live/${n}_lod.mesh") }
             wake.fleet = live
@@ -984,7 +985,7 @@ class GameRenderer(private val ctx: Context) : GLSurfaceView.Renderer {
         // live ACTV vaporetti (plain-colour materials, no atlas)
         run {
             val vd = if (reflection) 160f else maxDist + 30f
-            for (b in live.boats.values) {
+            for (b in live.visibleBoats) {
                 val d = hypot(b.px - camX, b.py - camY)
                 if (d > vd || !sphereVisible(b.px, b.py, 2f, b.kind.len * 0.6f)) continue
                 // full detail only up close; the reflection and anything past ~70 m get the 8x lighter model

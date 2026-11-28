@@ -633,10 +633,12 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
             if (z > 1.1f) { ink.text.setShadowLayer(3 * dp, 0f, 1 * dp, Color.BLACK); ink.label(st.name, q.x + 6 * dp, q.y - 4 * dp, 10f, Theme.YELLOW, face = Theme.condensed); ink.text.clearShadowLayer() }
         }
         // live vaporetti: arrow + line number
-        if (Settings.liveVaporetti) for (v in com.blazebaal.venice.render.LiveBoats.markers) {
+        // (every trip on its planned route, moving in real time even though the game is frozen behind the map)
+        val fleetNow = if (Settings.liveVaporetti) com.blazebaal.venice.render.LiveBoats.mapMarkers() else emptyList()
+        for (v in fleetNow) {
             val q = sp(v.x, v.y)
             if (abs(q.x) > W / 2 + 30 * dp || abs(q.y) > H / 2 + 30 * dp) continue
-            vaporettoMark(q.x, q.y, v.h, v.line, z > 0.25f)
+            vaporettoMark(q.x, q.y, v.h, v.line, true)
         }
         // canal names
         Canals.draw(ink, 11f, 0f, 160 * dp, { x, y -> sp(x, y) }, { q -> abs(q.x) < W / 2 + 60 * dp && abs(q.y) < H / 2 + 30 * dp })
@@ -668,6 +670,12 @@ class ScreenView(ctx: Context, private val actions: GameActions) : View(ctx) {
         ink.glass(RectF(m + 54 * dp, m, m + 260 * dp, m + 44 * dp), 14 * dp)
         ink.label("MAPPA DI VENEZIA", m + 70 * dp, m + 20 * dp, 12f, Theme.YELLOW, spacing = 0.12f)
         ink.label("Tocca per scegliere una destinazione", m + 70 * dp, m + 36 * dp, 10.5f, Theme.TEXT_DIM, face = Theme.condensed)
+        if (Settings.liveVaporetti) {
+            ink.glass(RectF(m + 268 * dp, m, m + 430 * dp, m + 44 * dp), 14 * dp)
+            ink.fill.style = Paint.Style.FILL; ink.fill.color = Theme.YELLOW; c.drawCircle(m + 286 * dp, m + 22 * dp, 6 * dp, ink.fill)
+            ink.label("${fleetNow.size} VAPORETTI", m + 300 * dp, m + 20 * dp, 12f, Theme.TEXT, spacing = 0.1f)
+            ink.label(if (com.blazebaal.venice.live.Vaporetti.isLive()) "posizioni ACTV dal vivo" else "secondo l'orario ACTV", m + 300 * dp, m + 36 * dp, 10.5f, Theme.TEXT_DIM, face = Theme.condensed)
+        }
         val bx = W - m - 22 * dp
         if (gui.iconButton(bx, H / 2 - 56 * dp, 22 * dp, "plus")) zoomAt(1.6f, W / 2, H / 2)
         if (gui.iconButton(bx, H / 2, 22 * dp, "minus")) zoomAt(1 / 1.6f, W / 2, H / 2)

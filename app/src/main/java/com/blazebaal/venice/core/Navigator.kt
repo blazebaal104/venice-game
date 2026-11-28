@@ -65,13 +65,28 @@ class Navigator(private val world: WorldMap) {
         val key = (((ax / 6).roundToInt().toLong() and 0xffff) shl 48) or (((ay / 6).roundToInt().toLong() and 0xffff) shl 32) or
             (((bx / 6).roundToInt().toLong() and 0xffff) shl 16) or ((by / 6).roundToInt().toLong() and 0xffff)
         synchronized(cache) { cache[key]?.let { p -> return floatArrayOf(ax, ay) + p.copyOfRange(2, p.size - 2) + floatArrayOf(bx, by) } }
-        val p = astar(ax, ay, bx, by) ?: return floatArrayOf(ax, ay, bx, by)
+        // long lagoon legs don't fit a 3 m grid: coarser grids before giving up on a water route
+        val p = astar(ax, ay, bx, by, 3f, 150f) ?: astar(ax, ay, bx, by, 6f, 600f)?.let { refine(it) } ?: astar(ax, ay, bx, by, 12f, 1500f)?.let { refine(it) } ?: astar(ax, ay, bx, by, 20f, 3500f)?.let { refine(it) } ?: return floatArrayOf(ax, ay, bx, by)
         synchronized(cache) { cache[key] = p }
         return p
     }
 
-    private fun astar(ax: Float, ay: Float, bx: Float, by: Float): FloatArray? {
-        val cell = 3f; val margin = 150f
+    /** a route found on a coarse grid can cut a corner across a quay: every stretch that isn't clear water is
+     *  routed again on the fine grid between its ends */
+    private fun refine(p: FloatArray): FloatArray {
+        val out = ArrayList<Float>(); out.add(p[0]); out.add(p[1])
+        for (i in 0 until p.size / 2 - 1) {
+            val ax = p[i * 2]; val ay = p[i * 2 + 1]; val bx = p[i * 2 + 2]; val by = p[i * 2 + 3]
+            if (!clearLine(ax, ay, bx, by, 1.5f)) {
+                val sub = astar(ax, ay, bx, by, 3f, 90f) ?: astar(ax, ay, bx, by, 3f, 250f)
+                if (sub != null) for (k in 1 until sub.size / 2 - 1) { out.add(sub[k * 2]); out.add(sub[k * 2 + 1]) }
+            }
+            out.add(bx); out.add(by)
+        }
+        return out.toFloatArray()
+    }
+
+    private fun astar(ax: Float, ay: Float, bx: Float, by: Float, cell: Float, margin: Float): FloatArray? {
         val x0 = min(ax, bx) - margin; val y0 = min(ay, by) - margin
         val w = ((abs(bx - ax) + 2 * margin) / cell).toInt() + 1; val h = ((abs(by - ay) + 2 * margin) / cell).toInt() + 1
         if (w.toLong() * h > 1_200_000L) return null
@@ -99,7 +114,7 @@ class Navigator(private val world: WorldMap) {
         while (open.isNotEmpty()) {
             val top = open.poll()!!; val k = (top and 0xffffffffL).toInt()
             if (k == g) { found = true; break }
-            if (++steps > 400_000) break
+            if (++steps > 600_000) break
             val i = k % w; val j = k / w
             for (dj in -1..1) for (di in -1..1) {
                 if (di == 0 && dj == 0) continue
